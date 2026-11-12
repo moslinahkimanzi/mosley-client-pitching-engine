@@ -832,7 +832,8 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
         parsed_endpoint = urllib.parse.urlparse(endpoint)
         if parsed_endpoint.scheme != "https" or not parsed_endpoint.hostname:
             raise HTTPException(503, "The configured OpenStreetMap discovery endpoint must use HTTPS.")
-        query = overpass_query_for(location, payload.industry)
+        place = geocode_location(location)
+        query = overpass_query_for(location, payload.industry, place["bbox"])
         req = urllib.request.Request(endpoint, data=urllib.parse.urlencode({"data": query}).encode(),
             headers={"Content-Type": "application/x-www-form-urlencoded",
                      "User-Agent": "MCAS/1.1 (user-triggered local-business discovery)",
