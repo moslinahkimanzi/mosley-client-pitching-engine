@@ -25,6 +25,7 @@ from typing import Optional
 
 from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
@@ -49,6 +50,8 @@ if IS_PROD and (len(SECRET) < 40 or SECRET.startswith("development-only")):
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="MCAS API", version="1.0.0", description="Mosley Client Acquisition System")
+(BASE / "assets").mkdir(parents=True, exist_ok=True)
+app.mount("/assets", StaticFiles(directory=BASE / "assets"), name="assets")
 origins = [x.strip() for x in os.getenv("MCAS_ALLOWED_ORIGINS", "http://localhost:8000,http://127.0.0.1:8000").split(",") if x.strip()]
 hosts = [x.strip() for x in os.getenv("MCAS_ALLOWED_HOSTS", "localhost,127.0.0.1,testserver").split(",") if x.strip()]
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts or ["localhost"])
