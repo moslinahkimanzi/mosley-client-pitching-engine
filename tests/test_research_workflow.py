@@ -61,7 +61,7 @@ class ResearchWorkflowTest(unittest.TestCase):
         drafts = client.get("/api/drafts").json()
         self.assertEqual(len(drafts), 1)
         self.assertEqual(drafts[0]["state"], "pending_approval")
-        self.assertIn("not proof", drafts[0]["body"].lower())
+        self.assertIn("does not necessarily mean", drafts[0]["body"].lower())
 
     def test_builder_prompt_requires_client_acceptance_and_uses_business_category(self):
         client, csrf = self._registered_client()
