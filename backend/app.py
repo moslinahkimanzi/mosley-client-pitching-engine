@@ -229,8 +229,8 @@ async def security_middleware(request: Request, call_next):
         category, cap = "auth", 8
     elif path == "/api/assistant/draft":
         category, cap = "ai", 6
-    elif path == "/api/research/search":
-        category, cap = "search", 20
+    elif path in {"/api/research/search", "/api/research/run"}:
+        category, cap = "search", 5
     elif path == "/api/audit-website":
         category, cap = "website", 10
     elif path.endswith("/gmail") and request.method == "POST":
@@ -314,6 +314,12 @@ class ProposalIn(BaseModel):
 
 class ResearchIn(BaseModel):
     query: str = Field(min_length=2, max_length=160)
+
+class ResearchRunIn(BaseModel):
+    location: str = Field(min_length=2, max_length=100)
+    industry: Literal["any", "restaurant", "salon", "retail", "professional", "hotel", "healthcare", "education"] = "any"
+    keywords: str = Field(default="", max_length=120)
+    max_results: int = Field(default=6, ge=1, le=12)
 
 class AIIn(BaseModel):
     lead_id: Optional[str] = None
@@ -605,7 +611,9 @@ def safe_site_fetch(initial_url):
                 res.read(2048)
                 conn.close()
                 return {"url": url, "http_status": status, "content_type": ctype,
-                        "title": None, "has_viewport_meta": None, "note": "Response is not HTML; page metadata was not analysed."}
+                        "title": None, "has_viewport_meta": None, "has_meta_description": None,
+                        "has_h1": None, "has_form": None,
+                        "note": "Response is not HTML; page metadata was not analysed."}
             body = res.read(512001)
             conn.close()
             if len(body) > 512000:
@@ -613,10 +621,14 @@ def safe_site_fetch(initial_url):
             html = body.decode("utf-8", "replace")
             match = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
             viewport = bool(re.search(r"""<meta[^>]+name=["']viewport""", html, re.I))
+            description = bool(re.search(r"""<meta[^>]+name=["']description""", html, re.I))
+            has_h1 = bool(re.search(r"<h1\b", html, re.I))
+            has_form = bool(re.search(r"<form\b", html, re.I))
             title = re.sub(r"\s+", " ", match.group(1)).strip()[:180] if match else None
             return {"url": url, "http_status": status, "content_type": ctype, "title": title,
-                    "has_viewport_meta": viewport,
-                    "note": "Lightweight technical check only; not a full SEO, accessibility, security or conversion audit."}
+                    "has_viewport_meta": viewport, "has_meta_description": description,
+                    "has_h1": has_h1, "has_form": has_form,
+                    "note": "Lightweight public-page check only; not a full SEO, accessibility, security or conversion audit."}
         except HTTPException:
             conn.close()
             raise
@@ -624,6 +636,324 @@ def safe_site_fetch(initial_url):
             conn.close()
             raise HTTPException(502, "Website could not be checked safely")
     raise HTTPException(502, "Too many redirects")
+
+
+# Local, low-volume business discovery. Results are incomplete OSM records, not proof that
+# a business does or does not have a website. Cache searches and keep result counts bounded.
+_OVERPASS_CACHE: dict[str, tuple[float, list[dict]]] = {}
+OVERPASS_DEFAULT = "https://overpass.private.coffee/api/interpreter"
+
+def overpass_query_for(location: str, industry: str) -> str:
+    safe_name = re.escape(location.strip())
+    if industry == "restaurant":
+        filters = ['nwr["name"]["amenity"~"^(restaurant|cafe|fast_food|bar|pub)$"](area.searchArea);']
+    elif industry == "salon":
+        filters = ['nwr["name"]["shop"~"^(hairdresser|beauty)$"](area.searchArea);']
+    elif industry == "retail":
+        filters = ['nwr["name"]["shop"](area.searchArea);']
+    elif industry == "professional":
+        filters = ['nwr["name"]["office"](area.searchArea);']
+    elif industry == "hotel":
+        filters = ['nwr["name"]["tourism"~"^(hotel|guest_house|hostel)$"](area.searchArea);']
+    elif industry == "healthcare":
+        filters = ['nwr["name"]["amenity"~"^(clinic|doctors|dentist|hospital)$"](area.searchArea);']
+    elif industry == "education":
+        filters = ['nwr["name"]["amenity"~"^(school|college|university|kindergarten)$"](area.searchArea);']
+    else:
+        filters = [
+            'nwr["name"]["amenity"~"^(restaurant|cafe|fast_food|bar|pub|clinic|doctors|dentist|school|college)$"](area.searchArea);',
+            'nwr["name"]["shop"](area.searchArea);',
+            'nwr["name"]["office"](area.searchArea);',
+            'nwr["name"]["tourism"~"^(hotel|guest_house|hostel)$"](area.searchArea);',
+            'nwr["name"]["craft"](area.searchArea);'
+        ]
+    return ('[out:json][timeout:25];'
+            'area["name"~"^' + safe_name + '$",i]["boundary"="administrative"]->.searchArea;'
+            '(' + ''.join(filters) + ');out center tags 50;')
+
+def business_strategy(tags: dict) -> dict:
+    amenity = str(tags.get("amenity", "")).lower()
+    shop = str(tags.get("shop", "")).lower()
+    tourism = str(tags.get("tourism", "")).lower()
+    if amenity in {"restaurant", "cafe", "fast_food", "bar", "pub"}:
+        return {
+            "type": "Mobile-first restaurant website",
+            "pages": ["Home and restaurant introduction", "Menu with categories, prices and dietary notes",
+                      "About the restaurant", "Gallery", "Location, opening hours and contact"],
+            "features": ["Tap-to-call and WhatsApp enquiry", "Map directions", "Easy-to-update menu",
+                         "Reservation enquiry flow if the restaurant accepts bookings"],
+            "roadmap": ["Confirm menu, prices, opening hours and brand assets",
+                        "Build and test the mobile menu and contact journey",
+                        "Add local search metadata and optimise food photography"]
+        }
+    if shop in {"hairdresser", "beauty"}:
+        return {
+            "type": "Salon and beauty-service website",
+            "pages": ["Home", "Treatments and services", "Price guide", "Gallery", "Location and bookings"],
+            "features": ["WhatsApp or booking enquiry", "Service descriptions and price ranges",
+                         "Gallery using approved images", "Opening hours and map directions"],
+            "roadmap": ["Confirm services, prices and booking process",
+                        "Create service pages and mobile booking calls to action",
+                        "Optimise images and local business details"]
+        }
+    if shop:
+        return {
+            "type": "Retail catalogue website",
+            "pages": ["Home and featured products", "Product categories", "Product details",
+                      "Delivery and returns information", "Contact"],
+            "features": ["Product catalogue", "WhatsApp product enquiries", "Stock and price update workflow",
+                         "Online checkout only if requested and scoped"],
+            "roadmap": ["Collect approved product data and photography",
+                        "Build searchable categories and enquiry flow",
+                        "Add checkout only after payment and delivery requirements are agreed"]
+        }
+    if tourism:
+        return {
+            "type": "Hospitality website",
+            "pages": ["Home", "Rooms and facilities", "Gallery", "Rates and policies",
+                      "Location and booking enquiries"],
+            "features": ["Room / service information", "Booking enquiry", "Map and contact details"],
+            "roadmap": ["Confirm facilities, rates and availability process",
+                        "Build mobile-first pages and enquiry flow",
+                        "Optimise photography and local search metadata"]
+        }
+    if amenity in {"clinic", "doctors", "dentist", "hospital"}:
+        return {
+            "type": "Healthcare practice website",
+            "pages": ["Home", "Treatments and services", "Practitioner information",
+                      "Appointment enquiry", "Location and patient FAQs"],
+            "features": ["Appointment request", "Verified practitioner credentials",
+                         "Privacy-conscious forms and clear contact information"],
+            "roadmap": ["Validate qualifications and service information",
+                        "Build accessible, privacy-conscious pages",
+                        "Test appointment and contact workflows"]
+        }
+    return {
+        "type": "Professional or local-business website",
+        "pages": ["Home and value proposition", "Services", "About and credentials",
+                  "Work examples or case studies with permission", "Contact / enquiry"],
+        "features": ["Mobile enquiry form", "Click-to-call / WhatsApp", "Clear service-area information",
+                     "Search-friendly page titles and metadata"],
+        "roadmap": ["Confirm target customers and service offering",
+                    "Build the essential pages and enquiry journey",
+                    "Test mobile usability, accessibility and performance"]
+    }
+
+def make_outreach_copy(name: str, location: str, website_state: str, audit: dict,
+                       strategy: dict, contact_email: Optional[str]) -> tuple[str, str]:
+    subject = "A website idea for " + name
+    if website_state == "not_listed":
+        evidence_line = ("I found your public business listing, but it did not include an official website link. "
+                         "That does not necessarily mean you do not have a website, so I wanted to check first.")
+    elif website_state == "broken":
+        evidence_line = ("I checked the website listed for your business and it returned HTTP "
+                         + str(audit.get("http_status")) + " during my check. This may be temporary, "
+                         "but it seemed worth flagging.")
+        subject = "A website issue I noticed for " + name
+    elif website_state == "needs_improvement":
+        observations = []
+        if audit.get("has_viewport_meta") is False:
+            observations.append("I could not find a mobile viewport setting in the page HTML")
+        if audit.get("has_meta_description") is False:
+            observations.append("I could not find a meta description")
+        if audit.get("title") is None:
+            observations.append("I could not detect a page title")
+        evidence_line = ("I ran a limited technical check on the public website. " +
+                         ("; ".join(observations) + "." if observations else "There may be room to improve the customer journey.") +
+                         " This was not a full audit.")
+    else:
+        evidence_line = ("I found your public business listing while researching " + location +
+                         ". I have not confirmed a specific website problem, so I do not want to make assumptions.")
+    body = ("Hello " + name + " team,\n\n"
+            "I came across your business while researching " + location + ". " + evidence_line + "\n\n"
+            "I build practical, mobile-friendly websites that help customers understand what a business offers "
+            "and take the next step. For your business, I would suggest starting with a "
+            + strategy["type"].lower() + ", including " + ", ".join(strategy["pages"][:3]).lower()
+            + ", and a clear contact or enquiry path.\n\n"
+            "Would you be open to a short conversation? I can share a tailored outline and a clear scope "
+            "before you decide whether it is useful.\n\n"
+            "Best regards,\nMosley | Web Developer\n\n"
+            "If this is not relevant, let me know and I will not follow up.")
+    return subject, body
+
+@app.post("/api/research/run")
+def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
+    location = payload.location.strip()
+    if not location or not re.search(r"[A-Za-z0-9]", location):
+        raise HTTPException(422, "Enter a specific town, city or administrative area.")
+    cache_key = location.casefold() + "|" + payload.industry
+    cached = _OVERPASS_CACHE.get(cache_key)
+    elements = cached[1] if cached and time.time() - cached[0] < 900 else None
+    if elements is None:
+        endpoint = os.getenv("MCAS_OVERPASS_ENDPOINT", OVERPASS_DEFAULT)
+        parsed_endpoint = urllib.parse.urlparse(endpoint)
+        if parsed_endpoint.scheme != "https" or not parsed_endpoint.hostname:
+            raise HTTPException(503, "The configured OpenStreetMap discovery endpoint must use HTTPS.")
+        query = overpass_query_for(location, payload.industry)
+        req = urllib.request.Request(endpoint, data=urllib.parse.urlencode({"data": query}).encode(),
+            headers={"Content-Type": "application/x-www-form-urlencoded",
+                     "User-Agent": "MCAS/1.1 (user-triggered local-business discovery)",
+                     "Accept": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=35) as response:
+                data = json.loads(response.read(2_000_000))
+            elements = data.get("elements", [])
+            _OVERPASS_CACHE[cache_key] = (time.time(), elements)
+        except Exception:
+            raise HTTPException(502, "OpenStreetMap discovery is temporarily unavailable. Try again later or use manual web search.")
+    discovered = []
+    saved_count = 0
+    for element in elements[:payload.max_results]:
+        tags = element.get("tags") or {}
+        name = str(tags.get("name", "")).strip()
+        if not name:
+            continue
+        raw_website = tags.get("website") or tags.get("contact:website") or tags.get("url")
+        website = None
+        audit = {}
+        website_state = "not_listed"
+        if raw_website:
+            website = str(raw_website).strip()
+            if not re.match(r"^https?://", website, re.I):
+                website = "https://" + website
+            try:
+                audit = safe_site_fetch(website)
+                status = int(audit.get("http_status") or 0)
+                if status in {404, 410, 500, 502, 503, 504}:
+                    website_state = "broken"
+                elif status in {401, 403, 429}:
+                    website_state = "access_restricted"
+                elif 200 <= status < 400:
+                    website_state = "needs_improvement" if (
+                        audit.get("has_viewport_meta") is False or
+                        audit.get("has_meta_description") is False or
+                        audit.get("title") is None
+                    ) else "working"
+                else:
+                    website_state = "needs_review"
+            except HTTPException:
+                website_state = "needs_review"
+        osm_type = str(element.get("type", "node"))
+        osm_id = str(element.get("id", ""))
+        source_url = "https://www.openstreetmap.org/" + osm_type + "/" + osm_id
+        email = tags.get("contact:email") or tags.get("email")
+        if email and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", str(email)):
+            email = None
+        phone = tags.get("contact:phone") or tags.get("phone")
+        strategy = business_strategy(tags)
+        facts = ["Discovered in OpenStreetMap public data; verify the business is still operating."]
+        if website_state == "not_listed":
+            facts.append("No website URL was listed in this OpenStreetMap record. This is not proof that the business has no website.")
+        elif website_state == "broken":
+            facts.append("The listed website returned HTTP " + str(audit.get("http_status")) + " during this check.")
+        elif website_state == "needs_improvement":
+            findings = []
+            if audit.get("has_viewport_meta") is False: findings.append("mobile viewport metadata not detected")
+            if audit.get("has_meta_description") is False: findings.append("meta description not detected")
+            if audit.get("title") is None: findings.append("page title not detected")
+            facts.append("Limited page check: " + ", ".join(findings) + ".")
+        elif website_state == "access_restricted":
+            facts.append("The website restricted this automated check; no broken-site conclusion was made.")
+        elif website_state == "needs_review":
+            facts.append("The website could not be reliably checked; do not describe it as broken.")
+        elif audit:
+            facts.append("Website responded with HTTP " + str(audit.get("http_status")) + ".")
+        if tags.get("addr:street") or tags.get("addr:city"):
+            facts.append("Public address tags are present in the source listing.")
+        evidence = " ".join(facts) + " Source: " + source_url
+        if audit.get("url"):
+            evidence += " Website checked: " + audit["url"] + " (limited technical observations only)."
+        with db() as c:
+            existing = c.execute("SELECT id FROM leads WHERE user_id=? AND lower(name)=lower(?) AND lower(market)=lower(?)",
+                                  (user["id"], name, location)).fetchone()
+            if existing:
+                discovered.append({"name": name, "lead_id": existing["id"], "duplicate": True,
+                    "website": website, "website_state": website_state, "evidence": evidence,
+                    "source_url": source_url, "recommendation": strategy["type"],
+                    "pages": strategy["pages"], "draft_created": False, "proposal_created": False})
+                continue
+            lead_id = secrets.token_urlsafe(15)
+            stamp = now()
+            c.execute("""INSERT INTO leads(id,user_id,name,website,market,evidence,status,score,created_at,updated_at,
+                contact_email,contact_phone,source_url,do_not_contact) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0)""",
+                (lead_id, user["id"], name, website, location, evidence, "Unverified", 0, stamp, stamp,
+                 str(email) if email else None, str(phone) if phone else None, source_url))
+            title = "Website opportunity plan — " + name
+            proposal = ("WEBSITE OPPORTUNITY PLAN\n\nBusiness: " + name + "\nLocation: " + location +
+                "\nDiscovery source: OpenStreetMap public listing (" + source_url + ")\n\n"
+                "1. VERIFIED DISCOVERY NOTES\n" + evidence + "\n\n"
+                "2. RECOMMENDED DIRECTION\n" + strategy["type"] + "\n\n"
+                "3. SUGGESTED PAGES\n- " + "\n- ".join(strategy["pages"]) + "\n\n"
+                "4. SUGGESTED FEATURES\n- " + "\n- ".join(strategy["features"]) + "\n\n"
+                "5. IMPLEMENTATION ROADMAP\n- " + "\n- ".join(strategy["roadmap"]) + "\n\n"
+                "6. SCOPE TO CONFIRM WITH THE CLIENT\nContent, brand assets, domain, hosting, budget, delivery timeline, "
+                "maintenance, integrations and who will update the site.\n\n"
+                "7. COMMERCIALS\nPrice and dates to be agreed after discovery. Do not invent a quote or promise results.\n\n"
+                "IMPORTANT: OpenStreetMap records are incomplete. 'Website not listed' does not prove there is no website. "
+                "Confirm the business identity and all observations before sharing this proposal.")
+            proposal_id = secrets.token_urlsafe(15)
+            c.execute("INSERT INTO proposals VALUES(?,?,?,?,?,?,?,?)",
+                (proposal_id, user["id"], lead_id, title, proposal, "draft", stamp, stamp))
+            subject, body = make_outreach_copy(name, location, website_state, audit, strategy, str(email) if email else None)
+            draft_id = secrets.token_urlsafe(15)
+            c.execute("""INSERT INTO drafts(id,user_id,lead_id,kind,subject,body,state,created_at,to_email)
+                VALUES(?,?,?,?,?,?,?,?,?)""",
+                (draft_id, user["id"], lead_id, "Cold email", subject, body, "pending_approval", stamp,
+                 str(email) if email else None))
+            audit(c, user["id"], "research.prospect_prepared", {"lead_id": lead_id,
+                "website_state": website_state, "draft_id": draft_id, "proposal_id": proposal_id})
+            saved_count += 1
+        discovered.append({"name": name, "lead_id": lead_id, "duplicate": False,
+            "website": website, "website_state": website_state, "evidence": evidence,
+            "source_url": source_url, "contact_email": str(email) if email else None,
+            "recommendation": strategy["type"], "pages": strategy["pages"],
+            "draft_created": True, "proposal_created": True})
+    with db() as c:
+        audit(c, user["id"], "research.run", {"location": location, "industry": payload.industry,
+                                               "results": len(discovered), "saved": saved_count})
+    return {"location": location, "industry": payload.industry, "results": discovered,
+        "saved": saved_count, "source": "OpenStreetMap contributors",
+        "attribution": "© OpenStreetMap contributors — Open Database License (ODbL)",
+        "warning": "Discovery is incomplete and based on OpenStreetMap tags. A missing website tag is not proof that no website exists. Review every business, website finding, contact detail, proposal and email before outreach."}
+
+@app.post("/api/leads/{lead_id}/builder-prompt")
+def create_builder_prompt(lead_id: str, user=Depends(current_user)):
+    with db() as c:
+        lead = owned_lead(c, lead_id, user["id"])
+        if lead["status"] != "Won":
+            raise HTTPException(409, "Mark the prospect as accepted before generating a website-builder prompt.")
+    tags = {}
+    notes = (lead["evidence"] or "").lower()
+    market = lead["market"] or "the target location"
+    if any(word in notes for word in ["restaurant", "cafe", "food", "menu"]):
+        tags["amenity"] = "restaurant"
+    elif any(word in notes for word in ["salon", "hairdresser", "beauty"]):
+        tags["shop"] = "hairdresser"
+    elif any(word in notes for word in ["retail", "shop", "products"]):
+        tags["shop"] = "retail"
+    strategy = business_strategy(tags)
+    prompt = ("Act as a senior website strategist, UX designer and full-stack web developer. "
+        "Create a complete, responsive, production-minded website for " + lead["name"] + " in " + market + ".\n\n"
+        "BUSINESS CONTEXT\nUse only these confirmed discovery notes: " + (lead["evidence"] or "No verified notes supplied.") + "\n"
+        "Do not invent menu items, prices, opening hours, staff biographies, awards, reviews, testimonials, addresses or business claims. "
+        "Use clearly labelled placeholders for missing content and ask for confirmation.\n\n"
+        "RECOMMENDED DIRECTION\n" + strategy["type"] + "\n\n"
+        "PAGES\n- " + "\n- ".join(strategy["pages"]) + "\n\n"
+        "FEATURES\n- " + "\n- ".join(strategy["features"]) + "\n\n"
+        "QUALITY AND ENGINEERING REQUIREMENTS\n- Mobile-first responsive layouts and accessible keyboard navigation.\n"
+        "- Fast loading, optimised images, semantic HTML, clear page titles and metadata.\n"
+        "- Strong visual hierarchy, consistent typography, spacing and brand system.\n"
+        "- Secure forms with validation, spam protection and privacy-conscious data handling.\n"
+        "- Functional navigation, working links, clear calls to action and helpful empty/error states.\n"
+        "- No fabricated reviews, fake metrics or unapproved copyrighted images.\n"
+        "- Include a simple content update/handover approach so the business can maintain its information.\n"
+        "- Explain any required paid services before using them; prefer free/local development and avoid secret keys in client code.\n\n"
+        "DELIVERY\nProvide the complete source code, project structure, setup instructions, environment-variable example, "
+        "testing steps and deployment guidance. Explain assumptions and list the business information still needed before launch.")
+    with db() as c:
+        audit(c, user["id"], "builder_prompt.generated", {"lead_id": lead_id})
+    return {"lead_id": lead_id, "business": lead["name"], "prompt": prompt,
+            "note": "Client acceptance is recorded, but confirm the final scope, content, budget and delivery terms before starting build work."}
 
 @app.post("/api/audit-website")
 def audit_website(payload: dict, user=Depends(current_user)):
@@ -705,7 +1035,7 @@ def integration_status(user=Depends(current_user)):
 def gmail_status(user=Depends(current_user)):
     with db() as c:
         ok = c.execute("SELECT 1 FROM integrations WHERE user_id=? AND provider='gmail'", (user["id"],)).fetchone()
-    return {"configured": gmail_ready(), "connected": bool(ok), "capability": "Create Gmail drafts only; MCAS never sends messages automatically."}
+    return {"configured": gmail_ready(), "connected": bool(ok), "capability": "Create Gmail drafts only. MCAS does not read, search, list or monitor incoming emails, and has no send endpoint."}
 
 @app.get("/api/integrations/gmail/start")
 def gmail_start(user=Depends(current_user)):
