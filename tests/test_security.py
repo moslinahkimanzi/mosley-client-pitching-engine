@@ -94,6 +94,18 @@ class ApiSecurityTest(unittest.TestCase):
                 headers={"X-CSRF-Token": csrf})
             self.assertEqual(draft.status_code, 403, draft.text)
 
+    def test_expensive_ai_endpoint_is_rate_limited(self):
+        with TestClient(app) as client:
+            self.register(client)
+            token = self.csrf(client)
+            payload = {"task": "email", "prospect_name": "Test business"}
+            statuses = [client.post("/api/assistant/draft", json=payload,
+                headers={"X-CSRF-Token": token}).status_code for _ in range(6)]
+            self.assertTrue(all(code == 503 for code in statuses), statuses)
+            limited = client.post("/api/assistant/draft", json=payload,
+                headers={"X-CSRF-Token": token})
+            self.assertEqual(limited.status_code, 429)
+
     def test_security_headers_are_present(self):
         with TestClient(app) as client:
             response = client.get("/api/health")
