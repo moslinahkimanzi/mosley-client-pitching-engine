@@ -714,6 +714,37 @@ def overpass_query_for(location: str, industry: str, bbox: Optional[tuple] = Non
             'area["name"~"^' + safe_name + '$",i]["boundary"="administrative"]->.searchArea;'
             '(' + ''.join(filters) + ');out center tags 100;')
 
+def opportunity_score(tags: dict, website_state: str, website_audit: dict,
+                      email: Optional[str], phone: Optional[str]) -> tuple[int, list[str]]:
+    """Transparent heuristic priority; not a claim that a business wants a website."""
+    score = 0
+    reasons = []
+    if website_state == "broken":
+        score += 35; reasons.append("listed website returned an error")
+    elif website_state == "needs_improvement":
+        score += 28; reasons.append("limited page checks found missing technical basics")
+    elif website_state == "not_listed":
+        score += 12; reasons.append("website URL is not listed; existence remains unverified")
+    elif website_state == "access_restricted":
+        score += 8; reasons.append("website check was restricted")
+    elif website_state == "needs_review":
+        score += 5; reasons.append("website could not be verified")
+    else:
+        score += 3; reasons.append("listed website responded to a lightweight check")
+    if email:
+        score += 15; reasons.append("public contact email listed")
+    if phone:
+        score += 10; reasons.append("public phone number listed")
+    if any(tags.get(k) for k in ("addr:street", "addr:city", "addr:postcode")):
+        score += 5; reasons.append("public address details listed")
+    if website_audit.get("has_viewport_meta") is False:
+        score += 8; reasons.append("mobile viewport metadata not detected")
+    if website_audit.get("has_h1") is False:
+        score += 4; reasons.append("main heading not detected")
+    if website_audit.get("has_form") is False and website_state in {"working", "needs_improvement"}:
+        score += 3; reasons.append("no HTML form detected on the fetched page")
+    return min(100, score), reasons
+
 def business_strategy(tags: dict) -> dict:
     amenity = str(tags.get("amenity", "")).lower()
     shop = str(tags.get("shop", "")).lower()
@@ -891,7 +922,9 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             email = None
         phone = tags.get("contact:phone") or tags.get("phone")
         strategy = business_strategy(tags)
-        facts = ["Discovered in OpenStreetMap public data; verify the business is still operating."]
+        score, score_reasons = opportunity_score(tags, website_state, website_audit, str(email) if email else None, str(phone) if phone else None)
+        facts = ["Discovered in OpenStreetMap public data; verify the business is still operating.",
+                 "Heuristic opportunity priority: " + str(score) + "/100; this is a research signal, not buying intent."]
         for category_key in ("amenity", "shop", "office", "tourism", "craft"):
             if tags.get(category_key):
                 facts.append("OpenStreetMap category " + category_key + ": " + str(tags[category_key]) + ".")
@@ -923,13 +956,13 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                 discovered.append({"name": name, "lead_id": existing["id"], "duplicate": True,
                     "website": website, "website_state": website_state, "evidence": evidence,
                     "source_url": source_url, "recommendation": strategy["type"],
-                    "pages": strategy["pages"], "draft_created": False, "proposal_created": False})
+                    "pages": strategy["pages"], "opportunity_score": score, "score_reasons": score_reasons, "draft_created": False, "proposal_created": False})
                 continue
             lead_id = secrets.token_urlsafe(15)
             stamp = now()
             c.execute("""INSERT INTO leads(id,user_id,name,website,market,evidence,status,score,created_at,updated_at,
                 contact_email,contact_phone,source_url,do_not_contact) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0)""",
-                (lead_id, user["id"], name, website, location, evidence, "Unverified", 0, stamp, stamp,
+                (lead_id, user["id"], name, website, location, evidence, "Unverified", score, stamp, stamp,
                  str(email) if email else None, str(phone) if phone else None, source_url))
             title = "Website opportunity plan — " + name
             proposal = ("WEBSITE OPPORTUNITY PLAN\n\nBusiness: " + name + "\nLocation: " + location +
@@ -972,13 +1005,22 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
         discovered.append({"name": name, "lead_id": lead_id, "duplicate": False,
             "website": website, "website_state": website_state, "evidence": evidence,
             "source_url": source_url, "contact_email": str(email) if email else None,
-            "recommendation": strategy["type"], "pages": strategy["pages"],
+            "recommendation": strategy["type"], "pages": strategy["pages"], "opportunity_score": score, "score_reasons": score_reasons,
+            "website_audit": website_audit,
             "draft_created": True, "proposal_created": True,
             "gmail_draft_created": gmail_draft_created})
     with db() as c:
         audit(c, user["id"], "research.run", {"location": location, "industry": payload.industry,
                                                "results": len(discovered), "saved": saved_count})
-    return {"location": location, "industry": payload.industry, "results": discovered,
+    state_counts = {}
+    for item in discovered:
+        state_counts[item["website_state"]] = state_counts.get(item["website_state"], 0) + 1
+    ranked = sorted((x.get("opportunity_score", 0) for x in discovered), reverse=True)
+    return {"location": location, "resolved_location": place["display_name"],
+        "industry": payload.industry, "results": discovered,
+        "summary": {"reviewed": len(discovered), "new_prospects_saved": saved_count,
+                    "website_states": state_counts,
+                    "highest_opportunity_score": ranked[0] if ranked else 0},
         "saved": saved_count, "source": "OpenStreetMap contributors",
         "attribution": "© OpenStreetMap contributors — Open Database License (ODbL)",
         "warning": "Discovery is incomplete and based on OpenStreetMap tags. A missing website tag is not proof that no website exists. Review every business, website finding, contact detail, proposal and email before outreach."}
