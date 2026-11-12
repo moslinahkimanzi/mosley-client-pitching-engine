@@ -327,7 +327,7 @@ def register(payload: RegisterIn, response: Response):
     except sqlite3.IntegrityError:
         raise HTTPException(409, "An account with this email already exists")
     response.set_cookie(COOKIE, session, max_age=SESSION_SECONDS, httponly=True,
-                        secure=IS_PROD, samesite="strict", path="/")
+                        secure=IS_PROD, samesite="lax", path="/")
     set_csrf(response)
     return {"id": uid, "email": email}
 
@@ -353,7 +353,7 @@ def logout(request: Request, response: Response):
     if token:
         with db() as c:
             c.execute("DELETE FROM sessions WHERE token_hash=?", (token_hash(token),))
-    response.delete_cookie(COOKIE, path="/", httponly=True, secure=IS_PROD, samesite="strict")
+    response.delete_cookie(COOKIE, path="/", httponly=True, secure=IS_PROD, samesite="lax")
     response.delete_cookie(CSRF_COOKIE, path="/", secure=IS_PROD, samesite="strict")
     return {"ok": True}
 
@@ -643,6 +643,12 @@ def fernet():
         return Fernet(os.getenv("MCAS_ENCRYPTION_KEY").encode())
     except Exception:
         raise HTTPException(500, "MCAS_ENCRYPTION_KEY must be a valid Fernet key")
+
+@app.get("/api/integrations/status")
+def integration_status(user=Depends(current_user)):
+    return {"web_search_configured": bool(os.getenv("BRAVE_SEARCH_API_KEY")),
+            "ai_configured": bool(os.getenv("AI_API_BASE_URL") and os.getenv("AI_API_KEY") and os.getenv("AI_MODEL")),
+            "gmail_configured": gmail_ready()}
 
 @app.get("/api/integrations/gmail/status")
 def gmail_status(user=Depends(current_user)):
