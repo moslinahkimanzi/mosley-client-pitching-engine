@@ -38,7 +38,7 @@ class ResearchWorkflowTest(unittest.TestCase):
                 },
             }
         ]
-        with patch.dict(mcas._OVERPASS_CACHE, {
+        with patch.object(mcas, "geocode_location", return_value={"display_name": "Nairobi, Kenya", "bbox": (-1.45, 36.65, -1.15, 37.05), "place_type": "city"}), patch.dict(mcas._OVERPASS_CACHE, {
             "nairobi|restaurant": (time.time(), elements)
         }):
             response = client.post(
@@ -55,6 +55,9 @@ class ResearchWorkflowTest(unittest.TestCase):
         result = response.json()
         self.assertEqual(result["saved"], 1)
         self.assertEqual(result["results"][0]["website_state"], "not_listed")
+        self.assertEqual(result["resolved_location"], "Nairobi, Kenya")
+        self.assertGreaterEqual(result["results"][0]["opportunity_score"], 0)
+        self.assertIn("highest_opportunity_score", result["summary"])
         self.assertTrue(result["results"][0]["proposal_created"])
         self.assertTrue(result["results"][0]["draft_created"])
         self.assertFalse(result["results"][0]["gmail_draft_created"])
@@ -120,6 +123,11 @@ class ResearchWorkflowTest(unittest.TestCase):
         capability = status.json()["capability"].lower()
         self.assertIn("does not read", capability)
         self.assertIn("no send endpoint", capability)
+
+    def test_overpass_query_uses_geocoded_bounding_box(self):
+        query = mcas.overpass_query_for("Nairobi", "restaurant", (-1.45, 36.65, -1.15, 37.05))
+        self.assertIn("(-1.450000,36.650000,-1.150000,37.050000)", query)
+        self.assertNotIn("area.searchArea", query)
 
     def test_overpass_location_input_cannot_inject_query_syntax(self):
         query = mcas.overpass_query_for('Nairobi"];(node["name"~".*', "restaurant")
