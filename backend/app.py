@@ -805,7 +805,9 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             raise HTTPException(502, "OpenStreetMap discovery is temporarily unavailable. Try again later or use manual web search.")
     discovered = []
     saved_count = 0
-    for element in elements[:payload.max_results]:
+    for element in elements:
+        if len(discovered) >= payload.max_results:
+            break
         tags = element.get("tags") or {}
         name = str(tags.get("name", "")).strip()
         if not name:
