@@ -124,6 +124,48 @@ class ResearchWorkflowTest(unittest.TestCase):
         self.assertIn("does not read", capability)
         self.assertIn("no send endpoint", capability)
 
+    def test_research_keyword_matches_meaningful_words_not_whole_phrase(self):
+        tags = {"name": "Test Italian Restaurant", "amenity": "restaurant", "cuisine": "italian"}
+        self.assertTrue(mcas.research_keyword_matches(tags, "Italian restaurants"))
+        self.assertTrue(mcas.research_keyword_matches(tags, "businesses that need websites"))
+        self.assertFalse(mcas.research_keyword_matches(tags, "dental clinic"))
+
+    def test_public_contact_email_selects_first_valid_listed_address(self):
+        tags = {"contact:email": "not-an-email; hello@example.org; second@example.org"}
+        self.assertEqual(mcas.public_contact_email(tags), "hello@example.org")
+
+    def test_candidate_priority_prefers_public_contact_and_unlisted_website(self):
+        without_site = {"name": "A", "email": "owner@example.org", "phone": "+254700000000"}
+        with_site = {"name": "B", "website": "https://example.org"}
+        self.assertGreater(mcas.research_candidate_priority(without_site),
+                           mcas.research_candidate_priority(with_site))
+
+    def test_education_business_gets_education_builder_prompt(self):
+        client, csrf = self._registered_client()
+        lead = client.post(
+            "/api/leads",
+            json={"name": "Test School", "market": "Nairobi",
+                  "evidence": "OpenStreetMap category amenity: school."},
+            headers={"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(lead.status_code, 201, lead.text)
+        lead_id = lead.json()["id"]
+        csrf = client.get("/api/auth/csrf").json()["csrf_token"]
+        accepted = client.patch(
+            f"/api/leads/{lead_id}",
+            json={"name": "Test School", "website": None, "market": "Nairobi",
+                  "evidence": "OpenStreetMap category amenity: school.", "status": "Won",
+                  "contact_email": None, "contact_phone": None, "source_url": None,
+                  "do_not_contact": False},
+            headers={"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        csrf = client.get("/api/auth/csrf").json()["csrf_token"]
+        generated = client.post(f"/api/leads/{lead_id}/builder-prompt",
+                                headers={"X-CSRF-Token": csrf})
+        self.assertEqual(generated.status_code, 200, generated.text)
+        self.assertIn("education and training website", generated.json()["prompt"].lower())
+
     def test_overpass_query_uses_geocoded_bounding_box(self):
         query = mcas.overpass_query_for("Nairobi", "restaurant", (-1.45, 36.65, -1.15, 37.05))
         self.assertIn("(-1.450000,36.650000,-1.150000,37.050000)", query)
