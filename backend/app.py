@@ -305,7 +305,7 @@ def get_csrf(response: Response):
 def validate_email(email: Optional[str]):
     if email is None or email == "":
         return
-    if not re.fullmatch(r"[^\\s@]+@[^\\s@]+\\.[^\\s@]+", email):
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
         raise HTTPException(422, "Enter a valid email address")
 
 @app.post("/api/auth/register", status_code=201)
@@ -575,8 +575,8 @@ def safe_site_fetch(initial_url):
                 body = body[:512000]
             html = body.decode("utf-8", "replace")
             match = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
-            viewport = bool(re.search(r'<meta[^>]+name=["\\']viewport', html, re.I))
-            title = re.sub(r"\\s+", " ", match.group(1)).strip()[:180] if match else None
+            viewport = bool(re.search(r"""<meta[^>]+name=["']viewport""", html, re.I))
+            title = re.sub(r"\s+", " ", match.group(1)).strip()[:180] if match else None
             return {"url": url, "http_status": status, "content_type": ctype, "title": title,
                     "has_viewport_meta": viewport,
                     "note": "Lightweight technical check only; not a full SEO, accessibility, security or conversion audit."}
