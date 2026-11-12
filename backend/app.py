@@ -641,9 +641,44 @@ def safe_site_fetch(initial_url):
 # Local, low-volume business discovery. Results are incomplete OSM records, not proof that
 # a business does or does not have a website. Cache searches and keep result counts bounded.
 _OVERPASS_CACHE: dict[str, tuple[float, list[dict]]] = {}
-OVERPASS_DEFAULT = "https://overpass-api.de/api/interpreter"
+OVERPASS_DEFAULT = "https://overpass.private.coffee/api/interpreter"
 
-def overpass_query_for(location: str, industry: str) -> str:
+
+_GEOCODE_CACHE: dict[str, tuple[float, dict]] = {}
+
+def geocode_location(location: str) -> dict:
+    """Resolve a named place once and cache its bounding box for 24 hours."""
+    key = location.strip().casefold()
+    cached = _GEOCODE_CACHE.get(key)
+    if cached and time.time() - cached[0] < 86400:
+        return cached[1]
+    params = urllib.parse.urlencode({"q": location, "format": "jsonv2", "limit": 1, "addressdetails": 1})
+    req = urllib.request.Request("https://nominatim.openstreetmap.org/search?" + params,
+        headers={"User-Agent": "MCAS/1.2 (user-triggered business research)",
+                 "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=12) as response:
+            rows = json.loads(response.read(300_000))
+        if not rows:
+            raise HTTPException(404, "That place could not be found. Try a more specific town, suburb or city.")
+        row = rows[0]
+        raw_box = row.get("boundingbox") or []
+        if len(raw_box) != 4:
+            raise ValueError("Missing place bounding box")
+        south, north, west, east = (float(v) for v in raw_box)
+        if north - south > 3.0 or east - west > 3.0:
+            raise HTTPException(422, "That location is too broad. Enter a town, city or neighbourhood instead.")
+        result = {"display_name": row.get("display_name", location),
+                  "bbox": (south, west, north, east),
+                  "place_type": row.get("type") or row.get("addresstype") or "place"}
+        _GEOCODE_CACHE[key] = (time.time(), result)
+        return result
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(502, "Place lookup is temporarily unavailable. Please wait and try again.")
+
+def overpass_query_for(location: str, industry: str, bbox: Optional[tuple] = None) -> str:
     safe_name = re.sub(r"[^\w\s,'-]", "", location.strip(), flags=re.UNICODE).strip()
     if not safe_name:
         raise HTTPException(422, "Use a town, city or area name containing letters or numbers.")
@@ -669,9 +704,15 @@ def overpass_query_for(location: str, industry: str) -> str:
             'nwr["name"]["tourism"~"^(hotel|guest_house|hostel)$"](area.searchArea);',
             'nwr["name"]["craft"](area.searchArea);'
         ]
+    if bbox:
+        south, west, north, east = bbox
+        bounds = "({:.6f},{:.6f},{:.6f},{:.6f})".format(south, west, north, east)
+        return '[out:json][timeout:35];(' + ''.join(
+            item.replace('(area.searchArea)', bounds) for item in filters
+        ) + ');out center tags 100;'
     return ('[out:json][timeout:25];'
             'area["name"~"^' + safe_name + '$",i]["boundary"="administrative"]->.searchArea;'
-            '(' + ''.join(filters) + ');out center tags 50;')
+            '(' + ''.join(filters) + ');out center tags 100;')
 
 def business_strategy(tags: dict) -> dict:
     amenity = str(tags.get("amenity", "")).lower()
