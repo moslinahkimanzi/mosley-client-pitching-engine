@@ -848,6 +848,9 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
         phone = tags.get("contact:phone") or tags.get("phone")
         strategy = business_strategy(tags)
         facts = ["Discovered in OpenStreetMap public data; verify the business is still operating."]
+        for category_key in ("amenity", "shop", "office", "tourism", "craft"):
+            if tags.get(category_key):
+                facts.append("OpenStreetMap category " + category_key + ": " + str(tags[category_key]) + ".")
         if website_state == "not_listed":
             facts.append("No website URL was listed in this OpenStreetMap record. This is not proof that the business has no website.")
         elif website_state == "broken":
