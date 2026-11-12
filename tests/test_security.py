@@ -23,6 +23,11 @@ class SecurityHelpersTest(unittest.TestCase):
             resolve_public("127.0.0.1")
 
 class ApiSecurityTest(unittest.TestCase):
+    def setUp(self):
+        # Reset per-process throttling between isolated test cases.
+        from backend.app import _rate_windows
+        _rate_windows.clear()
+
     def csrf(self, client):
         response = client.get("/api/auth/csrf")
         self.assertEqual(response.status_code, 200)

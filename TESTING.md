@@ -26,6 +26,14 @@ Open http://127.0.0.1:8000 in Firefox. Health endpoint: http://127.0.0.1:8000/ap
 ## C. Functional walkthrough
 
 0. Open Website advisor. Generate recommendations for at least three business types (for example, restaurant, professional services and retail). Check that the recommended site type, pages, features, quality standards and improvement roadmap change with the selected inputs. Confirm the output is described as guidance, not a verified audit or guaranteed outcome.
+0a. Open Research → Research command centre. Search a named town or city (for example, Nairobi), choose a category and start with 3 results. Confirm results become unverified prospects and each new prospect gets a saved website plan, proposal and pending email draft. Confirm a missing website URL is labelled as "not listed", not proof of no website. Verify OpenStreetMap attribution appears.
+0b. If Gmail is configured and an OpenStreetMap record contains a valid public contact email, confirm MCAS creates a Gmail draft only. Check Gmail Drafts; confirm nothing was sent. If no public email is listed, confirm the draft remains in MCAS.
+0c. Mark a test prospect as Client accepted / Won. Confirm Generate AI-builder prompt appears, and that the prompt includes the business category, proposed pages, features, quality and instructions not to fabricate content.
+0d. In Reply Assistant, manually paste a sample customer message and optionally enter the customer's email address. Save it, then create a Gmail draft from Saved Drafts. Confirm the generated reply is automatically saved to MCAS as pending approval. Confirm MCAS never asks for or reads inbox contents.
+0a. Open Research → Research command centre. Search a named town or city (for example, Nairobi), choose a category and start with 3 results. Confirm results become unverified prospects and each new prospect gets a saved website plan, proposal and pending email draft. Confirm a missing website URL is labelled as "not listed", not proof of no website. Verify OpenStreetMap attribution appears.
+0b. If Gmail is configured and an OpenStreetMap record contains a valid public contact email, confirm MCAS creates a Gmail draft only. Check Gmail Drafts; confirm nothing was sent. If no public email is listed, confirm the draft remains in MCAS.
+0c. Mark a test prospect as Client accepted / Won. Confirm Generate AI-builder prompt appears, and that the prompt includes the business category, proposed pages, features, quality and instructions not to fabricate content.
+0d. In Reply Assistant, manually paste a sample customer message and optionally enter the customer's email address. Save it, then create a Gmail draft from Saved Drafts. Confirm MCAS never asks for or reads inbox contents.
 
 1. Register a fresh test account with a unique email and a strong, unique password.
 2. Add a test business with website, source URL, evidence and contact email. Confirm dashboard counts update.
@@ -52,7 +60,7 @@ Manual website-check tests: try http://127.0.0.1, http://localhost, a private LA
 
 - Brave Search: configure BRAVE_SEARCH_API_KEY on the server, restart and test a discovery query. Verify source links and facts yourself.
 - AI: configure AI_API_BASE_URL, AI_API_KEY and AI_MODEL on the server. Test email, reply and proposal drafting. Treat every generated claim as untrusted until verified.
-- Gmail: configure Google OAuth client ID/secret/redirect URI and MCAS_ENCRYPTION_KEY. Connect a test Gmail account, save a draft with a recipient and click Create Gmail draft. Confirm it appears in Gmail Drafts and has not been sent. Test disconnect.
+- Gmail: configure Google OAuth client ID/secret/redirect URI and MCAS_ENCRYPTION_KEY. Connect a test Gmail account, save a draft with a recipient and click Create Gmail draft. Confirm it appears in Gmail Drafts and has not been sent. Also test auto-draft-on-research using a safe test address. Verify no inbox-reading scope is requested and there are no message-list/get/send application routes. Test disconnect.
 - Provider tests may incur usage charges. Keep credentials on the server, never in the repository or browser.
 
 ## F. Stop before publishing if

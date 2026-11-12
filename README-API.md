@@ -36,10 +36,11 @@ Open Firefox at http://127.0.0.1:8000. Create an account on the welcome screen. 
 - Per-account filtering for prospects, drafts, follow-ups, proposals and integration tokens.
 - Prospect CRUD, evidence notes, source URL, CRM status and do-not-contact flag.
 - Rules-based Website Strategy Advisor: recommends a site type, sitemap, useful features, quality standards and an improvement roadmap based on business type, goals, current online presence, budget range and verified notes. Recommendations are starting points and must be validated with the client.
-- Optional Brave Search integration. Results are unverified discovery records and must be checked before outreach.
-- Public website quick-check with HTTP status, title and viewport tag. Outbound connections are pinned to validated public IPs; redirects are revalidated; private/reserved IPs and non-standard ports are blocked.
+- User-triggered local business research through a bounded OpenStreetMap / Overpass query. It can find map-listed businesses, check any website listed in the map record, classify limited website observations, and automatically save a tailored website plan, proposal and pending outreach draft. Results are incomplete; no website URL in a map record does not prove no website exists.
+- Public website checks include HTTP status, title, mobile viewport metadata, meta description, H1 and form presence. Outbound connections are pinned to validated public IPs; redirects are revalidated; private/reserved IPs and non-standard ports are blocked. This remains a lightweight check, not a full audit.
+- Accepted-client workflow: mark a prospect as Won to generate a detailed website-builder prompt using its recorded business category and verified notes.
 - Evidence-led template email generation, optional OpenAI-compatible AI provider, reply assistance, proposals and saved drafts.
-- Gmail OAuth connection with encrypted refresh-token storage and Gmail draft creation only. MCAS does not send messages.
+- Gmail OAuth connection with encrypted refresh-token storage. MCAS creates drafts only; it does not read, search, list or monitor incoming messages and exposes no send endpoint. When Gmail is already connected and research finds a public contact email, a Gmail draft is created automatically; otherwise the draft stays in MCAS for review. Customer replies must be pasted manually into Reply Assistant. Google documents gmail.compose as draft management plus send-capable at API scope level, but this application only calls the drafts.create endpoint.
 - Follow-up task tracking, audit events, metrics and JSON workspace export.
 - Security headers, Trusted Host validation, basic per-process rate limiting, request-size cap, Docker health check, CI tests and dependency audit workflow.
 
@@ -68,7 +69,7 @@ Set `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, and `GMAIL_REDIRECT_URI` on the se
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ``
 
-Set the output as `MCAS_ENCRYPTION_KEY`. Enable Gmail API for the Google project. The scope requested is `gmail.compose`; this integration creates drafts and does not send email.
+Set the output as `MCAS_ENCRYPTION_KEY`. Enable Gmail API for the Google project. The only scope requested is `https://www.googleapis.com/auth/gmail.compose`. MCAS does not request `gmail.readonly`, `gmail.modify`, `gmail.metadata`, or `https://mail.google.com/`; it does not read incoming messages and has no send operation. Important: Google's `gmail.compose` scope itself is capable of managing drafts and sending mail at API-permission level. MCAS uses it only for the Gmail `users.drafts.create` method. Review this permission trade-off before connecting a business Gmail account.
 
 ## Test before publishing
 
@@ -96,6 +97,6 @@ Before accepting public users or customer data:
 6. Add real payment-provider checkout, signed webhook verification, subscription lifecycle handling and tax/receipt requirements before enabling paid plans. Billing is intentionally disabled.
 7. Add provider-specific live integration tests with credentials in a non-production staging environment.
 
-Other boundaries: there is no whole-internet crawler, no automatic contact harvesting, no automatic email sending, no automatic follow-up sending, and no guarantee that every public business record is complete. Search is provider-backed and optional. Website checks are lightweight technical observations, not full SEO, accessibility or security audits.
+Other boundaries: MCAS is not a whole-internet crawler. OpenStreetMap coverage depends on community map records and administrative-area matching; the Overpass public server can be unavailable or rate-limited. It does not harvest private contacts. It never sends outreach or follow-ups. It does not read incoming Gmail messages; customer replies must be supplied manually. Automated proposals and emails are rules-based templates unless you explicitly use the separately configured AI assistant, which may incur provider charges. Website checks are lightweight technical observations, not full SEO, accessibility or security audits.
 
 Never commit `.env`, OAuth credentials, encryption keys, database files or customer exports.
