@@ -100,3 +100,12 @@ Before accepting public users or customer data:
 Other boundaries: MCAS is not a whole-internet crawler. OpenStreetMap coverage depends on community map records and administrative-area matching; the Overpass public server can be unavailable or rate-limited. It does not harvest private contacts. It never sends outreach or follow-ups. It does not read incoming Gmail messages; customer replies must be supplied manually. Automated proposals and emails are rules-based templates unless you explicitly use the separately configured AI assistant, which may incur provider charges. Website checks are lightweight technical observations, not full SEO, accessibility or security audits.
 
 Never commit `.env`, OAuth credentials, encryption keys, database files or customer exports.
+
+
+## Research accuracy and prioritisation (completion branch)
+
+The user-triggered Research Command Centre now resolves the entered town/city/neighbourhood with OpenStreetMap Nominatim, then searches the returned local bounding box in Overpass. This avoids relying only on an exact administrative-boundary name match. Place lookups are cached in process for 24 hours; business discovery results are cached for 15 minutes. A very broad place result is rejected so a country/continent query does not trigger an unexpectedly large scan.
+
+Each research result includes an explainable opportunity-priority score (0–100) and the signals that contributed to it. The score ranks research work; it does not represent buying intent, prove a business lacks a website, or replace human verification. The score is stored in the prospect CRM score field.
+
+For websites listed in the map record, the result displays the limited HTTP/title/mobile viewport/meta description/H1/form observations available to MCAS. This is not a full performance, SEO, accessibility, security, or conversion audit. Search coverage remains dependent on community mapping data and the public service's availability. MCAS does not claim to crawl the entire internet.
