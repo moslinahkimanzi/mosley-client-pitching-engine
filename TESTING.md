@@ -1,6 +1,6 @@
 # MCAS pre-publication test plan
 
-Use the build/production-foundation branch. Do not deploy main as the upgraded release until the pull request is reviewed and merged.
+For the current research-completion build, test branch `feature/mcas-research-completion` (it includes the prerequisite feature branches). The work is still an open draft pull request and is not in `main`; do not deploy it publicly until the changes are reviewed, merged and the production checklist is complete. Preserve your local `.env` and `data/mcas.db` when switching branches; never run `git reset --hard` or delete local data to update the build.
 
 ## A. Automated checks
 
@@ -21,7 +21,7 @@ All commands should exit successfully. Resolve every dependency advisory before 
     set +a
     uvicorn backend.app:app --host 127.0.0.1 --port 8000
 
-Open http://127.0.0.1:8000 in Firefox. Health endpoint: http://127.0.0.1:8000/api/health.
+Open http://localhost:8000 in Firefox. Use the same hostname consistently for browser and OAuth testing. Health endpoint: http://localhost:8000/api/health.
 
 ## C. Functional walkthrough
 
