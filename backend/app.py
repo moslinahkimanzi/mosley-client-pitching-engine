@@ -641,7 +641,7 @@ def safe_site_fetch(initial_url):
 # Local, low-volume business discovery. Results are incomplete OSM records, not proof that
 # a business does or does not have a website. Cache searches and keep result counts bounded.
 _OVERPASS_CACHE: dict[str, tuple[float, list[dict]]] = {}
-OVERPASS_DEFAULT = "https://overpass.private.coffee/api/interpreter"
+OVERPASS_DEFAULT = "https://overpass-api.de/api/interpreter"
 
 
 _GEOCODE_CACHE: dict[str, tuple[float, dict]] = {}
@@ -654,7 +654,7 @@ def geocode_location(location: str) -> dict:
         return cached[1]
     params = urllib.parse.urlencode({"q": location, "format": "jsonv2", "limit": 1, "addressdetails": 1})
     req = urllib.request.Request("https://nominatim.openstreetmap.org/search?" + params,
-        headers={"User-Agent": "MCAS/1.2 (user-triggered business research)",
+        headers={"User-Agent": "MCAS/1.2 (user-triggered local business research)",
                  "Accept": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=12) as response:
