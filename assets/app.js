@@ -37,7 +37,7 @@ function websiteStateText(value){
 }
 $('startResearchBtn').addEventListener('click',async()=>{
  const location=$('researchLocation').value.trim();
- if(!location)return note('researchRunNotice','Enter a town, city or neighbourhood first.',true);
+ if(!location)return note('researchRunNotice','Enter a town, city or named administrative area first.',true);
  const btn=$('startResearchBtn');btn.disabled=true;
  $('researchRunResults').innerHTML='<div class="empty">Research is running. MCAS is checking public business listings and listed websites. This may take a while for several prospects.</div>';
  note('researchRunNotice','Starting your research run…');
@@ -51,7 +51,7 @@ $('startResearchBtn').addEventListener('click',async()=>{
    const source='<a href="'+safeLink(x.source_url)+'" target="_blank" rel="noopener noreferrer">OpenStreetMap source</a>';
    const website=x.website?'<p>Website: <a href="'+safeLink(x.website)+'" target="_blank" rel="noopener noreferrer">'+esc(x.website)+'</a></p>':'<p>No website URL found in this OpenStreetMap record.</p>';
    const pages=(x.pages||[]).map(v=>'<li>'+esc(v)+'</li>').join('');
-   return '<div class="item"><div class="itemtop"><strong>'+esc(x.name)+'</strong><span class="badge '+(x.website_state==='broken'||x.website_state==='needs_improvement'?'amber':'')+'">'+esc(label)+'</span></div>'+website+'<p>'+esc(x.evidence||'No additional evidence returned.')+'</p><p><b>Recommended:</b> '+esc(x.recommendation||'Manual review')+'</p><ul>'+pages+'</ul><p>'+source+'</p><p class="tiny">'+(x.duplicate?'Already existed in your prospects; no duplicate draft was created.':(x.draft_created?'Proposal and email draft saved for your approval.':'Review this prospect before further action.'))+'</p></div>';
+   return '<div class="item"><div class="itemtop"><strong>'+esc(x.name)+'</strong><span class="badge '+(x.website_state==='broken'||x.website_state==='needs_improvement'?'amber':'')+'">'+esc(label)+'</span></div>'+website+'<p>'+esc(x.evidence||'No additional evidence returned.')+'</p><p><b>Recommended:</b> '+esc(x.recommendation||'Manual review')+'</p><ul>'+pages+'</ul><p>'+source+'</p><p class="tiny">'+(x.duplicate?'Already existed in your prospects; no duplicate draft was created.':(x.draft_created?'Proposal and MCAS email draft saved for your approval.'+(x.gmail_draft_created?' Gmail draft also created.':(x.contact_email?' Gmail draft not created; use the MCAS draft instead.':'')):'Review this prospect before further action.'))+'</p></div>';
   }).join('')||'<div class="empty">No matching business records were found. Try a nearby administrative area or a broader category.</div>';
   note('researchRunNotice','Research finished. '+d.saved+' new prospects saved; '+d.results.length+' records reviewed. '+d.attribution+' '+d.warning);
   await loadAll();
