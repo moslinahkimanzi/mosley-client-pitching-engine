@@ -61,6 +61,22 @@ class ApiSecurityTest(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json(), [])
 
+
+    def test_do_not_contact_blocks_outreach_drafts(self):
+        with TestClient(app) as client:
+            self.register(client)
+            csrf = self.csrf(client)
+            lead = client.post("/api/leads",
+                json={"name": "Suppressed prospect", "do_not_contact": True},
+                headers={"X-CSRF-Token": csrf})
+            self.assertEqual(lead.status_code, 201, lead.text)
+            lead_id = lead.json()["id"]
+            csrf = self.csrf(client)
+            draft = client.post("/api/drafts",
+                json={"lead_id": lead_id, "kind": "Cold email", "subject": "Hello", "body": "Test"},
+                headers={"X-CSRF-Token": csrf})
+            self.assertEqual(draft.status_code, 403, draft.text)
+
     def test_security_headers_are_present(self):
         with TestClient(app) as client:
             response = client.get("/api/health")
