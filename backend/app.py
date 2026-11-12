@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from fastapi import FastAPI, HTTPException, Request, Response, Depends
+from fastapi import FastAPI, HTTPException, Request, Response, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, HttpUrl
 
@@ -21,6 +21,24 @@ DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 app = FastAPI(title="MCAS API", version="0.2.0", description="Mosley Client Acquisition System API")
 origins = [x.strip() for x in os.getenv("MCAS_ALLOWED_ORIGINS", "http://localhost:8000,http://127.0.0.1:8000").split(",") if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["GET","POST","PATCH","DELETE"], allow_headers=["Content-Type"])
+
+# Basic per-process throttling. Use a shared store (e.g. Redis) for multi-worker production.
+_rate_windows: dict[str, list[float]] = {}
+@app.middleware("http")
+async def request_guard(request: Request, call_next):
+    origin = request.headers.get("origin")
+    if request.method in {"POST", "PATCH", "DELETE"} and origin and origin not in origins:
+        return Response("Origin not allowed", status_code=403)
+    ip = request.client.host if request.client else "unknown"
+    auth_path = request.url.path in {"/api/auth/login", "/api/auth/register"}
+    key = ip + (":auth" if auth_path else ":general")
+    now_ts = time.time()
+    window = [t for t in _rate_windows.get(key, []) if now_ts - t < 60]
+    limit = 8 if auth_path else 90
+    if len(window) >= limit:
+        return Response("Too many requests; try again shortly.", status_code=429, headers={"Retry-After":"60"})
+    window.append(now_ts); _rate_windows[key] = window
+    return await call_next(request)
 
 @contextmanager
 def db():
@@ -179,28 +197,12 @@ def public_ip(host: str):
 
 @app.post("/api/audit-website")
 def audit_website(payload:dict,user=Depends(current_user)):
-    raw=str(payload.get("url",""))[:2048]
-    parsed=urllib.parse.urlparse(raw)
-    if parsed.scheme not in ("http","https") or not parsed.hostname or parsed.username or parsed.password:
-        raise HTTPException(422,"Provide a valid public http or https URL")
-    public_ip(parsed.hostname)
-    req=urllib.request.Request(raw,headers={"User-Agent":"MCAS-SiteCheck/0.2 (+manual prospect research)"},method="GET")
-    opener=urllib.request.build_opener(urllib.request.HTTPHandler(),urllib.request.HTTPSHandler())
-    try:
-        with opener.open(req,timeout=8) as res:
-            body=res.read(512000).decode("utf-8","replace")
-            headers=dict(res.headers)
-            status=res.status
-    except urllib.error.HTTPError as e:
-        status=e.code; body=""
-        headers=dict(e.headers)
-    except Exception as e: raise HTTPException(502,"Website could not be checked safely")
-    title=re.search(r"<title[^>]*>(.*?)</title>",body,re.I|re.S)
-    viewport=bool(re.search(r'<meta[^>]+name=["\']viewport',body,re.I))
-    return {"url":raw,"checked_at":now(),"http_status":status,"title":re.sub(r"\s+"," ",title.group(1)).strip()[:180] if title else None,"has_viewport_meta":viewport,"content_type":headers.get("Content-Type"),"note":"A lightweight technical check only; not a full accessibility, SEO, security or conversion audit."}
+    # Disabled until DNS-pinned outbound connections and redirect revalidation are implemented.
+    # This avoids exposing authenticated users to SSRF/DNS-rebinding risks.
+    raise HTTPException(501,"Website auditing is not enabled in this build; the secure outbound fetcher is still being implemented.")
 
 @app.get("/api/research/search")
-def research_search(q:str=Field(min_length=2,max_length=160),user=Depends(current_user)):
+def research_search(q:str=Query(min_length=2,max_length=160),user=Depends(current_user)):
     key=os.getenv("BRAVE_SEARCH_API_KEY")
     if not key: raise HTTPException(503,"Live search is not configured. Add BRAVE_SEARCH_API_KEY on the server.")
     query=urllib.parse.urlencode({"q":q,"count":10})
