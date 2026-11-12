@@ -641,10 +641,12 @@ def safe_site_fetch(initial_url):
 # Local, low-volume business discovery. Results are incomplete OSM records, not proof that
 # a business does or does not have a website. Cache searches and keep result counts bounded.
 _OVERPASS_CACHE: dict[str, tuple[float, list[dict]]] = {}
-OVERPASS_DEFAULT = "https://overpass.private.coffee/api/interpreter"
+OVERPASS_DEFAULT = "https://overpass-api.de/api/interpreter"
 
 def overpass_query_for(location: str, industry: str) -> str:
-    safe_name = re.escape(location.strip())
+    safe_name = re.sub(r"[^\\w\\s,().-]", "", location.strip(), flags=re.UNICODE).strip()
+    if not safe_name:
+        raise HTTPException(422, "Use a town, city or area name containing letters or numbers.")
     if industry == "restaurant":
         filters = ['nwr["name"]["amenity"~"^(restaurant|cafe|fast_food|bar|pub)$"](area.searchArea);']
     elif industry == "salon":
@@ -807,6 +809,10 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
         tags = element.get("tags") or {}
         name = str(tags.get("name", "")).strip()
         if not name:
+            continue
+        keyword = payload.keywords.strip().casefold()
+        searchable = " ".join(str(tags.get(k, "")) for k in ("name", "brand", "amenity", "shop", "office", "tourism", "cuisine", "craft")).casefold()
+        if keyword and keyword not in searchable:
             continue
         raw_website = tags.get("website") or tags.get("contact:website") or tags.get("url")
         website = None
