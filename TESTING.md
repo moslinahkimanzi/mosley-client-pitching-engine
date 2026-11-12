@@ -75,3 +75,13 @@ Manual website-check tests: try http://127.0.0.1, http://localhost, a private LA
 - Backups, restore procedure, environment secrets or HTTPS settings have not been verified.
 
 This checklist is not a penetration test and cannot prove the system is immune to attacks. A qualified security review is still required before a public multi-customer launch.
+
+## Additional research completion checks
+
+- Research a known local area using a town/city/neighbourhood name; verify the resolved place label and bounding-box results.
+- Verify a broad country-level query is rejected and the user is asked for a smaller area.
+- Verify each prospect displays an opportunity-priority score and its reasons; confirm it is described as a research heuristic, not buying intent.
+- Verify the result summary shows reviewed count, newly saved count and highest score.
+- Verify a repeated research run uses cached business results but still returns a resolved place label.
+- Verify map data with no website tag is described as "not listed", never "no website".
+- Verify public website checks are labelled lightweight and do not claim a complete SEO/performance/accessibility/security audit.
