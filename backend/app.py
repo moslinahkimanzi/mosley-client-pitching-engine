@@ -892,7 +892,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             title = "Website opportunity plan — " + name
             proposal = ("WEBSITE OPPORTUNITY PLAN\n\nBusiness: " + name + "\nLocation: " + location +
                 "\nDiscovery source: OpenStreetMap public listing (" + source_url + ")\n\n"
-                "1. VERIFIED DISCOVERY NOTES\n" + evidence + "\n\n"
+                "1. DISCOVERY OBSERVATIONS (VERIFY WITH BUSINESS)\n" + evidence + "\n\n"
                 "2. RECOMMENDED DIRECTION\n" + strategy["type"] + "\n\n"
                 "3. SUGGESTED PAGES\n- " + "\n- ".join(strategy["pages"]) + "\n\n"
                 "4. SUGGESTED FEATURES\n- " + "\n- ".join(strategy["features"]) + "\n\n"
@@ -959,7 +959,8 @@ def create_builder_prompt(lead_id: str, user=Depends(current_user)):
     strategy = business_strategy(tags)
     prompt = ("Act as a senior website strategist, UX designer and full-stack web developer. "
         "Create a complete, responsive, production-minded website for " + lead["name"] + " in " + market + ".\n\n"
-        "BUSINESS CONTEXT\nUse only these confirmed discovery notes: " + (lead["evidence"] or "No verified notes supplied.") + "\n"
+        "BUSINESS CONTEXT\nUse only the following recorded discovery observations: " + (lead["evidence"] or "No discovery notes supplied.") + "\n"
+        "Treat map-listing details as provisional until the business confirms them. A missing website link in a directory does not prove no website exists.\n"
         "Do not invent menu items, prices, opening hours, staff biographies, awards, reviews, testimonials, addresses or business claims. "
         "Use clearly labelled placeholders for missing content and ask for confirmation.\n\n"
         "RECOMMENDED DIRECTION\n" + strategy["type"] + "\n\n"
