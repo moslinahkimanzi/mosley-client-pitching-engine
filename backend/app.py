@@ -644,7 +644,7 @@ _OVERPASS_CACHE: dict[str, tuple[float, list[dict]]] = {}
 OVERPASS_DEFAULT = "https://overpass-api.de/api/interpreter"
 
 def overpass_query_for(location: str, industry: str) -> str:
-    safe_name = re.sub(r"[^\\w\\s,().-]", "", location.strip(), flags=re.UNICODE).strip()
+    safe_name = re.sub(r"[^\w\s,().-]", "", location.strip(), flags=re.UNICODE).strip()
     if not safe_name:
         raise HTTPException(422, "Use a town, city or area name containing letters or numbers.")
     if industry == "restaurant":
