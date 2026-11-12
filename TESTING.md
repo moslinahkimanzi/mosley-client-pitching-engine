@@ -30,6 +30,10 @@ Open http://127.0.0.1:8000 in Firefox. Health endpoint: http://127.0.0.1:8000/ap
 0b. If Gmail is configured and an OpenStreetMap record contains a valid public contact email, confirm MCAS creates a Gmail draft only. Check Gmail Drafts; confirm nothing was sent. If no public email is listed, confirm the draft remains in MCAS.
 0c. Mark a test prospect as Client accepted / Won. Confirm Generate AI-builder prompt appears, and that the prompt includes the business category, proposed pages, features, quality and instructions not to fabricate content.
 0d. In Reply Assistant, manually paste a sample customer message and optionally enter the customer's email address. Save it, then create a Gmail draft from Saved Drafts. Confirm MCAS never asks for or reads inbox contents.
+0a. Open Research → Research command centre. Search a named town or city (for example, Nairobi), choose a category and start with 3 results. Confirm results become unverified prospects and each new prospect gets a saved website plan, proposal and pending email draft. Confirm a missing website URL is labelled as "not listed", not proof of no website. Verify OpenStreetMap attribution appears.
+0b. If Gmail is configured and an OpenStreetMap record contains a valid public contact email, confirm MCAS creates a Gmail draft only. Check Gmail Drafts; confirm nothing was sent. If no public email is listed, confirm the draft remains in MCAS.
+0c. Mark a test prospect as Client accepted / Won. Confirm Generate AI-builder prompt appears, and that the prompt includes the business category, proposed pages, features, quality and instructions not to fabricate content.
+0d. In Reply Assistant, manually paste a sample customer message and optionally enter the customer's email address. Save it, then create a Gmail draft from Saved Drafts. Confirm MCAS never asks for or reads inbox contents.
 
 1. Register a fresh test account with a unique email and a strong, unique password.
 2. Add a test business with website, source URL, evidence and contact email. Confirm dashboard counts update.
