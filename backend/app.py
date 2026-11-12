@@ -344,7 +344,7 @@ def login(payload: LoginIn, response: Response):
         c.execute("INSERT INTO sessions VALUES(?,?,?)", (token_hash(session), row["id"], int(time.time()) + SESSION_SECONDS))
         audit(c, row["id"], "account.login")
     response.set_cookie(COOKIE, session, max_age=SESSION_SECONDS, httponly=True,
-                        secure=IS_PROD, samesite="strict", path="/")
+                        secure=IS_PROD, samesite="lax", path="/")
     set_csrf(response)
     return {"id": row["id"], "email": row["email"]}
 
@@ -625,7 +625,9 @@ def ai_assistant(payload: AIIn, user=Depends(current_user)):
               "customer facts, metrics, urgency or testimonials. Use only the supplied evidence. If evidence "
               "is insufficient, explicitly say that research is incomplete. Respect do-not-contact requests. "
               "Write concise, respectful, personalised business communication.")
-    input_data = payload.model_dump()\n    input_data.update({"prospect_name": lead["name"], "market": lead["market"], "evidence": lead["evidence"]})\n    user_prompt = json.dumps(input_data, ensure_ascii=False)
+    input_data = payload.model_dump()
+    input_data.update({"prospect_name": lead["name"], "market": lead["market"], "evidence": lead["evidence"]})
+    user_prompt = json.dumps(input_data, ensure_ascii=False)
     req = urllib.request.Request(base + "/chat/completions",
         data=json.dumps({"model": model, "temperature": 0.35, "messages": [
             {"role": "system", "content": system}, {"role": "user", "content": user_prompt}
