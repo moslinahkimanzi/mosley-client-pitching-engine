@@ -62,6 +62,23 @@ class ApiSecurityTest(unittest.TestCase):
             self.assertEqual(response.json(), [])
 
 
+    def test_foreign_lead_cannot_be_attached_to_another_accounts_draft(self):
+        lead_id = None
+        with TestClient(app) as first:
+            self.register(first)
+            token = self.csrf(first)
+            response = first.post("/api/leads", json={"name": "Private lead A"},
+                headers={"X-CSRF-Token": token})
+            self.assertEqual(response.status_code, 201, response.text)
+            lead_id = response.json()["id"]
+        with TestClient(app) as second:
+            self.register(second)
+            token = self.csrf(second)
+            response = second.post("/api/drafts",
+                json={"lead_id": lead_id, "kind": "Cold email", "subject": "Hello", "body": "Test"},
+                headers={"X-CSRF-Token": token})
+            self.assertEqual(response.status_code, 404, response.text)
+
     def test_do_not_contact_blocks_outreach_drafts(self):
         with TestClient(app) as client:
             self.register(client)
@@ -83,6 +100,7 @@ class ApiSecurityTest(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.headers.get("X-Frame-Options"), "DENY")
             self.assertIn("script-src 'self'", response.headers.get("Content-Security-Policy", ""))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
 
 if __name__ == "__main__":
     unittest.main()
