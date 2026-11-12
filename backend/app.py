@@ -137,6 +137,7 @@ def init_db():
         add_column(c, "leads", "source_url", "TEXT")
         add_column(c, "leads", "do_not_contact", "INTEGER NOT NULL DEFAULT 0")
         add_column(c, "drafts", "to_email", "TEXT")
+        add_column(c, "drafts", "gmail_draft_id", "TEXT")
 
 init_db()
 
@@ -714,6 +715,55 @@ def overpass_query_for(location: str, industry: str, bbox: Optional[tuple] = Non
             'area["name"~"^' + safe_name + '$",i]["boundary"="administrative"]->.searchArea;'
             '(' + ''.join(filters) + ');out center tags 100;')
 
+_RESEARCH_STOP_WORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "business", "businesses",
+    "company", "companies", "for", "from", "have", "has", "in", "is",
+    "it", "looking", "near", "need", "needs", "needing", "of", "on",
+    "or", "our", "site", "sites", "that", "the", "their", "to", "want",
+    "wants", "web", "website", "websites", "with", "without"
+}
+
+
+def public_contact_email(tags: dict) -> Optional[str]:
+    """Return the first syntactically valid public email listed in OSM tags."""
+    raw = tags.get("contact:email") or tags.get("email") or ""
+    for candidate in re.split(r"[;,\s]+", str(raw).strip()):
+        if re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", candidate):
+            return candidate
+    return None
+
+
+def research_keyword_matches(tags: dict, keywords: str) -> bool:
+    """Match useful words against public business tags; generic prompt words do not filter."""
+    words = re.findall(r"[a-z0-9]+", str(keywords).casefold())
+    terms = [word for word in words if word not in _RESEARCH_STOP_WORDS and len(word) > 1]
+    if not terms:
+        return True
+    searchable = " ".join(str(value) for value in tags.values()).casefold()
+    for term in terms:
+        forms = {term}
+        if term.endswith("ies") and len(term) > 4:
+            forms.add(term[:-3] + "y")
+        elif term.endswith("s") and len(term) > 3:
+            forms.add(term[:-1])
+        if any(form in searchable for form in forms):
+            return True
+    return False
+
+
+def research_candidate_priority(tags: dict) -> int:
+    """Cheap pre-check used to inspect promising records before lower-signal listings."""
+    website = tags.get("website") or tags.get("contact:website") or tags.get("url")
+    score = 3 if website else 12
+    if public_contact_email(tags):
+        score += 15
+    if tags.get("contact:phone") or tags.get("phone"):
+        score += 10
+    if any(tags.get(key) for key in ("addr:street", "addr:city", "addr:postcode")):
+        score += 5
+    return score
+
+
 def opportunity_score(tags: dict, website_state: str, website_audit: dict,
                       email: Optional[str], phone: Optional[str]) -> tuple[int, list[str]]:
     """Transparent heuristic priority; not a claim that a business wants a website."""
@@ -802,6 +852,17 @@ def business_strategy(tags: dict) -> dict:
                         "Build accessible, privacy-conscious pages",
                         "Test appointment and contact workflows"]
         }
+    if amenity in {"school", "college", "university", "kindergarten"} or str(tags.get("office", "")).lower() == "educational_institution":
+        return {
+            "type": "Education and training website",
+            "pages": ["Home and learning outcomes", "Courses or programmes", "Instructors and accreditation",
+                      "Admissions or registration", "FAQs and contact"],
+            "features": ["Course catalogue and schedules", "Application or registration enquiry",
+                         "Verified instructor and accreditation information", "Accessible learning resources"],
+            "roadmap": ["Confirm programmes, schedules, fees and entry requirements",
+                        "Build clear course pages and a mobile-friendly enquiry path",
+                        "Verify accreditation claims and publish approved learning information"]
+        }
     return {
         "type": "Professional or local-business website",
         "pages": ["Home and value proposition", "Services", "About and credentials",
@@ -876,6 +937,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             _OVERPASS_CACHE[cache_key] = (time.time(), elements)
         except Exception:
             raise HTTPException(502, "OpenStreetMap discovery is temporarily unavailable. Try again later or use manual web search.")
+    elements = sorted(elements, key=lambda item: research_candidate_priority(item.get("tags") or {}), reverse=True)
     discovered = []
     saved_count = 0
     for element in elements:
@@ -885,9 +947,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
         name = str(tags.get("name", "")).strip()
         if not name:
             continue
-        keyword = payload.keywords.strip().casefold()
-        searchable = " ".join(str(tags.get(k, "")) for k in ("name", "brand", "amenity", "shop", "office", "tourism", "cuisine", "craft")).casefold()
-        if keyword and keyword not in searchable:
+        if payload.keywords.strip() and not research_keyword_matches(tags, payload.keywords):
             continue
         raw_website = tags.get("website") or tags.get("contact:website") or tags.get("url")
         website = None
@@ -917,9 +977,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
         osm_type = str(element.get("type", "node"))
         osm_id = str(element.get("id", ""))
         source_url = "https://www.openstreetmap.org/" + osm_type + "/" + osm_id
-        email = tags.get("contact:email") or tags.get("email")
-        if email and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", str(email)):
-            email = None
+        email = public_contact_email(tags)
         phone = tags.get("contact:phone") or tags.get("phone")
         strategy = business_strategy(tags)
         score, score_reasons = opportunity_score(tags, website_state, website_audit, str(email) if email else None, str(phone) if phone else None)
@@ -956,7 +1014,9 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                 discovered.append({"name": name, "lead_id": existing["id"], "duplicate": True,
                     "website": website, "website_state": website_state, "evidence": evidence,
                     "source_url": source_url, "recommendation": strategy["type"],
-                    "pages": strategy["pages"], "opportunity_score": score, "score_reasons": score_reasons, "draft_created": False, "proposal_created": False})
+                    "pages": strategy["pages"], "opportunity_score": score, "score_reasons": score_reasons,
+                    "contact_email": str(email) if email else None, "contact_phone": str(phone) if phone else None,
+                    "website_audit": website_audit, "draft_created": False, "proposal_created": False})
                 continue
             lead_id = secrets.token_urlsafe(15)
             stamp = now()
@@ -990,6 +1050,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                 "website_state": website_state, "draft_id": draft_id, "proposal_id": proposal_id})
             saved_count += 1
         gmail_draft_created = False
+        gmail_draft_error = None
         if email:
             with db() as c:
                 gmail_connected = bool(c.execute(
@@ -999,19 +1060,22 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                 try:
                     create_gmail_draft_for_user(draft_id, user["id"])
                     gmail_draft_created = True
-                except HTTPException:
+                except HTTPException as exc:
                     # Preserve the MCAS draft if Gmail is temporarily unavailable.
                     gmail_draft_created = False
+                    gmail_draft_error = str(exc.detail)
         discovered.append({"name": name, "lead_id": lead_id, "duplicate": False,
             "website": website, "website_state": website_state, "evidence": evidence,
             "source_url": source_url, "contact_email": str(email) if email else None,
+            "contact_phone": str(phone) if phone else None,
             "recommendation": strategy["type"], "pages": strategy["pages"], "opportunity_score": score, "score_reasons": score_reasons,
             "website_audit": website_audit,
             "draft_created": True, "proposal_created": True,
-            "gmail_draft_created": gmail_draft_created})
+            "gmail_draft_created": gmail_draft_created, "gmail_draft_error": gmail_draft_error})
     with db() as c:
         audit(c, user["id"], "research.run", {"location": location, "industry": payload.industry,
                                                "results": len(discovered), "saved": saved_count})
+    discovered.sort(key=lambda item: item.get("opportunity_score", 0), reverse=True)
     state_counts = {}
     for item in discovered:
         state_counts[item["website_state"]] = state_counts.get(item["website_state"], 0) + 1
@@ -1038,6 +1102,12 @@ def create_builder_prompt(lead_id: str, user=Depends(current_user)):
         tags["amenity"] = "restaurant"
     elif any(word in notes for word in ["salon", "hairdresser", "beauty"]):
         tags["shop"] = "hairdresser"
+    elif any(word in notes for word in ["clinic", "doctor", "dentist", "hospital", "healthcare", "medical"]):
+        tags["amenity"] = "clinic"
+    elif any(word in notes for word in ["school", "college", "university", "education", "kindergarten"]):
+        tags["amenity"] = "school"
+    elif any(word in notes for word in ["hotel", "guest house", "hostel", "accommodation", "hospitality"]):
+        tags["tourism"] = "hotel"
     elif any(word in notes for word in ["retail", "shop", "products"]):
         tags["shop"] = "retail"
     strategy = business_strategy(tags)
@@ -1231,6 +1301,9 @@ def create_gmail_draft_for_user(draft_id: str, uid: str):
         draft = c.execute("SELECT * FROM drafts WHERE id=? AND user_id=?", (draft_id, uid)).fetchone()
         if not draft:
             raise HTTPException(404, "Draft not found")
+        if draft["gmail_draft_id"]:
+            return {"ok": True, "gmail_draft_id": draft["gmail_draft_id"],
+                    "message": "This draft is already in Gmail. No duplicate was created."}
         if not draft["to_email"]:
             raise HTTPException(422, "Add a recipient email before creating the Gmail draft")
         if draft["lead_id"]:
@@ -1255,9 +1328,13 @@ def create_gmail_draft_for_user(draft_id: str, uid: str):
             response = json.loads(r.read(100000))
     except Exception:
         raise HTTPException(502, "Gmail could not create the draft; no message was sent")
+    gmail_draft_id = response.get("id")
     with db() as c:
-        audit(c, uid, "gmail.draft_created", {"draft_id": draft_id})
-    return {"ok": True, "gmail_draft_id": response.get("id"),
+        if gmail_draft_id:
+            c.execute("UPDATE drafts SET gmail_draft_id=? WHERE id=? AND user_id=?",
+                      (gmail_draft_id, draft_id, uid))
+        audit(c, uid, "gmail.draft_created", {"draft_id": draft_id, "gmail_draft_id": gmail_draft_id})
+    return {"ok": True, "gmail_draft_id": gmail_draft_id,
             "message": "Created a draft in Gmail. It has not been sent."}
 
 @app.post("/api/drafts/{draft_id}/gmail")
