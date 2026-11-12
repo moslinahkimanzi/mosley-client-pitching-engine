@@ -855,6 +855,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
     location = payload.location.strip()
     if not location or not re.search(r"[A-Za-z0-9]", location):
         raise HTTPException(422, "Enter a specific town, city or administrative area.")
+    place = geocode_location(location)
     cache_key = location.casefold() + "|" + payload.industry
     cached = _OVERPASS_CACHE.get(cache_key)
     elements = cached[1] if cached and time.time() - cached[0] < 900 else None
@@ -863,7 +864,6 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
         parsed_endpoint = urllib.parse.urlparse(endpoint)
         if parsed_endpoint.scheme != "https" or not parsed_endpoint.hostname:
             raise HTTPException(503, "The configured OpenStreetMap discovery endpoint must use HTTPS.")
-        place = geocode_location(location)
         query = overpass_query_for(location, payload.industry, place["bbox"])
         req = urllib.request.Request(endpoint, data=urllib.parse.urlencode({"data": query}).encode(),
             headers={"Content-Type": "application/x-www-form-urlencoded",
