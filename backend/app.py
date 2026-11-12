@@ -237,6 +237,9 @@ async def security_middleware(request: Request, call_next):
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
     response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"
     if IS_PROD:
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
@@ -645,7 +648,16 @@ def ai_assistant(payload: AIIn, user=Depends(current_user)):
             "warning": "Review every statement against your evidence before saving or sending."}
 
 def gmail_ready():
-    return all(os.getenv(v) for v in ["GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REDIRECT_URI", "MCAS_ENCRYPTION_KEY"])
+    required = ["GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REDIRECT_URI", "MCAS_ENCRYPTION_KEY"]
+    if not all(os.getenv(v) for v in required) or Fernet is None:
+        return False
+    if IS_PROD and not os.getenv("GMAIL_REDIRECT_URI", "").startswith("https://"):
+        return False
+    try:
+        Fernet(os.getenv("MCAS_ENCRYPTION_KEY").encode())
+        return True
+    except Exception:
+        return False
 
 def fernet():
     if Fernet is None or not gmail_ready():
@@ -760,6 +772,8 @@ def create_gmail_draft(draft_id: str, user=Depends(current_user)):
             if lead and lead["do_not_contact"]:
                 raise HTTPException(403, "This prospect is marked do-not-contact")
     validate_email(draft["to_email"])
+    if "\r" in draft["subject"] or "\n" in draft["subject"]:
+        raise HTTPException(422, "Email subject must be a single line")
     message = EmailMessage()
     message["To"] = draft["to_email"]
     message["Subject"] = draft["subject"]
