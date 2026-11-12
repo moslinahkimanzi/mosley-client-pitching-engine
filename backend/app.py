@@ -818,24 +818,24 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             continue
         raw_website = tags.get("website") or tags.get("contact:website") or tags.get("url")
         website = None
-        audit = {}
+        website_audit = {}
         website_state = "not_listed"
         if raw_website:
             website = str(raw_website).strip()
             if not re.match(r"^https?://", website, re.I):
                 website = "https://" + website
             try:
-                audit = safe_site_fetch(website)
-                status = int(audit.get("http_status") or 0)
+                website_audit = safe_site_fetch(website)
+                status = int(website_audit.get("http_status") or 0)
                 if status in {404, 410, 500, 502, 503, 504}:
                     website_state = "broken"
                 elif status in {401, 403, 429}:
                     website_state = "access_restricted"
                 elif 200 <= status < 400:
                     website_state = "needs_improvement" if (
-                        audit.get("has_viewport_meta") is False or
-                        audit.get("has_meta_description") is False or
-                        audit.get("title") is None
+                        website_audit.get("has_viewport_meta") is False or
+                        website_audit.get("has_meta_description") is False or
+                        website_audit.get("title") is None
                     ) else "working"
                 else:
                     website_state = "needs_review"
@@ -856,24 +856,24 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
         if website_state == "not_listed":
             facts.append("No website URL was listed in this OpenStreetMap record. This is not proof that the business has no website.")
         elif website_state == "broken":
-            facts.append("The listed website returned HTTP " + str(audit.get("http_status")) + " during this check.")
+            facts.append("The listed website returned HTTP " + str(website_audit.get("http_status")) + " during this check.")
         elif website_state == "needs_improvement":
             findings = []
-            if audit.get("has_viewport_meta") is False: findings.append("mobile viewport metadata not detected")
-            if audit.get("has_meta_description") is False: findings.append("meta description not detected")
-            if audit.get("title") is None: findings.append("page title not detected")
+            if website_audit.get("has_viewport_meta") is False: findings.append("mobile viewport metadata not detected")
+            if website_audit.get("has_meta_description") is False: findings.append("meta description not detected")
+            if website_audit.get("title") is None: findings.append("page title not detected")
             facts.append("Limited page check: " + ", ".join(findings) + ".")
         elif website_state == "access_restricted":
             facts.append("The website restricted this automated check; no broken-site conclusion was made.")
         elif website_state == "needs_review":
             facts.append("The website could not be reliably checked; do not describe it as broken.")
-        elif audit:
-            facts.append("Website responded with HTTP " + str(audit.get("http_status")) + ".")
+        elif website_audit:
+            facts.append("Website responded with HTTP " + str(website_audit.get("http_status")) + ".")
         if tags.get("addr:street") or tags.get("addr:city"):
             facts.append("Public address tags are present in the source listing.")
         evidence = " ".join(facts) + " Source: " + source_url
-        if audit.get("url"):
-            evidence += " Website checked: " + audit["url"] + " (limited technical observations only)."
+        if website_audit.get("url"):
+            evidence += " Website checked: " + website_audit["url"] + " (limited technical observations only)."
         with db() as c:
             existing = c.execute("SELECT id FROM leads WHERE user_id=? AND lower(name)=lower(?) AND lower(market)=lower(?)",
                                   (user["id"], name, location)).fetchone()
@@ -905,7 +905,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             proposal_id = secrets.token_urlsafe(15)
             c.execute("INSERT INTO proposals VALUES(?,?,?,?,?,?,?,?)",
                 (proposal_id, user["id"], lead_id, title, proposal, "draft", stamp, stamp))
-            subject, body = make_outreach_copy(name, location, website_state, audit, strategy, str(email) if email else None)
+            subject, body = make_outreach_copy(name, location, website_state, website_audit, strategy, str(email) if email else None)
             draft_id = secrets.token_urlsafe(15)
             c.execute("""INSERT INTO drafts(id,user_id,lead_id,kind,subject,body,state,created_at,to_email)
                 VALUES(?,?,?,?,?,?,?,?,?)""",
