@@ -909,11 +909,25 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             audit(c, user["id"], "research.prospect_prepared", {"lead_id": lead_id,
                 "website_state": website_state, "draft_id": draft_id, "proposal_id": proposal_id})
             saved_count += 1
+        gmail_draft_created = False
+        if email:
+            with db() as c:
+                gmail_connected = bool(c.execute(
+                    "SELECT 1 FROM integrations WHERE user_id=? AND provider='gmail'", (user["id"],)
+                ).fetchone())
+            if gmail_connected:
+                try:
+                    create_gmail_draft_for_user(draft_id, user["id"])
+                    gmail_draft_created = True
+                except HTTPException:
+                    # Preserve the MCAS draft if Gmail is temporarily unavailable.
+                    gmail_draft_created = False
         discovered.append({"name": name, "lead_id": lead_id, "duplicate": False,
             "website": website, "website_state": website_state, "evidence": evidence,
             "source_url": source_url, "contact_email": str(email) if email else None,
             "recommendation": strategy["type"], "pages": strategy["pages"],
-            "draft_created": True, "proposal_created": True})
+            "draft_created": True, "proposal_created": True,
+            "gmail_draft_created": gmail_draft_created})
     with db() as c:
         audit(c, user["id"], "research.run", {"location": location, "industry": payload.industry,
                                                "results": len(discovered), "saved": saved_count})
@@ -1041,7 +1055,7 @@ def integration_status(user=Depends(current_user)):
 def gmail_status(user=Depends(current_user)):
     with db() as c:
         ok = c.execute("SELECT 1 FROM integrations WHERE user_id=? AND provider='gmail'", (user["id"],)).fetchone()
-    return {"configured": gmail_ready(), "connected": bool(ok), "capability": "Create Gmail drafts only. MCAS does not read, search, list or monitor incoming emails, and has no send endpoint."}
+    return {"configured": gmail_ready(), "connected": bool(ok), "capability": "MCAS creates Gmail drafts only. It does not read, search, list or monitor incoming emails, and exposes no send endpoint. Google’s gmail.compose scope technically permits sending at API level, but MCAS does not implement or invoke any send operation."}
 
 @app.get("/api/integrations/gmail/start")
 def gmail_start(user=Depends(current_user)):
@@ -1122,17 +1136,16 @@ def gmail_access_token(uid):
     except Exception:
         raise HTTPException(502, "Could not refresh Gmail access")
 
-@app.post("/api/drafts/{draft_id}/gmail")
-def create_gmail_draft(draft_id: str, user=Depends(current_user)):
+def create_gmail_draft_for_user(draft_id: str, uid: str):
     with db() as c:
-        draft = c.execute("SELECT * FROM drafts WHERE id=? AND user_id=?", (draft_id, user["id"])).fetchone()
+        draft = c.execute("SELECT * FROM drafts WHERE id=? AND user_id=?", (draft_id, uid)).fetchone()
         if not draft:
             raise HTTPException(404, "Draft not found")
         if not draft["to_email"]:
             raise HTTPException(422, "Add a recipient email before creating the Gmail draft")
         if draft["lead_id"]:
             lead = c.execute("SELECT do_not_contact FROM leads WHERE id=? AND user_id=?",
-                             (draft["lead_id"], user["id"])).fetchone()
+                             (draft["lead_id"], uid)).fetchone()
             if lead and lead["do_not_contact"]:
                 raise HTTPException(403, "This prospect is marked do-not-contact")
     validate_email(draft["to_email"])
@@ -1143,7 +1156,7 @@ def create_gmail_draft(draft_id: str, user=Depends(current_user)):
     message["Subject"] = draft["subject"]
     message.set_content(draft["body"])
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode().rstrip("=")
-    token = gmail_access_token(user["id"])
+    token = gmail_access_token(uid)
     req = urllib.request.Request("https://gmail.googleapis.com/gmail/v1/users/me/drafts",
         data=json.dumps({"message": {"raw": raw}}).encode(),
         headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"}, method="POST")
@@ -1153,9 +1166,13 @@ def create_gmail_draft(draft_id: str, user=Depends(current_user)):
     except Exception:
         raise HTTPException(502, "Gmail could not create the draft; no message was sent")
     with db() as c:
-        audit(c, user["id"], "gmail.draft_created", {"draft_id": draft_id})
+        audit(c, uid, "gmail.draft_created", {"draft_id": draft_id})
     return {"ok": True, "gmail_draft_id": response.get("id"),
             "message": "Created a draft in Gmail. It has not been sent."}
+
+@app.post("/api/drafts/{draft_id}/gmail")
+def create_gmail_draft(draft_id: str, user=Depends(current_user)):
+    return create_gmail_draft_for_user(draft_id, user["id"])
 
 @app.get("/api/metrics")
 def metrics(user=Depends(current_user)):
