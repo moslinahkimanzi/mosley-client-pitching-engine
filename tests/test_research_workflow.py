@@ -9,6 +9,9 @@ import backend.app as mcas
 
 
 class ResearchWorkflowTest(unittest.TestCase):
+    def setUp(self):
+        mcas._rate_windows.clear()
+
     def _registered_client(self):
         client = TestClient(mcas.app)
         csrf = client.get("/api/auth/csrf").json()["csrf_token"]
