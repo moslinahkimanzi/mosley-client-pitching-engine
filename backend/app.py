@@ -221,16 +221,44 @@ async def security_middleware(request: Request, call_next):
         header_token = request.headers.get("x-csrf-token", "")
         if not cookie_token or not header_token or not hmac.compare_digest(cookie_token, header_token) or not valid_csrf(header_token):
             return Response("CSRF validation failed. Refresh and try again.", status_code=403)
+
     ip = request.client.host if request.client else "unknown"
-    auth_path = request.url.path in {"/api/auth/login", "/api/auth/register"}
-    key = ip + (":auth" if auth_path else ":general")
+    path = request.url.path
+    token = request.cookies.get(COOKIE, "")
+    if path in {"/api/auth/login", "/api/auth/register"}:
+        category, cap = "auth", 8
+    elif path == "/api/assistant/draft":
+        category, cap = "ai", 6
+    elif path == "/api/research/search":
+        category, cap = "search", 20
+    elif path == "/api/audit-website":
+        category, cap = "website", 10
+    elif path.endswith("/gmail") and request.method == "POST":
+        category, cap = "gmail", 8
+    else:
+        category, cap = "general", 120
+
+    keys = [ip + ":" + category]
+    if token and category not in {"auth", "general"}:
+        keys.append("session:" + token_hash(token)[:24] + ":" + category)
     current = time.time()
-    recent = [stamp for stamp in _rate_windows.get(key, []) if current - stamp < 60]
-    cap = 8 if auth_path else 120
-    if len(recent) >= cap:
-        return Response("Too many requests. Try again shortly.", status_code=429, headers={"Retry-After": "60"})
-    recent.append(current)
-    _rate_windows[key] = recent
+    for key in keys:
+        recent = [stamp for stamp in _rate_windows.get(key, []) if current - stamp < 60]
+        if len(recent) >= cap:
+            return Response("Too many requests for this operation. Try again shortly.", status_code=429,
+                            headers={"Retry-After": "60"})
+    for key in keys:
+        recent = [stamp for stamp in _rate_windows.get(key, []) if current - stamp < 60]
+        recent.append(current)
+        _rate_windows[key] = recent
+    if len(_rate_windows) > 10000:
+        for key, stamps in list(_rate_windows.items()):
+            kept = [stamp for stamp in stamps if current - stamp < 60]
+            if kept:
+                _rate_windows[key] = kept
+            else:
+                del _rate_windows[key]
+
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
