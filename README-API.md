@@ -35,6 +35,7 @@ Open Firefox at http://127.0.0.1:8000. Create an account on the welcome screen. 
 - Account registration/login/logout, salted PBKDF2 password hashes, random session tokens stored as hashes, HttpOnly session cookies and CSRF protection.
 - Per-account filtering for prospects, drafts, follow-ups, proposals and integration tokens.
 - Prospect CRUD, evidence notes, source URL, CRM status and do-not-contact flag.
+- Rules-based Website Strategy Advisor: recommends a site type, sitemap, useful features, quality standards and an improvement roadmap based on business type, goals, current online presence, budget range and verified notes. Recommendations are starting points and must be validated with the client.
 - Optional Brave Search integration. Results are unverified discovery records and must be checked before outreach.
 - Public website quick-check with HTTP status, title and viewport tag. Outbound connections are pinned to validated public IPs; redirects are revalidated; private/reserved IPs and non-standard ports are blocked.
 - Evidence-led template email generation, optional OpenAI-compatible AI provider, reply assistance, proposals and saved drafts.
