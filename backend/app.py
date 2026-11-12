@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Literal
 
 from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
@@ -255,7 +255,7 @@ class LeadIn(BaseModel):
     website: Optional[str] = Field(default=None, max_length=2048)
     market: str = Field(default="Kenya", max_length=100)
     evidence: str = Field(default="", max_length=5000)
-    status: str = Field(default="Unverified", max_length=40)
+    status: Literal["Unverified", "Verified", "Contacted", "Replied", "Interested", "Negotiating", "Won", "Lost"] = "Unverified"
     contact_email: Optional[str] = Field(default=None, max_length=254)
     contact_phone: Optional[str] = Field(default=None, max_length=50)
     source_url: Optional[str] = Field(default=None, max_length=2048)
@@ -273,18 +273,19 @@ class FollowupIn(BaseModel):
     title: str = Field(min_length=1, max_length=160)
     due_at: Optional[str] = Field(default=None, max_length=60)
     notes: str = Field(default="", max_length=3000)
-    state: str = Field(default="open", max_length=30)
+    state: Literal["open", "done", "cancelled"] = "open"
 
 class ProposalIn(BaseModel):
     lead_id: Optional[str] = None
     title: str = Field(min_length=1, max_length=160)
     content: str = Field(min_length=1, max_length=20000)
-    state: str = Field(default="draft", max_length=30)
+    state: Literal["draft", "reviewed", "approved", "archived"] = "draft"
 
 class ResearchIn(BaseModel):
     query: str = Field(min_length=2, max_length=160)
 
 class AIIn(BaseModel):
+    lead_id: Optional[str] = None
     task: str = Field(default="email", max_length=30)
     prospect_name: str = Field(max_length=120)
     market: str = Field(default="", max_length=100)
@@ -416,7 +417,9 @@ def save_draft(payload: DraftIn, user=Depends(current_user)):
     did = secrets.token_urlsafe(15)
     with db() as c:
         if payload.lead_id:
-            owned_lead(c, payload.lead_id, user["id"])
+            lead = owned_lead(c, payload.lead_id, user["id"])
+            if int(lead["do_not_contact"] or 0) and payload.kind.lower() in {"cold email", "follow-up", "outreach"}:
+                raise HTTPException(403, "This prospect is marked do-not-contact; outreach drafts are blocked.")
         c.execute("""INSERT INTO drafts(id,user_id,lead_id,kind,subject,body,state,created_at,to_email)
             VALUES(?,?,?,?,?,?,?,?,?)""",
             (did, user["id"], payload.lead_id, payload.kind, payload.subject, payload.body,
@@ -612,11 +615,17 @@ def ai_assistant(payload: AIIn, user=Depends(current_user)):
         raise HTTPException(503, "AI endpoint must use HTTPS")
     if payload.task not in {"email", "reply", "proposal"}:
         raise HTTPException(422, "Unsupported assistant task")
+    if not payload.lead_id:
+        raise HTTPException(422, "Select a saved prospect so its evidence and do-not-contact status can be checked.")
+    with db() as c:
+        lead = owned_lead(c, payload.lead_id, user["id"])
+        if payload.task == "email" and int(lead["do_not_contact"] or 0):
+            raise HTTPException(403, "This prospect is marked do-not-contact; outreach drafting is blocked.")
     system = ("You are an ethical B2B website-development sales assistant. Never invent observations, "
               "customer facts, metrics, urgency or testimonials. Use only the supplied evidence. If evidence "
               "is insufficient, explicitly say that research is incomplete. Respect do-not-contact requests. "
               "Write concise, respectful, personalised business communication.")
-    user_prompt = json.dumps(payload.model_dump(), ensure_ascii=False)
+    input_data = payload.model_dump()\n    input_data.update({"prospect_name": lead["name"], "market": lead["market"], "evidence": lead["evidence"]})\n    user_prompt = json.dumps(input_data, ensure_ascii=False)
     req = urllib.request.Request(base + "/chat/completions",
         data=json.dumps({"model": model, "temperature": 0.35, "messages": [
             {"role": "system", "content": system}, {"role": "user", "content": user_prompt}
