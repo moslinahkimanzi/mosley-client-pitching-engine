@@ -79,7 +79,7 @@ function renderWebsiteAdvice(){
  improvements.push('Compress images, use responsive image sizes, caching and a performance budget.');
  improvements.push('Check keyboard navigation, form labels, contrast and readable text sizes.');
  improvements.push('Add privacy notice, consent-aware analytics and secure form handling where applicable.');
- const ctx=context?'<p><b>Discovery notes to validate:</b> '+esc(ctx)+'</p>':'<p><b>Discovery gap:</b> Add verified observations from a client interview and website review before presenting this as a tailored proposal.</p>';
+ const ctx=context?'<p><b>Discovery notes to validate:</b> '+esc(context)+'</p>':'<p><b>Discovery gap:</b> Add verified observations from a client interview and website review before presenting this as a tailored proposal.</p>';
  const htmlOut='<div class="item"><span class="badge green">Suggested direction</span><h3>'+esc(p.type)+'</h3><p><b>Primary outcome:</b> '+esc(goalText)+'.</p><p>'+esc(presenceText)+'</p><p>'+esc(budgetText)+'</p>'+ctx+'</div>'+
  '<div class="item"><h3>Recommended site map</h3><ul>'+p.pages.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul></div>'+
  '<div class="item"><h3>Recommended features</h3><ul>'+p.features.concat(goalAdd).map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul></div>'+
