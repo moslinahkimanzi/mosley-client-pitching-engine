@@ -101,6 +101,12 @@ def init_db():
             state TEXT NOT NULL DEFAULT 'pending_approval',created_at TEXT NOT NULL,
             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
         );
+        CREATE TABLE IF NOT EXISTS research_runs(
+            id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            query TEXT NOT NULL,provider TEXT NOT NULL,result_count INTEGER NOT NULL DEFAULT 0,
+            results_json TEXT NOT NULL DEFAULT '[]',created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_research_runs_user_created ON research_runs(user_id,created_at);
         CREATE TABLE IF NOT EXISTS audit_log(
             id INTEGER PRIMARY KEY AUTOINCREMENT,user_id TEXT,action TEXT NOT NULL,
             created_at TEXT NOT NULL,metadata TEXT NOT NULL DEFAULT '{}'
@@ -529,12 +535,39 @@ def research_search(q: str = Query(min_length=2, max_length=160), user=Depends(c
     except Exception:
         raise HTTPException(502, "Search provider request failed")
     results = data.get("web", {}).get("results", [])
+    clean_results = [{"title": x.get("title"), "url": x.get("url"),
+            "description": x.get("description")} for x in results[:10]
+            if isinstance(x, dict) and isinstance(x.get("url"), str) and x.get("url", "").startswith(("https://", "http://"))]
+    run_id = secrets.token_urlsafe(15)
+    created_at = now()
     with db() as c:
-        audit(c, user["id"], "research.search", {"query": q[:100], "count": len(results)})
-    return {"query": q, "results": [{"title": x.get("title"), "url": x.get("url"),
-            "description": x.get("description")} for x in results[:10]],
+        c.execute("INSERT INTO research_runs(id,user_id,query,provider,result_count,results_json,created_at) VALUES(?,?,?,?,?,?,?)",
+                  (run_id, user["id"], q, "Brave Search", len(clean_results),
+                   json.dumps(clean_results, ensure_ascii=False), created_at))
+        audit(c, user["id"], "research.search", {"run_id": run_id, "query": q[:100], "count": len(clean_results)})
+    return {"run_id": run_id, "created_at": created_at, "query": q, "results": clean_results,
             "provider": "Brave Search",
             "warning": "Search results are discovery leads, not verified facts. Open and verify each source before contacting a business."}
+
+@app.get("/api/research/runs")
+def list_research_runs(user=Depends(current_user)):
+    with db() as c:
+        rows = c.execute("SELECT id,query,provider,result_count,created_at FROM research_runs WHERE user_id=? ORDER BY created_at DESC LIMIT 50",
+                         (user["id"],)).fetchall()
+    return {"runs": [dict(row) for row in rows]}
+
+@app.get("/api/research/runs/{run_id}")
+def get_research_run(run_id: str, user=Depends(current_user)):
+    with db() as c:
+        row = c.execute("SELECT * FROM research_runs WHERE id=? AND user_id=?", (run_id, user["id"])).fetchone()
+    if not row:
+        raise HTTPException(404, "Research run not found")
+    try:
+        results = json.loads(row["results_json"])
+    except (TypeError, json.JSONDecodeError):
+        results = []
+    return {"id": row["id"], "query": row["query"], "provider": row["provider"],
+            "result_count": row["result_count"], "created_at": row["created_at"], "results": results}
 
 # Outbound website checks pin a validated public IP for each connection and never follow redirects blindly.
 class PinnedHTTP(http.client.HTTPConnection):
