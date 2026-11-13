@@ -837,7 +837,7 @@ def business_strategy(tags: dict) -> dict:
 def make_outreach_copy(name: str, location: str, website_state: str, audit: dict,
                         strategy: dict, contact_email: Optional[str]) -> tuple[str, str]:
     """Create a concise, evidence-led first-contact email. Never promise inbox placement."""
-    safe_name = re.sub(r"\\s+", " ", name).strip()[:120]
+    safe_name = re.sub(r"\s+", " ", name).strip()[:120]
     subject = "A quick question about " + safe_name + "'s website"
     if website_state == "not_listed":
         evidence_line = (
@@ -889,15 +889,15 @@ def make_outreach_copy(name: str, location: str, website_state: str, audit: dict
         )
 
     body = (
-        "Hello " + safe_name + " team,\\n\\n"
-        + evidence_line + "\\n\\n"
-        + idea + "\\n\\n"
+        "Hello " + safe_name + " team,\n\n"
+        + evidence_line + "\n\n"
+        + idea + "\n\n"
         + "I build professional, mobile-friendly websites for businesses, with clear service pages and "
           "straightforward contact or enquiry journeys. I would keep any recommendation aligned with what "
-          "your team actually needs.\\n\\n"
-        + "Would a brief 10–15 minute conversation next week be useful? If not, no problem.\\n\\n"
-        + "Best regards,\\n"
-        + "Mosley | Web Developer\\n\\n"
+          "your team actually needs.\n\n"
+        + "Would a brief 10–15 minute conversation next week be useful? If not, no problem.\n\n"
+        + "Best regards,\n"
+        + "Mosley | Web Developer\n\n"
         + "If you would prefer not to receive another message from me, just reply and I will not contact you again."
     )
     return subject, body
@@ -1213,7 +1213,7 @@ def assistant_system_prompt(task: str) -> str:
             "respond calmly, take the concern seriously and ask for the information needed to resolve it; do not "
             "be defensive. If the customer says they are not interested, thank them and close politely without "
             "trying to overcome the refusal. If they ask not to be contacted, write only a brief acknowledgement "
-            "that their request will be respected; do not pitch, ask a question or suggest another contact. "
+            "that their do-not-contact / opt-out request will be respected; do not pitch, ask a question or suggest another contact. "
             "Do not imply that you read their inbox: the user pasted this message manually. Output only the reply "
             "body, ready for a human to review and edit, with no analysis, labels or invented signature."
         )
