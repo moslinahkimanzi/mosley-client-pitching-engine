@@ -842,7 +842,7 @@ def make_outreach_copy(name: str, location: str, website_state: str, audit: dict
     if website_state == "not_listed":
         evidence_line = (
             "Your public business listing appeared in my research, but it did not show an official website link. "
-            "That may simply be a limitation of the listing, so I wanted to check rather than assume."
+            "A missing link does not necessarily mean you do not have a website; it may simply be a limitation of the listing, so I wanted to check rather than assume."
         )
         idea = (
             "If improving your online presence is on your list, a simple mobile-friendly site could make your "
