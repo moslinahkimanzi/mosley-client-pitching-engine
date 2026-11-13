@@ -163,7 +163,7 @@ class ResearchWorkflowTest(unittest.TestCase):
         self.assertIn("address their actual question", prompt)
         self.assertIn("never invent", prompt)
         self.assertIn("opt-out", prompt)
-        self.assertIn("do not contact", prompt)
+        self.assertIn("do-not-contact", prompt)
         self.assertIn("output only the reply body", prompt)
 
     def test_research_generated_email_mentions_missing_website_carefully(self):
