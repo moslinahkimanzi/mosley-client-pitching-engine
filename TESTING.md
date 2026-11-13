@@ -26,12 +26,12 @@ Open http://localhost:8000 in Firefox. Use the same hostname consistently for br
 ## C. Functional walkthrough
 
 0. Open Website advisor. Generate recommendations for at least three business types (for example, restaurant, professional services and retail). Check that the recommended site type, pages, features, quality standards and improvement roadmap change with the selected inputs. Confirm the output is described as guidance, not a verified audit or guaranteed outcome.
-0a. Open Research → Research command centre. Search a named town or city (for example, Nairobi), choose a category and start with 3 results. Confirm results become unverified prospects and each new prospect gets a saved website plan, proposal and pending email draft. Confirm a missing website URL is labelled as "not listed", not proof of no website. Verify OpenStreetMap attribution appears.
-0b. If Gmail is configured and an OpenStreetMap record contains a valid public contact email, confirm MCAS creates a Gmail draft only. Check Gmail Drafts; confirm nothing was sent. If no public email is listed, confirm the draft remains in MCAS.
+0a. Open Research → Research command centre. Search a named town or city (for example, Nairobi), choose a category and start with 3 results. Confirm results become unverified prospects and each new prospect gets a saved website plan, proposal and pending email draft. Confirm a missing website URL is labelled as "not listed", not proof of no website. Verify Serper Places attribution appears.
+0b. If Gmail is configured and an Serper Places record contains a valid public contact email, confirm MCAS creates a Gmail draft only. Check Gmail Drafts; confirm nothing was sent. If no public email is listed, confirm the draft remains in MCAS.
 0c. Mark a test prospect as Client accepted / Won. Confirm Generate AI-builder prompt appears, and that the prompt includes the business category, proposed pages, features, quality and instructions not to fabricate content.
 0d. In Reply Assistant, manually paste a sample customer message and optionally enter the customer's email address. Save it, then create a Gmail draft from Saved Drafts. Confirm the generated reply is automatically saved to MCAS as pending approval. Confirm MCAS never asks for or reads inbox contents.
-0a. Open Research → Research command centre. Search a named town or city (for example, Nairobi), choose a category and start with 3 results. Confirm results become unverified prospects and each new prospect gets a saved website plan, proposal and pending email draft. Confirm a missing website URL is labelled as "not listed", not proof of no website. Verify OpenStreetMap attribution appears.
-0b. If Gmail is configured and an OpenStreetMap record contains a valid public contact email, confirm MCAS creates a Gmail draft only. Check Gmail Drafts; confirm nothing was sent. If no public email is listed, confirm the draft remains in MCAS.
+0a. Open Research → Research command centre. Search a named town or city (for example, Nairobi), choose a category and start with 3 results. Confirm results become unverified prospects and each new prospect gets a saved website plan, proposal and pending email draft. Confirm a missing website URL is labelled as "not listed", not proof of no website. Verify Serper Places attribution appears.
+0b. If Gmail is configured and an Serper Places record contains a valid public contact email, confirm MCAS creates a Gmail draft only. Check Gmail Drafts; confirm nothing was sent. If no public email is listed, confirm the draft remains in MCAS.
 0c. Mark a test prospect as Client accepted / Won. Confirm Generate AI-builder prompt appears, and that the prompt includes the business category, proposed pages, features, quality and instructions not to fabricate content.
 0d. In Reply Assistant, manually paste a sample customer message and optionally enter the customer's email address. Save it, then create a Gmail draft from Saved Drafts. Confirm MCAS never asks for or reads inbox contents.
 
@@ -45,7 +45,7 @@ Open http://localhost:8000 in Firefox. Use the same hostname consistently for br
 8. Export workspace data. Store the downloaded JSON securely; it contains customer data.
 9. Paste a sample customer reply into Reply Assistant. Verify opt-out language produces a response that respects the request.
 10. Run a quick check against a website you control. Check HTTP status/title/viewport results; this is not a full audit.
-11. Search without a Brave key. The interface should explain that search is not configured, not invent results.
+11. Search without a Serper key. The interface should explain that search is not configured, not invent results.
 12. Open a second Firefox private window, register another test user and confirm that user cannot see the first user's leads, drafts or follow-ups.
 13. Put harmless markup such as <img src=x onerror=alert(1)> in a prospect name/evidence field. It should display as text, not execute.
 14. Open DevTools → Network. Confirm /assets/app.js and same-origin /api/* calls load. Session cookies must not be stored in localStorage.
@@ -58,7 +58,7 @@ Manual website-check tests: try http://127.0.0.1, http://localhost, a private LA
 
 ## E. Optional integrations
 
-- Brave Search: configure BRAVE_SEARCH_API_KEY on the server, restart and test a discovery query. Verify source links and facts yourself.
+- Serper Search: configure SERPER_API_KEY on the server, restart and test a discovery query. Verify source links and facts yourself.
 - AI: configure AI_API_BASE_URL, AI_API_KEY and AI_MODEL on the server. Test email, reply and proposal drafting. Treat every generated claim as untrusted until verified.
 - Gmail: configure Google OAuth client ID/secret/redirect URI and MCAS_ENCRYPTION_KEY. Connect a test Gmail account, save a draft with a recipient and click Create Gmail draft. Confirm it appears in Gmail Drafts and has not been sent. Also test auto-draft-on-research using a safe test address. Verify no inbox-reading scope is requested and there are no message-list/get/send application routes. Test disconnect.
 - Provider tests may incur usage charges. Keep credentials on the server, never in the repository or browser.
@@ -83,5 +83,5 @@ This checklist is not a penetration test and cannot prove the system is immune t
 - Verify each prospect displays an opportunity-priority score and its reasons; confirm it is described as a research heuristic, not buying intent.
 - Verify the result summary shows reviewed count, newly saved count and highest score.
 - Verify a repeated research run uses cached business results but still returns a resolved place label.
-- Verify map data with no website tag is described as "not listed", never "no website".
+- Verify business search data with no website tag is described as "not listed", never "no website".
 - Verify public website checks are labelled lightweight and do not claim a complete SEO/performance/accessibility/security audit.
