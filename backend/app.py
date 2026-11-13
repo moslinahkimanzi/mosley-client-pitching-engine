@@ -835,40 +835,71 @@ def business_strategy(tags: dict) -> dict:
     }
 
 def make_outreach_copy(name: str, location: str, website_state: str, audit: dict,
-                       strategy: dict, contact_email: Optional[str]) -> tuple[str, str]:
-    subject = "A website idea for " + name
+                        strategy: dict, contact_email: Optional[str]) -> tuple[str, str]:
+    """Create a concise, evidence-led first-contact email. Never promise inbox placement."""
+    safe_name = re.sub(r"\s+", " ", name).strip()[:120]
+    subject = "A quick question about " + safe_name + "'s website"
     if website_state == "not_listed":
-        evidence_line = ("I found your public business listing, but it did not include an official website link. "
-                         "That does not necessarily mean you do not have a website, so I wanted to check first.")
+        evidence_line = (
+            "Your public business listing appeared in my research, but it did not show an official website link. "
+            "A missing link does not necessarily mean you do not have a website; it may simply be a limitation of the listing, so I wanted to check rather than assume."
+        )
+        idea = (
+            "If improving your online presence is on your list, a simple mobile-friendly site could make your "
+            "services, location and contact options easier for prospective customers to find."
+        )
     elif website_state == "broken":
-        evidence_line = ("I checked the website listed for your business and it returned HTTP "
-                         + str(audit.get("http_status")) + " during my check. This may be temporary, "
-                         "but it seemed worth flagging.")
-        subject = "A website issue I noticed for " + name
+        status = audit.get("http_status")
+        evidence_line = (
+            "When I checked the website link shown on your public listing, it returned HTTP "
+            + str(status if status is not None else "an unavailable response")
+            + ". This could be temporary, and I have not assumed the cause."
+        )
+        subject = "Website link check for " + safe_name
+        idea = (
+            "I can help investigate the issue and, if useful, outline a reliable mobile-friendly way for visitors "
+            "to reach your services and contact you."
+        )
     elif website_state == "needs_improvement":
         observations = []
         if audit.get("has_viewport_meta") is False:
-            observations.append("I could not find a mobile viewport setting in the page HTML")
+            observations.append("a mobile viewport setting was not detected")
         if audit.get("has_meta_description") is False:
-            observations.append("I could not find a meta description")
+            observations.append("a meta description was not detected")
         if audit.get("title") is None:
-            observations.append("I could not detect a page title")
-        evidence_line = ("I ran a limited technical check on the public website. " +
-                         ("; ".join(observations) + "." if observations else "There may be room to improve the customer journey.") +
-                         " This was not a full audit.")
+            observations.append("a page title was not detected")
+        detail = "; ".join(observations) if observations else "there may be an opportunity to simplify the visitor journey"
+        evidence_line = (
+            "I ran a limited automated check of the public website and noticed " + detail
+            + ". It was not a full audit, so these are only initial observations."
+        )
+        subject = "A small website improvement for " + safe_name
+        idea = (
+            "I would be happy to suggest a short, prioritised improvement plan focused on mobile usability, "
+            "clear service information and an easy enquiry path."
+        )
     else:
-        evidence_line = ("I found your public business listing while researching " + location +
-                         ". I have not confirmed a specific website problem, so I do not want to make assumptions.")
-    body = ("Hello " + name + " team,\n\n"
-            "I came across your business while researching " + location + ". " + evidence_line + "\n\n"
-            "I build practical, mobile-friendly websites that help customers understand what a business offers "
-            "and take the next step. For your business, I would suggest starting with a "
-            + strategy["type"].lower() + ", including " + ", ".join(strategy["pages"][:3]).lower()
-            + ", and a clear contact or enquiry path.\n\n"
-            "Would you be open to a short conversation? I can share a tailored outline and a clear scope "
-            "before you decide whether it is useful.\n\n"
-            "Best regards,\nMosley | Web Developer\n\n"
-            "If this is not relevant, let me know and I will not follow up.")
+        evidence_line = (
+            "I came across your public business listing while researching businesses in " + location
+            + ". I have not confirmed a specific website problem, so I do not want to make assumptions."
+        )
+        idea = (
+            "If a website refresh or a clearer way for customers to enquire is relevant, I can share a few "
+            "practical ideas based on your services and priorities."
+        )
+
+    body = (
+        "Hello " + safe_name + " team,\n\n"
+        + evidence_line + "\n\n"
+        + idea + "\n\n"
+        + "I build professional, mobile-friendly websites for businesses, with clear service pages and "
+          "straightforward contact or enquiry journeys. I would keep any recommendation aligned with what "
+          "your team actually needs.\n\n"
+        + "Would a brief 10–15 minute conversation next week be useful? If not, no problem.\n\n"
+        + "Best regards,\n"
+        + "Mosley | Web Developer\n\n"
+        + "If you would prefer not to receive another message from me, just reply and I will not contact you again."
+    )
     return subject, body
 
 @app.post("/api/research/run")
@@ -1162,6 +1193,44 @@ def audit_website(payload: dict, user=Depends(current_user)):
         audit(c, user["id"], "website.audit", {"url": result.get("url"), "status": result.get("http_status")})
     return result
 
+def assistant_system_prompt(task: str) -> str:
+    shared = (
+        "You are MCAS's professional business-communication assistant. Be accurate, warm, clear and commercially "
+        "persuasive without pressure. Never invent customer facts, prior conversations, portfolio items, results, "
+        "discounts, prices, deadlines, guarantees, testimonials or capabilities. Use only the supplied context. "
+        "Do not use deceptive urgency, manipulative language, exaggerated claims, keyword stuffing or spam tactics. "
+        "Keep messages concise and natural. Do not claim an email is guaranteed to avoid spam. "
+    )
+    if task == "reply":
+        return shared + (
+            "TASK: write a reply to the customer's pasted message. Address their actual question or concern first; "
+            "show that you understood it; then give the most useful, honest answer and one clear next step. "
+            "Use the supplied service context but do not claim it includes something not stated there. "
+            "When asked about price, explain that an accurate quote depends on confirmed scope and ask only for "
+            "the key missing requirements; never invent a number. For timing, ask for the target date and scope "
+            "before promising a schedule. For interest, suggest a brief discovery conversation and ask one simple "
+            "question. For objections, acknowledge the concern and offer a low-pressure option. For complaints, "
+            "respond calmly, take the concern seriously and ask for the information needed to resolve it; do not "
+            "be defensive. If the customer says they are not interested, thank them and close politely without "
+            "trying to overcome the refusal. If they ask not to be contacted, write only a brief acknowledgement "
+            "that their do-not-contact / opt-out request will be respected; do not pitch, ask a question or suggest another contact. "
+            "Do not imply that you read their inbox: the user pasted this message manually. Output only the reply "
+            "body, ready for a human to review and edit, with no analysis, labels or invented signature."
+        )
+    if task == "email":
+        return shared + (
+            "TASK: write a first-contact business email that is specific to the supplied verified evidence. "
+            "If evidence is incomplete, say so rather than claiming a problem. Use a relevant subject and a "
+            "natural, respectful call to action. Include a polite opt-out sentence. Output the subject and body "
+            "clearly, without unsupported claims."
+        )
+    return shared + (
+        "TASK: prepare a useful, structured proposal based only on supplied requirements and context. "
+        "Mark unknown scope, prices and delivery dates as items to confirm. Do not invent them. "
+        "Output the proposal text only."
+    )
+
+
 @app.post("/api/assistant/draft")
 def ai_assistant(payload: AIIn, user=Depends(current_user)):
     base = os.getenv("AI_API_BASE_URL", "").rstrip("/")
@@ -1180,10 +1249,9 @@ def ai_assistant(payload: AIIn, user=Depends(current_user)):
         lead = owned_lead(c, payload.lead_id, user["id"])
         if payload.task == "email" and int(lead["do_not_contact"] or 0):
             raise HTTPException(403, "This prospect is marked do-not-contact; outreach drafting is blocked.")
-    system = ("You are an ethical B2B website-development sales assistant. Never invent observations, "
-              "customer facts, metrics, urgency or testimonials. Use only the supplied evidence. If evidence "
-              "is insufficient, explicitly say that research is incomplete. Respect do-not-contact requests. "
-              "Write concise, respectful, personalised business communication.")
+    system = assistant_system_prompt(payload.task)
+    if payload.task == "reply" and not payload.incoming.strip():
+        raise HTTPException(422, "Paste the customer's message before generating a reply.")
     input_data = payload.model_dump()
     input_data.update({"prospect_name": lead["name"], "market": lead["market"], "evidence": lead["evidence"]})
     user_prompt = json.dumps(input_data, ensure_ascii=False)
