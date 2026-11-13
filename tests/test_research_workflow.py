@@ -166,6 +166,12 @@ class ResearchWorkflowTest(unittest.TestCase):
         self.assertIn("do-not-contact", prompt)
         self.assertIn("output only the reply body", prompt)
 
+    def test_reply_prompt_requires_contextual_answers_not_generic_templates(self):
+        prompt = mcas.assistant_system_prompt("reply").lower()
+        self.assertIn("read the entire customer message", prompt)
+        self.assertIn("do not use a generic template", prompt)
+        self.assertIn("address every direct question", prompt)
+
     def test_research_generated_email_mentions_missing_website_carefully(self):
         subject, body = mcas.make_outreach_copy(
             "Example Salon", "Nairobi", "not_listed", {},
