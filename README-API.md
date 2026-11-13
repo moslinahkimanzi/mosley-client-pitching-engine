@@ -9,7 +9,7 @@ Use Python 3.12 or later and Node.js 22 for the full test suite.
 ```bash
 git clone https://github.com/moslinahkimanzi/mosley-client-pitching-engine.git
 cd mosley-client-pitching-engine
-git checkout build/production-foundation
+git checkout feature/mcas-research-completion
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -27,7 +27,7 @@ set +a
 uvicorn backend.app:app --host 127.0.0.1 --port 8000
 ``
 
-Open Firefox at http://127.0.0.1:8000. Create an account on the welcome screen. The API's interactive documentation is at http://127.0.0.1:8000/docs.
+Add your Serper key to `.env` as `SERPER_API_KEY=...` (never paste it into browser code or commit it). For Kenyan Google results, set `SERPER_GL=ke` and `SERPER_HL=en`. Open Firefox at http://127.0.0.1:8000. Create an account on the welcome screen. The API's interactive documentation is at http://127.0.0.1:8000/docs.
 
 ## Implemented in this branch
 
