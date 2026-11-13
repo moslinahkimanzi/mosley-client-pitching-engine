@@ -174,6 +174,8 @@ class ResearchWorkflowTest(unittest.TestCase):
         self.assertIn("Example Salon", subject)
         self.assertIn("does not necessarily mean", body.lower())
         self.assertIn("will not contact you again", body.lower())
+        self.assertIn("\n\n", body)
+        self.assertNotIn("\\n", body)
 
 
 if __name__ == "__main__":
