@@ -158,6 +158,23 @@ class ResearchWorkflowTest(unittest.TestCase):
         self.assertIn("does not read", capability)
         self.assertIn("no send endpoint", capability)
 
+    def test_reply_assistant_prompt_is_persuasive_without_making_promises(self):
+        prompt = mcas.assistant_system_prompt("reply").lower()
+        self.assertIn("address their actual question", prompt)
+        self.assertIn("never invent", prompt)
+        self.assertIn("opt-out", prompt)
+        self.assertIn("do not contact", prompt)
+        self.assertIn("output only the reply body", prompt)
+
+    def test_research_generated_email_mentions_missing_website_carefully(self):
+        subject, body = mcas.make_outreach_copy(
+            "Example Salon", "Nairobi", "not_listed", {},
+            {"type": "Salon website", "pages": ["Services", "Contact"]}, None
+        )
+        self.assertIn("Example Salon", subject)
+        self.assertIn("does not necessarily mean", body.lower())
+        self.assertIn("will not contact you again", body.lower())
+
 
 if __name__ == "__main__":
     unittest.main()
