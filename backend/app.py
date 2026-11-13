@@ -137,6 +137,7 @@ def init_db():
         add_column(c, "leads", "source_url", "TEXT")
         add_column(c, "leads", "do_not_contact", "INTEGER NOT NULL DEFAULT 0")
         add_column(c, "drafts", "to_email", "TEXT")
+        add_column(c, "drafts", "gmail_draft_id", "TEXT")
 
 init_db()
 
@@ -523,24 +524,17 @@ def save_proposal(payload: ProposalIn, user=Depends(current_user)):
 
 @app.get("/api/research/search")
 def research_search(q: str = Query(min_length=2, max_length=160), user=Depends(current_user)):
-    key = os.getenv("BRAVE_SEARCH_API_KEY")
-    if not key:
-        raise HTTPException(503, "Live search is not configured. Add BRAVE_SEARCH_API_KEY on the server.")
-    params = urllib.parse.urlencode({"q": q, "count": 10})
-    req = urllib.request.Request("https://api.search.brave.com/res/v1/web/search?" + params,
-        headers={"Accept": "application/json", "X-Subscription-Token": key, "User-Agent": "MCAS/1.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=12) as r:
-            data = json.loads(r.read(1_500_000))
-    except Exception:
-        raise HTTPException(502, "Search provider request failed")
-    results = data.get("web", {}).get("results", [])
+    data = serper_request("search", {"q": q, "num": 10})
+    organic = data.get("organic", [])
+    results = [{"title": x.get("title"), "url": x.get("link"),
+                "description": x.get("snippet")} for x in organic[:10]
+               if isinstance(x, dict) and isinstance(x.get("link"), str)
+               and x.get("link", "").startswith(("https://", "http://"))]
     with db() as c:
-        audit(c, user["id"], "research.search", {"query": q[:100], "count": len(results)})
-    return {"query": q, "results": [{"title": x.get("title"), "url": x.get("url"),
-            "description": x.get("description")} for x in results[:10]],
-            "provider": "Brave Search",
-            "warning": "Search results are discovery leads, not verified facts. Open and verify each source before contacting a business."}
+        audit(c, user["id"], "research.search", {"query": q[:100], "count": len(results), "provider": "Serper"})
+    return {"query": q, "results": results, "provider": "Serper",
+            "warning": "Serper web results are discovery leads, not verified facts. Open and verify each source before contacting a business."}
+
 
 # Outbound website checks pin a validated public IP for each connection and never follow redirects blindly.
 class PinnedHTTP(http.client.HTTPConnection):
@@ -638,40 +632,128 @@ def safe_site_fetch(initial_url):
     raise HTTPException(502, "Too many redirects")
 
 
-# Local, low-volume business discovery. Results are incomplete OSM records, not proof that
-# a business does or does not have a website. Cache searches and keep result counts bounded.
-_OVERPASS_CACHE: dict[str, tuple[float, list[dict]]] = {}
-OVERPASS_DEFAULT = "https://overpass-api.de/api/interpreter"
+# All business discovery is powered by Serper. No map/geocoding service is required.
+SERPER_API_ROOT = "https://google.serper.dev"
+_SERPER_CACHE: dict[str, tuple[float, list[dict]]] = {}
+_SERPER_CACHE_TTL = 300
 
-def overpass_query_for(location: str, industry: str) -> str:
-    safe_name = re.sub(r"[^\w\s,'-]", "", location.strip(), flags=re.UNICODE).strip()
-    if not safe_name:
-        raise HTTPException(422, "Use a town, city or area name containing letters or numbers.")
-    if industry == "restaurant":
-        filters = ['nwr["name"]["amenity"~"^(restaurant|cafe|fast_food|bar|pub)$"](area.searchArea);']
-    elif industry == "salon":
-        filters = ['nwr["name"]["shop"~"^(hairdresser|beauty)$"](area.searchArea);']
-    elif industry == "retail":
-        filters = ['nwr["name"]["shop"](area.searchArea);']
-    elif industry == "professional":
-        filters = ['nwr["name"]["office"](area.searchArea);']
-    elif industry == "hotel":
-        filters = ['nwr["name"]["tourism"~"^(hotel|guest_house|hostel)$"](area.searchArea);']
-    elif industry == "healthcare":
-        filters = ['nwr["name"]["amenity"~"^(clinic|doctors|dentist|hospital)$"](area.searchArea);']
-    elif industry == "education":
-        filters = ['nwr["name"]["amenity"~"^(school|college|university|kindergarten)$"](area.searchArea);']
+
+def serper_request(endpoint: str, payload: dict) -> dict:
+    """Call an allowlisted Serper endpoint using the server-side API key."""
+    if endpoint not in {"search", "places"}:
+        raise HTTPException(400, "Unsupported Serper endpoint.")
+    key = os.getenv("SERPER_API_KEY", "").strip()
+    if not key:
+        raise HTTPException(503, "Serper is not configured. Add SERPER_API_KEY to the server .env file and restart MCAS.")
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        SERPER_API_ROOT + "/" + endpoint,
+        data=body,
+        headers={"Content-Type": "application/json", "X-API-KEY": key,
+                 "Accept": "application/json", "User-Agent": "MCAS/2.0"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            data = json.loads(response.read(2_000_000))
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            raise HTTPException(502, "Serper rejected the API key. Check SERPER_API_KEY in your server .env file.")
+        if exc.code == 429:
+            raise HTTPException(429, "Serper query limit or rate limit reached. Check your Serper account quota.")
+        raise HTTPException(502, "Serper returned HTTP " + str(exc.code) + ".")
+    except urllib.error.URLError:
+        raise HTTPException(502, "MCAS could not reach Serper. Check your internet connection and try again.")
+    except Exception:
+        raise HTTPException(502, "Serper returned an unreadable response. Check the API configuration and try again.")
+    if not isinstance(data, dict):
+        raise HTTPException(502, "Serper returned an unexpected response format.")
+    return data
+
+
+def serper_query_for(payload: ResearchRunIn) -> str:
+    """Build a focused local-business query from the location, category and keyword."""
+    labels = {
+        "any": "businesses",
+        "restaurant": "restaurants and cafes",
+        "salon": "salons and beauty businesses",
+        "retail": "retail shops",
+        "professional": "professional offices",
+        "hotel": "hotels and accommodation",
+        "healthcare": "clinics and healthcare businesses",
+        "education": "schools and education businesses",
+    }
+    category = labels.get(payload.industry, "businesses")
+    keyword = payload.keywords.strip()
+    if keyword:
+        terms = keyword if category.casefold() in keyword.casefold() else keyword + " " + category
     else:
-        filters = [
-            'nwr["name"]["amenity"~"^(restaurant|cafe|fast_food|bar|pub|clinic|doctors|dentist|school|college)$"](area.searchArea);',
-            'nwr["name"]["shop"](area.searchArea);',
-            'nwr["name"]["office"](area.searchArea);',
-            'nwr["name"]["tourism"~"^(hotel|guest_house|hostel)$"](area.searchArea);',
-            'nwr["name"]["craft"](area.searchArea);'
-        ]
-    return ('[out:json][timeout:25];'
-            'area["name"~"^' + safe_name + '$",i]["boundary"="administrative"]->.searchArea;'
-            '(' + ''.join(filters) + ');out center tags 50;')
+        terms = category
+    return (terms + " in " + payload.location.strip()).strip()
+
+
+def serper_business_tags(industry: str, category: str = "") -> dict:
+    """Translate Serper's category labels to the existing website-strategy categories."""
+    value = (category or "").casefold()
+    tags = {}
+    if industry == "restaurant" or any(word in value for word in ("restaurant", "cafe", "coffee", "food")):
+        tags["amenity"] = "restaurant"
+    elif industry == "salon" or any(word in value for word in ("salon", "beauty", "hair", "barber")):
+        tags["shop"] = "hairdresser"
+    elif industry == "retail" or any(word in value for word in ("retail", "shop", "store")):
+        tags["shop"] = "retail"
+    elif industry == "hotel" or any(word in value for word in ("hotel", "guest house", "hostel", "accommodation")):
+        tags["tourism"] = "hotel"
+    elif industry == "healthcare" or any(word in value for word in ("clinic", "health", "medical", "dentist", "doctor")):
+        tags["amenity"] = "clinic"
+    elif industry == "education" or any(word in value for word in ("school", "college", "university", "education")):
+        tags["amenity"] = "school"
+    elif industry == "professional":
+        tags["office"] = "company"
+    return tags
+
+
+def serper_source_url(place: dict, name: str, address: str) -> str:
+    candidate = place.get("link") or place.get("mapsUrl") or place.get("googleMapsUrl")
+    if isinstance(candidate, str) and candidate.startswith(("https://", "http://")):
+        return candidate
+    cid = place.get("cid")
+    if cid:
+        return "https://www.google.com/maps?cid=" + urllib.parse.quote(str(cid), safe="")
+    query = " ".join(part for part in (name, address) if part)
+    return "https://www.google.com/maps/search/?" + urllib.parse.urlencode({"api": "1", "query": query})
+
+
+def opportunity_score(tags: dict, website_state: str, website_audit: dict,
+                      email: Optional[str], phone: Optional[str]) -> tuple[int, list[str]]:
+    """Transparent heuristic priority; not a claim that a business wants a website."""
+    score = 0
+    reasons = []
+    if website_state == "broken":
+        score += 35; reasons.append("listed website returned an error")
+    elif website_state == "needs_improvement":
+        score += 28; reasons.append("limited page checks found missing technical basics")
+    elif website_state == "not_listed":
+        score += 12; reasons.append("website URL is not listed; existence remains unverified")
+    elif website_state == "access_restricted":
+        score += 8; reasons.append("website check was restricted")
+    elif website_state == "needs_review":
+        score += 5; reasons.append("website could not be verified")
+    else:
+        score += 3; reasons.append("listed website responded to a lightweight check")
+    if email:
+        score += 15; reasons.append("public contact email listed")
+    if phone:
+        score += 10; reasons.append("public phone number listed")
+    if any(tags.get(k) for k in ("addr:street", "addr:city", "addr:postcode")):
+        score += 5; reasons.append("public address details listed")
+    if website_audit.get("has_viewport_meta") is False:
+        score += 8; reasons.append("mobile viewport metadata not detected")
+    if website_audit.get("has_h1") is False:
+        score += 4; reasons.append("main heading not detected")
+    if website_audit.get("has_form") is False and website_state in {"working", "needs_improvement"}:
+        score += 3; reasons.append("no HTML form detected on the fetched page")
+    return min(100, score), reasons
 
 def business_strategy(tags: dict) -> dict:
     amenity = str(tags.get("amenity", "")).lower()
@@ -730,6 +812,17 @@ def business_strategy(tags: dict) -> dict:
                         "Build accessible, privacy-conscious pages",
                         "Test appointment and contact workflows"]
         }
+    if amenity in {"school", "college", "university", "kindergarten"} or str(tags.get("office", "")).lower() == "educational_institution":
+        return {
+            "type": "Education and training website",
+            "pages": ["Home and learning outcomes", "Courses or programmes", "Instructors and accreditation",
+                      "Admissions or registration", "FAQs and contact"],
+            "features": ["Course catalogue and schedules", "Application or registration enquiry",
+                         "Verified instructor and accreditation information", "Accessible learning resources"],
+            "roadmap": ["Confirm programmes, schedules, fees and entry requirements",
+                        "Build clear course pages and a mobile-friendly enquiry path",
+                        "Verify accreditation claims and publish approved learning information"]
+        }
     return {
         "type": "Professional or local-business website",
         "pages": ["Home and value proposition", "Services", "About and credentials",
@@ -782,46 +875,57 @@ def make_outreach_copy(name: str, location: str, website_state: str, audit: dict
 def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
     location = payload.location.strip()
     if not location or not re.search(r"[A-Za-z0-9]", location):
-        raise HTTPException(422, "Enter a specific town, city or administrative area.")
-    cache_key = location.casefold() + "|" + payload.industry
-    cached = _OVERPASS_CACHE.get(cache_key)
-    elements = cached[1] if cached and time.time() - cached[0] < 900 else None
-    if elements is None:
-        endpoint = os.getenv("MCAS_OVERPASS_ENDPOINT", OVERPASS_DEFAULT)
-        parsed_endpoint = urllib.parse.urlparse(endpoint)
-        if parsed_endpoint.scheme != "https" or not parsed_endpoint.hostname:
-            raise HTTPException(503, "The configured OpenStreetMap discovery endpoint must use HTTPS.")
-        query = overpass_query_for(location, payload.industry)
-        req = urllib.request.Request(endpoint, data=urllib.parse.urlencode({"data": query}).encode(),
-            headers={"Content-Type": "application/x-www-form-urlencoded",
-                     "User-Agent": "MCAS/1.1 (user-triggered local-business discovery)",
-                     "Accept": "application/json"}, method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=35) as response:
-                data = json.loads(response.read(2_000_000))
-            elements = data.get("elements", [])
-            _OVERPASS_CACHE[cache_key] = (time.time(), elements)
-        except Exception:
-            raise HTTPException(502, "OpenStreetMap discovery is temporarily unavailable. Try again later or use manual web search.")
+        raise HTTPException(422, "Enter a town, city or named administrative area.")
+    query = serper_query_for(payload)
+    cache_key = query.casefold()
+    cached = _SERPER_CACHE.get(cache_key)
+    places = cached[1] if cached and time.time() - cached[0] < _SERPER_CACHE_TTL else None
+    if places is None:
+        request_payload = {"q": query}
+        gl = os.getenv("SERPER_GL", "").strip()
+        hl = os.getenv("SERPER_HL", "en").strip()
+        if gl:
+            request_payload["gl"] = gl
+        if hl:
+            request_payload["hl"] = hl
+        data = serper_request("places", request_payload)
+        places = data.get("places") or []
+        # When Places has no records, use Serper's ordinary web results as a fallback.
+        # These are saved as unverified source links, never assumed to be official websites.
+        if not places:
+            web_data = serper_request("search", {"q": query, "num": min(10, payload.max_results)})
+            places = [{
+                "title": item.get("title"),
+                "link": item.get("link"),
+                "description": item.get("snippet"),
+                "_source_type": "web",
+            } for item in web_data.get("organic", [])
+              if isinstance(item, dict) and isinstance(item.get("title"), str)
+              and isinstance(item.get("link"), str)
+              and item.get("link", "").startswith(("https://", "http://"))]
+        _SERPER_CACHE[cache_key] = (time.time(), places)
+
     discovered = []
     saved_count = 0
-    for element in elements:
+    seen_names = set()
+    for place in places:
         if len(discovered) >= payload.max_results:
             break
-        tags = element.get("tags") or {}
-        name = str(tags.get("name", "")).strip()
-        if not name:
+        if not isinstance(place, dict):
             continue
-        keyword = payload.keywords.strip().casefold()
-        searchable = " ".join(str(tags.get(k, "")) for k in ("name", "brand", "amenity", "shop", "office", "tourism", "cuisine", "craft")).casefold()
-        if keyword and keyword not in searchable:
+        name = str(place.get("title") or place.get("name") or "").strip()
+        if not name or name.casefold() in seen_names:
             continue
-        raw_website = tags.get("website") or tags.get("contact:website") or tags.get("url")
+        seen_names.add(name.casefold())
+
+        address = str(place.get("address") or "").strip()
+        category = str(place.get("category") or place.get("type") or "").strip()
+        website_value = place.get("website") or place.get("websiteUrl")
         website = None
         website_audit = {}
         website_state = "not_listed"
-        if raw_website:
-            website = str(raw_website).strip()
+        if isinstance(website_value, str) and website_value.strip():
+            website = website_value.strip()
             if not re.match(r"^https?://", website, re.I):
                 website = "https://" + website
             try:
@@ -841,57 +945,88 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                     website_state = "needs_review"
             except HTTPException:
                 website_state = "needs_review"
-        osm_type = str(element.get("type", "node"))
-        osm_id = str(element.get("id", ""))
-        source_url = "https://www.openstreetmap.org/" + osm_type + "/" + osm_id
-        email = tags.get("contact:email") or tags.get("email")
-        if email and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", str(email)):
-            email = None
-        phone = tags.get("contact:phone") or tags.get("phone")
+
+        phone_value = place.get("phoneNumber") or place.get("phone")
+        phone = str(phone_value).strip() if phone_value else None
+        email_value = place.get("email")
+        email = str(email_value).strip() if email_value and re.fullmatch(
+            r"[^\s@]+@[^\s@]+\.[^\s@]+", str(email_value).strip()
+        ) else None
+        source_url = serper_source_url(place, name, address)
+        tags = serper_business_tags(payload.industry, category)
+        if address:
+            tags["addr:street"] = address
         strategy = business_strategy(tags)
-        facts = ["Discovered in OpenStreetMap public data; verify the business is still operating."]
-        for category_key in ("amenity", "shop", "office", "tourism", "craft"):
-            if tags.get(category_key):
-                facts.append("OpenStreetMap category " + category_key + ": " + str(tags[category_key]) + ".")
+        score, score_reasons = opportunity_score(tags, website_state, website_audit, email, phone)
+
+        facts = [
+            "Discovered through Serper Places for the search: " + query + ".",
+            "This is an unverified discovery record; confirm the business is operating and the details are current.",
+            "Research priority score: " + str(score) + "/100. This is a sorting aid, not evidence of buying intent.",
+        ]
+        if category:
+            facts.append("Serper category: " + category + ".")
+        if address:
+            facts.append("Public listing address: " + address + ".")
+        if phone:
+            facts.append("Public listing phone: " + phone + ".")
+        if place.get("rating") is not None:
+            facts.append("Provider-listed rating: " + str(place.get("rating")) +
+                         ((" from " + str(place.get("ratingCount")) + " reviews") if place.get("ratingCount") is not None else "") + ".")
         if website_state == "not_listed":
-            facts.append("No website URL was listed in this OpenStreetMap record. This is not proof that the business has no website.")
+            facts.append("Serper did not return an official website URL. This does not prove the business has no website; verify independently.")
         elif website_state == "broken":
-            facts.append("The listed website returned HTTP " + str(website_audit.get("http_status")) + " during this check.")
+            facts.append("The listed website returned HTTP " + str(website_audit.get("http_status")) + " during this limited check.")
         elif website_state == "needs_improvement":
             findings = []
-            if website_audit.get("has_viewport_meta") is False: findings.append("mobile viewport metadata not detected")
-            if website_audit.get("has_meta_description") is False: findings.append("meta description not detected")
-            if website_audit.get("title") is None: findings.append("page title not detected")
-            facts.append("Limited page check: " + ", ".join(findings) + ".")
+            if website_audit.get("has_viewport_meta") is False:
+                findings.append("mobile viewport metadata not detected")
+            if website_audit.get("has_meta_description") is False:
+                findings.append("meta description not detected")
+            if website_audit.get("title") is None:
+                findings.append("page title not detected")
+            facts.append("Limited page check: " + ", ".join(findings) + ". This is not a full website audit.")
         elif website_state == "access_restricted":
             facts.append("The website restricted this automated check; no broken-site conclusion was made.")
         elif website_state == "needs_review":
             facts.append("The website could not be reliably checked; do not describe it as broken.")
         elif website_audit:
             facts.append("Website responded with HTTP " + str(website_audit.get("http_status")) + ".")
-        if tags.get("addr:street") or tags.get("addr:city"):
-            facts.append("Public address tags are present in the source listing.")
+        if place.get("_source_type") == "web":
+            facts.append("This entry came from a Serper web result because Places returned no records. Its source link is not assumed to be the business's official website.")
         evidence = " ".join(facts) + " Source: " + source_url
         if website_audit.get("url"):
             evidence += " Website checked: " + website_audit["url"] + " (limited technical observations only)."
+
         with db() as c:
-            existing = c.execute("SELECT id FROM leads WHERE user_id=? AND lower(name)=lower(?) AND lower(market)=lower(?)",
-                                  (user["id"], name, location)).fetchone()
+            existing = c.execute(
+                "SELECT id FROM leads WHERE user_id=? AND lower(name)=lower(?) AND lower(market)=lower(?)",
+                (user["id"], name, location),
+            ).fetchone()
             if existing:
-                discovered.append({"name": name, "lead_id": existing["id"], "duplicate": True,
+                discovered.append({
+                    "name": name, "lead_id": existing["id"], "duplicate": True,
                     "website": website, "website_state": website_state, "evidence": evidence,
                     "source_url": source_url, "recommendation": strategy["type"],
-                    "pages": strategy["pages"], "draft_created": False, "proposal_created": False})
+                    "pages": strategy["pages"], "opportunity_score": score,
+                    "score_reasons": score_reasons, "contact_email": email,
+                    "contact_phone": phone, "website_audit": website_audit,
+                    "draft_created": False, "proposal_created": False,
+                })
                 continue
+
             lead_id = secrets.token_urlsafe(15)
             stamp = now()
-            c.execute("""INSERT INTO leads(id,user_id,name,website,market,evidence,status,score,created_at,updated_at,
-                contact_email,contact_phone,source_url,do_not_contact) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0)""",
-                (lead_id, user["id"], name, website, location, evidence, "Unverified", 0, stamp, stamp,
-                 str(email) if email else None, str(phone) if phone else None, source_url))
+            c.execute(
+                """INSERT INTO leads(id,user_id,name,website,market,evidence,status,score,created_at,updated_at,
+                   contact_email,contact_phone,source_url,do_not_contact) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0)""",
+                (lead_id, user["id"], name, website, location, evidence, "Unverified", score, stamp, stamp,
+                 email, phone, source_url),
+            )
             title = "Website opportunity plan — " + name
-            proposal = ("WEBSITE OPPORTUNITY PLAN\n\nBusiness: " + name + "\nLocation: " + location +
-                "\nDiscovery source: OpenStreetMap public listing (" + source_url + ")\n\n"
+            proposal = (
+                "WEBSITE OPPORTUNITY PLAN\n\nBusiness: " + name + "\nLocation: " + location +
+                "\nDiscovery source: Serper Places / Google Maps result (" + source_url + ")\n\n"
                 "1. DISCOVERY OBSERVATIONS (VERIFY WITH BUSINESS)\n" + evidence + "\n\n"
                 "2. RECOMMENDED DIRECTION\n" + strategy["type"] + "\n\n"
                 "3. SUGGESTED PAGES\n- " + "\n- ".join(strategy["pages"]) + "\n\n"
@@ -900,21 +1035,29 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                 "6. SCOPE TO CONFIRM WITH THE CLIENT\nContent, brand assets, domain, hosting, budget, delivery timeline, "
                 "maintenance, integrations and who will update the site.\n\n"
                 "7. COMMERCIALS\nPrice and dates to be agreed after discovery. Do not invent a quote or promise results.\n\n"
-                "IMPORTANT: OpenStreetMap records are incomplete. 'Website not listed' does not prove there is no website. "
-                "Confirm the business identity and all observations before sharing this proposal.")
+                "IMPORTANT: Search listings can be incomplete or out of date. A missing website URL is not proof that "
+                "the business has no website. Verify the business identity and all observations before sharing this proposal."
+            )
             proposal_id = secrets.token_urlsafe(15)
             c.execute("INSERT INTO proposals VALUES(?,?,?,?,?,?,?,?)",
-                (proposal_id, user["id"], lead_id, title, proposal, "draft", stamp, stamp))
-            subject, body = make_outreach_copy(name, location, website_state, website_audit, strategy, str(email) if email else None)
+                      (proposal_id, user["id"], lead_id, title, proposal, "draft", stamp, stamp))
+            subject, body = make_outreach_copy(
+                name, location, website_state, website_audit, strategy, email
+            )
             draft_id = secrets.token_urlsafe(15)
-            c.execute("""INSERT INTO drafts(id,user_id,lead_id,kind,subject,body,state,created_at,to_email)
-                VALUES(?,?,?,?,?,?,?,?,?)""",
-                (draft_id, user["id"], lead_id, "Cold email", subject, body, "pending_approval", stamp,
-                 str(email) if email else None))
-            audit(c, user["id"], "research.prospect_prepared", {"lead_id": lead_id,
-                "website_state": website_state, "draft_id": draft_id, "proposal_id": proposal_id})
+            c.execute(
+                """INSERT INTO drafts(id,user_id,lead_id,kind,subject,body,state,created_at,to_email)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                (draft_id, user["id"], lead_id, "Cold email", subject, body, "pending_approval", stamp, email),
+            )
+            audit(c, user["id"], "research.prospect_prepared", {
+                "lead_id": lead_id, "website_state": website_state,
+                "draft_id": draft_id, "proposal_id": proposal_id, "provider": "Serper",
+            })
             saved_count += 1
+
         gmail_draft_created = False
+        gmail_draft_error = None
         if email:
             with db() as c:
                 gmail_connected = bool(c.execute(
@@ -924,22 +1067,45 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                 try:
                     create_gmail_draft_for_user(draft_id, user["id"])
                     gmail_draft_created = True
-                except HTTPException:
-                    # Preserve the MCAS draft if Gmail is temporarily unavailable.
-                    gmail_draft_created = False
-        discovered.append({"name": name, "lead_id": lead_id, "duplicate": False,
+                except HTTPException as exc:
+                    gmail_draft_error = str(exc.detail)
+
+        discovered.append({
+            "name": name, "lead_id": lead_id, "duplicate": False,
             "website": website, "website_state": website_state, "evidence": evidence,
-            "source_url": source_url, "contact_email": str(email) if email else None,
+            "source_url": source_url, "contact_email": email, "contact_phone": phone,
             "recommendation": strategy["type"], "pages": strategy["pages"],
-            "draft_created": True, "proposal_created": True,
-            "gmail_draft_created": gmail_draft_created})
+            "opportunity_score": score, "score_reasons": score_reasons,
+            "website_audit": website_audit, "draft_created": True, "proposal_created": True,
+            "gmail_draft_created": gmail_draft_created, "gmail_draft_error": gmail_draft_error,
+            "rating": place.get("rating"), "rating_count": place.get("ratingCount"),
+        })
+
     with db() as c:
-        audit(c, user["id"], "research.run", {"location": location, "industry": payload.industry,
-                                               "results": len(discovered), "saved": saved_count})
-    return {"location": location, "industry": payload.industry, "results": discovered,
-        "saved": saved_count, "source": "OpenStreetMap contributors",
-        "attribution": "© OpenStreetMap contributors — Open Database License (ODbL)",
-        "warning": "Discovery is incomplete and based on OpenStreetMap tags. A missing website tag is not proof that no website exists. Review every business, website finding, contact detail, proposal and email before outreach."}
+        audit(c, user["id"], "research.run", {
+            "location": location, "industry": payload.industry,
+            "query": query[:160], "provider": "Serper",
+            "results": len(discovered), "saved": saved_count,
+        })
+    discovered.sort(key=lambda item: item.get("opportunity_score", 0), reverse=True)
+    state_counts = {}
+    for item in discovered:
+        state_counts[item["website_state"]] = state_counts.get(item["website_state"], 0) + 1
+    ranked = sorted((x.get("opportunity_score", 0) for x in discovered), reverse=True)
+    return {
+        "location": location, "resolved_location": location, "query": query,
+        "industry": payload.industry, "provider": "Serper Places",
+        "results": discovered,
+        "summary": {
+            "reviewed": len(discovered), "new_prospects_saved": saved_count,
+            "website_states": state_counts,
+            "highest_opportunity_score": ranked[0] if ranked else 0,
+        },
+        "saved": saved_count, "source": "Serper Places",
+        "attribution": "Business discovery powered by Serper Places.",
+        "warning": "Serper results can be incomplete or out of date. Verify business identity, website, address and contact details before marking a prospect verified or contacting them. MCAS only creates drafts; it never sends email.",
+    }
+
 
 @app.post("/api/leads/{lead_id}/builder-prompt")
 def create_builder_prompt(lead_id: str, user=Depends(current_user)):
@@ -954,13 +1120,19 @@ def create_builder_prompt(lead_id: str, user=Depends(current_user)):
         tags["amenity"] = "restaurant"
     elif any(word in notes for word in ["salon", "hairdresser", "beauty"]):
         tags["shop"] = "hairdresser"
+    elif any(word in notes for word in ["clinic", "doctor", "dentist", "hospital", "healthcare", "medical"]):
+        tags["amenity"] = "clinic"
+    elif any(word in notes for word in ["school", "college", "university", "education", "kindergarten"]):
+        tags["amenity"] = "school"
+    elif any(word in notes for word in ["hotel", "guest house", "hostel", "accommodation", "hospitality"]):
+        tags["tourism"] = "hotel"
     elif any(word in notes for word in ["retail", "shop", "products"]):
         tags["shop"] = "retail"
     strategy = business_strategy(tags)
     prompt = ("Act as a senior website strategist, UX designer and full-stack web developer. "
         "Create a complete, responsive, production-minded website for " + lead["name"] + " in " + market + ".\n\n"
         "BUSINESS CONTEXT\nUse only the following recorded discovery observations: " + (lead["evidence"] or "No discovery notes supplied.") + "\n"
-        "Treat map-listing details as provisional until the business confirms them. A missing website link in a directory does not prove no website exists.\n"
+        "Treat Serper discovery details as provisional until the business confirms them. A missing website link in a search result does not prove no website exists.\n"
         "Do not invent menu items, prices, opening hours, staff biographies, awards, reviews, testimonials, addresses or business claims. "
         "Use clearly labelled placeholders for missing content and ask for confirmation.\n\n"
         "RECOMMENDED DIRECTION\n" + strategy["type"] + "\n\n"
@@ -1053,7 +1225,8 @@ def fernet():
 
 @app.get("/api/integrations/status")
 def integration_status(user=Depends(current_user)):
-    return {"web_search_configured": bool(os.getenv("BRAVE_SEARCH_API_KEY")),
+    return {"web_search_configured": bool(os.getenv("SERPER_API_KEY")),
+            "web_search_provider": "Serper" if os.getenv("SERPER_API_KEY") else None,
             "ai_configured": bool(os.getenv("AI_API_BASE_URL") and os.getenv("AI_API_KEY") and os.getenv("AI_MODEL")),
             "gmail_configured": gmail_ready()}
 
@@ -1147,6 +1320,9 @@ def create_gmail_draft_for_user(draft_id: str, uid: str):
         draft = c.execute("SELECT * FROM drafts WHERE id=? AND user_id=?", (draft_id, uid)).fetchone()
         if not draft:
             raise HTTPException(404, "Draft not found")
+        if draft["gmail_draft_id"]:
+            return {"ok": True, "gmail_draft_id": draft["gmail_draft_id"],
+                    "message": "This draft is already in Gmail. No duplicate was created."}
         if not draft["to_email"]:
             raise HTTPException(422, "Add a recipient email before creating the Gmail draft")
         if draft["lead_id"]:
@@ -1171,9 +1347,13 @@ def create_gmail_draft_for_user(draft_id: str, uid: str):
             response = json.loads(r.read(100000))
     except Exception:
         raise HTTPException(502, "Gmail could not create the draft; no message was sent")
+    gmail_draft_id = response.get("id")
     with db() as c:
-        audit(c, uid, "gmail.draft_created", {"draft_id": draft_id})
-    return {"ok": True, "gmail_draft_id": response.get("id"),
+        if gmail_draft_id:
+            c.execute("UPDATE drafts SET gmail_draft_id=? WHERE id=? AND user_id=?",
+                      (gmail_draft_id, draft_id, uid))
+        audit(c, uid, "gmail.draft_created", {"draft_id": draft_id, "gmail_draft_id": gmail_draft_id})
+    return {"ok": True, "gmail_draft_id": gmail_draft_id,
             "message": "Created a draft in Gmail. It has not been sent."}
 
 @app.post("/api/drafts/{draft_id}/gmail")
