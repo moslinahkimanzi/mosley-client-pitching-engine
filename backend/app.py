@@ -1193,6 +1193,44 @@ def audit_website(payload: dict, user=Depends(current_user)):
         audit(c, user["id"], "website.audit", {"url": result.get("url"), "status": result.get("http_status")})
     return result
 
+def assistant_system_prompt(task: str) -> str:
+    shared = (
+        "You are MCAS's professional business-communication assistant. Be accurate, warm, clear and commercially "
+        "persuasive without pressure. Never invent customer facts, prior conversations, portfolio items, results, "
+        "discounts, prices, deadlines, guarantees, testimonials or capabilities. Use only the supplied context. "
+        "Do not use deceptive urgency, manipulative language, exaggerated claims, keyword stuffing or spam tactics. "
+        "Keep messages concise and natural. Do not claim an email is guaranteed to avoid spam. "
+    )
+    if task == "reply":
+        return shared + (
+            "TASK: write a reply to the customer's pasted message. Address their actual question or concern first; "
+            "show that you understood it; then give the most useful, honest answer and one clear next step. "
+            "Use the supplied service context but do not claim it includes something not stated there. "
+            "When asked about price, explain that an accurate quote depends on confirmed scope and ask only for "
+            "the key missing requirements; never invent a number. For timing, ask for the target date and scope "
+            "before promising a schedule. For interest, suggest a brief discovery conversation and ask one simple "
+            "question. For objections, acknowledge the concern and offer a low-pressure option. For complaints, "
+            "respond calmly, take the concern seriously and ask for the information needed to resolve it; do not "
+            "be defensive. If the customer says they are not interested, thank them and close politely without "
+            "trying to overcome the refusal. If they ask not to be contacted, write only a brief acknowledgement "
+            "that their request will be respected; do not pitch, ask a question or suggest another contact. "
+            "Do not imply that you read their inbox: the user pasted this message manually. Output only the reply "
+            "body, ready for a human to review and edit, with no analysis, labels or invented signature."
+        )
+    if task == "email":
+        return shared + (
+            "TASK: write a first-contact business email that is specific to the supplied verified evidence. "
+            "If evidence is incomplete, say so rather than claiming a problem. Use a relevant subject and a "
+            "natural, respectful call to action. Include a polite opt-out sentence. Output the subject and body "
+            "clearly, without unsupported claims."
+        )
+    return shared + (
+        "TASK: prepare a useful, structured proposal based only on supplied requirements and context. "
+        "Mark unknown scope, prices and delivery dates as items to confirm. Do not invent them. "
+        "Output the proposal text only."
+    )
+
+
 @app.post("/api/assistant/draft")
 def ai_assistant(payload: AIIn, user=Depends(current_user)):
     base = os.getenv("AI_API_BASE_URL", "").rstrip("/")
@@ -1211,10 +1249,9 @@ def ai_assistant(payload: AIIn, user=Depends(current_user)):
         lead = owned_lead(c, payload.lead_id, user["id"])
         if payload.task == "email" and int(lead["do_not_contact"] or 0):
             raise HTTPException(403, "This prospect is marked do-not-contact; outreach drafting is blocked.")
-    system = ("You are an ethical B2B website-development sales assistant. Never invent observations, "
-              "customer facts, metrics, urgency or testimonials. Use only the supplied evidence. If evidence "
-              "is insufficient, explicitly say that research is incomplete. Respect do-not-contact requests. "
-              "Write concise, respectful, personalised business communication.")
+    system = assistant_system_prompt(payload.task)
+    if payload.task == "reply" and not payload.incoming.strip():
+        raise HTTPException(422, "Paste the customer's message before generating a reply.")
     input_data = payload.model_dump()
     input_data.update({"prospect_name": lead["name"], "market": lead["market"], "evidence": lead["evidence"]})
     user_prompt = json.dumps(input_data, ensure_ascii=False)
