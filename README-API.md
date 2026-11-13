@@ -36,7 +36,7 @@ Open Firefox at http://127.0.0.1:8000. Create an account on the welcome screen. 
 - Per-account filtering for prospects, drafts, follow-ups, proposals and integration tokens.
 - Prospect CRUD, evidence notes, source URL, CRM status and do-not-contact flag.
 - Rules-based Website Strategy Advisor: recommends a site type, sitemap, useful features, quality standards and an improvement roadmap based on business type, goals, current online presence, budget range and verified notes. Recommendations are starting points and must be validated with the client.
-- User-triggered local business research through a bounded OpenStreetMap / Overpass query. It can find map-listed businesses, check any website listed in the map record, classify limited website observations, and automatically save a tailored website plan, proposal and pending outreach draft. Results are incomplete; no website URL in a map record does not prove no website exists.
+- User-triggered business research through Serper Places, plus Serper web search. Location, business category and optional keyword are searched together. Available public business name, address, category, phone and website details are displayed; listed websites receive a lightweight check. Results are unverified discovery leads, not proof of current business details or buying intent.
 - Public website checks include HTTP status, title, mobile viewport metadata, meta description, H1 and form presence. Outbound connections are pinned to validated public IPs; redirects are revalidated; private/reserved IPs and non-standard ports are blocked. This remains a lightweight check, not a full audit.
 - Accepted-client workflow: mark a prospect as Won to generate a detailed website-builder prompt using its recorded business category and verified notes.
 - Evidence-led template email generation, optional OpenAI-compatible AI provider, reply assistance, proposals and saved drafts.
@@ -97,15 +97,15 @@ Before accepting public users or customer data:
 6. Add real payment-provider checkout, signed webhook verification, subscription lifecycle handling and tax/receipt requirements before enabling paid plans. Billing is intentionally disabled.
 7. Add provider-specific live integration tests with credentials in a non-production staging environment.
 
-Other boundaries: MCAS is not a whole-internet crawler. OpenStreetMap coverage depends on community map records and administrative-area matching; the Overpass public server can be unavailable or rate-limited. It does not harvest private contacts. It never sends outreach or follow-ups. It does not read incoming Gmail messages; customer replies must be supplied manually. Automated proposals and emails are rules-based templates unless you explicitly use the separately configured AI assistant, which may incur provider charges. Website checks are lightweight technical observations, not full SEO, accessibility or security audits.
+Other boundaries: MCAS is not a whole-internet crawler. Serper results can be incomplete, stale or unavailable. Missing website URLs do not prove a business has no website. It does not harvest private contacts. It never sends outreach or follow-ups. It does not read incoming Gmail messages; customer replies must be supplied manually. Automated proposals and emails are rules-based templates unless you explicitly use the separately configured AI assistant, which may incur provider charges. Website checks are lightweight technical observations, not full SEO, accessibility or security audits.
 
 Never commit `.env`, OAuth credentials, encryption keys, database files or customer exports.
 
 
 ## Research accuracy and prioritisation (completion branch)
 
-The user-triggered Research Command Centre now resolves the entered town/city/neighbourhood with OpenStreetMap Nominatim, then searches the returned local bounding box in Overpass. This avoids relying only on an exact administrative-boundary name match. Place lookups are cached in process for 24 hours; business discovery results are cached for 15 minutes. A very broad place result is rejected so a country/continent query does not trigger an unexpectedly large scan.
+The Research Command Centre sends the entered location, business category and optional keyword to Serper Places. If Places returns no records, MCAS falls back to Serper web search and treats those links as unverified sources, not confirmed business websites. Results are cached in process for five minutes to reduce repeated provider requests.
 
 Each research result includes an explainable opportunity-priority score (0–100) and the signals that contributed to it. The score ranks research work; it does not represent buying intent, prove a business lacks a website, or replace human verification. The score is stored in the prospect CRM score field.
 
-For websites listed in the map record, the result displays the limited HTTP/title/mobile viewport/meta description/H1/form observations available to MCAS. This is not a full performance, SEO, accessibility, security, or conversion audit. Search coverage remains dependent on community mapping data and the public service's availability. MCAS does not claim to crawl the entire internet.
+For business websites returned by Serper Places, the result displays limited HTTP/title/mobile viewport/meta description/H1/form observations available to MCAS. This is not a full performance, SEO, accessibility, security, or conversion audit. Search coverage depends on Serper results and the configured account quota. MCAS does not claim to crawl the entire internet.
