@@ -51,13 +51,21 @@ No external provider key is required to run the core app.
 ### Live web search
 Add your Serper API key as `SERPER_API_KEY` in the server-side `.env` file. MCAS uses Serper Places for local business discovery and Serper Search for web search. Optional `SERPER_GL` and `SERPER_HL` values select a Google result region and language (for example, `ke` and `en`). Never put the API key in `assets/app.js` or browser code. Check Serper's current quota and terms in your account.
 
-### AI writing assistant
-Set these server environment variables:
-- `AI_API_BASE_URL` — OpenAI-compatible API base URL, e.g. a provider's HTTPS `/v1` base.
-- `AI_API_KEY` — provider secret.
-- `AI_MODEL` — model identifier accepted by that provider.
+### AI writing assistant (Google Gemini free tier)
 
-This is optional and may create usage costs. Generated content is a draft, not verified evidence.
+MCAS uses the OpenAI-compatible chat-completions endpoint, so no extra Python SDK is required. To try the AI reply assistant without adding a payment card, create a Gemini API key in [Google AI Studio](https://aistudio.google.com/apikey). Check that your account is eligible and review the current [supported regions](https://ai.google.dev/gemini-api/docs/available-regions) and [pricing / free-tier limits](https://ai.google.dev/gemini-api/docs/pricing). Quotas and available models can change.
+
+Set these values in the private server-side `.env` file:
+
+```dotenv
+AI_API_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
+AI_API_KEY=YOUR_GEMINI_API_KEY
+AI_MODEL=gemini-3.8-flash
+```
+
+Keep the key out of GitHub, screenshots, browser code and chat messages. Restart MCAS after changing `.env`. The Integrations page should then show AI as configured. The main Generate AI reply action calls this provider; if the provider is missing or unavailable, MCAS shows an error rather than substituting a fixed reply. Review and edit all output before saving or sending.
+
+Important privacy note: Google's free tier may use submitted content to improve its products. Do not submit passwords, payment details, sensitive personal information, confidential client material or messages you do not have permission to process. Review Google's current terms before using it with real customer communications.
 
 ### Gmail drafts
 Create an OAuth client in Google Cloud Console (Web application) and configure the exact redirect URI:

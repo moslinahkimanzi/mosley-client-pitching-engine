@@ -1203,7 +1203,9 @@ def assistant_system_prompt(task: str) -> str:
     )
     if task == "reply":
         return shared + (
-            "TASK: write a reply to the customer's pasted message. Address their actual question or concern first; "
+            "TASK: carefully read the entire customer message, understand its intent and context, and write a reply specific to that message. "
+            "Do not use a generic template. Address every direct question and distinct concern in the message, "
+            "in a logical order. Reflect the customer's actual details so the reply clearly demonstrates understanding. ""TASK: write a reply to the customer's pasted message. Address their actual question or concern first; "
             "show that you understood it; then give the most useful, honest answer and one clear next step. "
             "Use the supplied service context but do not claim it includes something not stated there. "
             "When asked about price, explain that an accurate quote depends on confirmed scope and ask only for "
