@@ -1261,13 +1261,70 @@ def ai_assistant(payload: AIIn, user=Depends(current_user)):
         data=json.dumps({"model": model, "temperature": 0.35, "messages": [
             {"role": "system", "content": system}, {"role": "user", "content": user_prompt}
         ]}).encode(),
-        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"}, method="POST")
+        headers={
+            "Authorization": "Bearer " + key,
+            "Content-Type": "application/json",
+            # A descriptive application User-Agent avoids generic urllib client
+            # fingerprints being rejected by some edge-security configurations.
+            "User-Agent": "MCAS/1.0 (Mosley Client Acquisition System)",
+        }, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=35) as r:
             data = json.loads(r.read(500000))
         text = data["choices"][0]["message"]["content"]
-    except Exception:
-        raise HTTPException(502, "AI provider request failed; no draft was saved")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("The AI provider returned an empty completion.")
+    except urllib.error.HTTPError as exc:
+        # Keep provider credentials out of user-facing errors while distinguishing
+        # common configuration, edge-security and rate-limit failures.
+        try:
+            provider_detail = exc.read(1200).decode("utf-8", errors="replace")
+        except Exception:
+            provider_detail = ""
+        if exc.code == 403 and ("1010" in provider_detail or "cloudflare" in provider_detail.lower()):
+            raise HTTPException(
+                502,
+                "Groq returned HTTP 403 (Cloudflare error 1010). MCAS now identifies "
+                "its requests with an application User-Agent. If this persists, the "
+                "request is being blocked at Groq's or your network's edge; try another "
+                "network (for example, a phone hotspot) and contact Groq support with "
+                "the error code. No draft was saved."
+            )
+        if exc.code in {401, 403}:
+            raise HTTPException(
+                502,
+                "The AI provider rejected this request (HTTP " + str(exc.code) +
+                "). Check that the API key is active and belongs to the intended Groq account. "
+                "No draft was saved."
+            )
+        if exc.code == 429:
+            raise HTTPException(
+                502,
+                "The AI provider rate limit or usage limit was reached (HTTP 429). "
+                "Wait for the limit to reset or check the Groq console. No draft was saved."
+            )
+        if exc.code == 404:
+            raise HTTPException(
+                502,
+                "The AI endpoint or selected model was not found (HTTP 404). "
+                "Check AI_API_BASE_URL and AI_MODEL. No draft was saved."
+            )
+        raise HTTPException(
+            502,
+            "The AI provider returned HTTP " + str(exc.code) +
+            ". No draft was saved; check the provider status and configuration."
+        )
+    except (urllib.error.URLError, TimeoutError):
+        raise HTTPException(
+            502,
+            "MCAS could not connect to the AI provider. Check your internet connection "
+            "and provider availability. No draft was saved."
+        )
+    except (KeyError, IndexError, TypeError, ValueError):
+        raise HTTPException(
+            502,
+            "The AI provider returned an unexpected or empty response. No draft was saved."
+        )
     with db() as c:
         audit(c, user["id"], "assistant.generated", {"task": payload.task})
     return {"draft": str(text)[:16000], "provider": "configured AI provider",
