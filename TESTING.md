@@ -25,6 +25,8 @@ Open http://127.0.0.1:8000 in Firefox. Health endpoint: http://127.0.0.1:8000/ap
 
 ## C. Functional walkthrough
 
+0. Open Website advisor. Generate recommendations for at least three business types (for example, restaurant, professional services and retail). Check that the recommended site type, pages, features, quality standards and improvement roadmap change with the selected inputs. Confirm the output is described as guidance, not a verified audit or guaranteed outcome.
+
 1. Register a fresh test account with a unique email and a strong, unique password.
 2. Add a test business with website, source URL, evidence and contact email. Confirm dashboard counts update.
 3. Change its status to Verified. Mark it Do Not Contact and try generating an email. MCAS should block the outreach draft.
