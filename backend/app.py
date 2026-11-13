@@ -835,40 +835,71 @@ def business_strategy(tags: dict) -> dict:
     }
 
 def make_outreach_copy(name: str, location: str, website_state: str, audit: dict,
-                       strategy: dict, contact_email: Optional[str]) -> tuple[str, str]:
-    subject = "A website idea for " + name
+                        strategy: dict, contact_email: Optional[str]) -> tuple[str, str]:
+    """Create a concise, evidence-led first-contact email. Never promise inbox placement."""
+    safe_name = re.sub(r"\\s+", " ", name).strip()[:120]
+    subject = "A quick question about " + safe_name + "'s website"
     if website_state == "not_listed":
-        evidence_line = ("I found your public business listing, but it did not include an official website link. "
-                         "That does not necessarily mean you do not have a website, so I wanted to check first.")
+        evidence_line = (
+            "Your public business listing appeared in my research, but it did not show an official website link. "
+            "That may simply be a limitation of the listing, so I wanted to check rather than assume."
+        )
+        idea = (
+            "If improving your online presence is on your list, a simple mobile-friendly site could make your "
+            "services, location and contact options easier for prospective customers to find."
+        )
     elif website_state == "broken":
-        evidence_line = ("I checked the website listed for your business and it returned HTTP "
-                         + str(audit.get("http_status")) + " during my check. This may be temporary, "
-                         "but it seemed worth flagging.")
-        subject = "A website issue I noticed for " + name
+        status = audit.get("http_status")
+        evidence_line = (
+            "When I checked the website link shown on your public listing, it returned HTTP "
+            + str(status if status is not None else "an unavailable response")
+            + ". This could be temporary, and I have not assumed the cause."
+        )
+        subject = "Website link check for " + safe_name
+        idea = (
+            "I can help investigate the issue and, if useful, outline a reliable mobile-friendly way for visitors "
+            "to reach your services and contact you."
+        )
     elif website_state == "needs_improvement":
         observations = []
         if audit.get("has_viewport_meta") is False:
-            observations.append("I could not find a mobile viewport setting in the page HTML")
+            observations.append("a mobile viewport setting was not detected")
         if audit.get("has_meta_description") is False:
-            observations.append("I could not find a meta description")
+            observations.append("a meta description was not detected")
         if audit.get("title") is None:
-            observations.append("I could not detect a page title")
-        evidence_line = ("I ran a limited technical check on the public website. " +
-                         ("; ".join(observations) + "." if observations else "There may be room to improve the customer journey.") +
-                         " This was not a full audit.")
+            observations.append("a page title was not detected")
+        detail = "; ".join(observations) if observations else "there may be an opportunity to simplify the visitor journey"
+        evidence_line = (
+            "I ran a limited automated check of the public website and noticed " + detail
+            + ". It was not a full audit, so these are only initial observations."
+        )
+        subject = "A small website improvement for " + safe_name
+        idea = (
+            "I would be happy to suggest a short, prioritised improvement plan focused on mobile usability, "
+            "clear service information and an easy enquiry path."
+        )
     else:
-        evidence_line = ("I found your public business listing while researching " + location +
-                         ". I have not confirmed a specific website problem, so I do not want to make assumptions.")
-    body = ("Hello " + name + " team,\n\n"
-            "I came across your business while researching " + location + ". " + evidence_line + "\n\n"
-            "I build practical, mobile-friendly websites that help customers understand what a business offers "
-            "and take the next step. For your business, I would suggest starting with a "
-            + strategy["type"].lower() + ", including " + ", ".join(strategy["pages"][:3]).lower()
-            + ", and a clear contact or enquiry path.\n\n"
-            "Would you be open to a short conversation? I can share a tailored outline and a clear scope "
-            "before you decide whether it is useful.\n\n"
-            "Best regards,\nMosley | Web Developer\n\n"
-            "If this is not relevant, let me know and I will not follow up.")
+        evidence_line = (
+            "I came across your public business listing while researching businesses in " + location
+            + ". I have not confirmed a specific website problem, so I do not want to make assumptions."
+        )
+        idea = (
+            "If a website refresh or a clearer way for customers to enquire is relevant, I can share a few "
+            "practical ideas based on your services and priorities."
+        )
+
+    body = (
+        "Hello " + safe_name + " team,\\n\\n"
+        + evidence_line + "\\n\\n"
+        + idea + "\\n\\n"
+        + "I build professional, mobile-friendly websites for businesses, with clear service pages and "
+          "straightforward contact or enquiry journeys. I would keep any recommendation aligned with what "
+          "your team actually needs.\\n\\n"
+        + "Would a brief 10–15 minute conversation next week be useful? If not, no problem.\\n\\n"
+        + "Best regards,\\n"
+        + "Mosley | Web Developer\\n\\n"
+        + "If you would prefer not to receive another message from me, just reply and I will not contact you again."
+    )
     return subject, body
 
 @app.post("/api/research/run")
