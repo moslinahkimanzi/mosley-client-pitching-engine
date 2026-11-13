@@ -49,7 +49,7 @@ Open Firefox at http://127.0.0.1:8000. Create an account on the welcome screen. 
 No external provider key is required to run the core app.
 
 ### Live web search
-Add a valid Brave Search API key to `BRAVE_SEARCH_API_KEY` on the server. Do not put secrets in `assets/app.js` or any browser code. Provider quotas and pricing are controlled by the provider.
+Add your Serper API key as `SERPER_API_KEY` in the server-side `.env` file. MCAS uses Serper Places for local business discovery and Serper Search for web search. Optional `SERPER_GL` and `SERPER_HL` values select a Google result region and language (for example, `ke` and `en`). Never put the API key in `assets/app.js` or browser code. Check Serper's current quota and terms in your account.
 
 ### AI writing assistant
 Set these server environment variables:
