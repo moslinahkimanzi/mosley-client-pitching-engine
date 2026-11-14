@@ -5,6 +5,24 @@
 @media(max-width:1050px){.grid{grid-template-columns:repeat(2,1fr)}.layout{grid-template-columns:190px minmax(0,1fr)}.split{grid-template-columns:1fr}.cols3{grid-template-columns:1fr 1fr}}
 @media(max-width:760px){.shell{padding:14px}.layout{display:block}.sidebar{position:static;margin-bottom:14px}.nav{display:grid;grid-template-columns:repeat(3,1fr)}.navgroup,.sidebarfoot{display:none}.nav button{justify-content:center;font-size:11px;padding:8px 4px}.navicon{display:none}.pagehead h1{font-size:21px}.cols,.cols3{grid-template-columns:1fr}.userbar{width:100%;justify-content:space-between}.metric{font-size:25px}}
 @media(max-width:420px){.grid{grid-template-columns:1fr 1fr;gap:8px}.card{padding:12px}.nav{grid-template-columns:repeat(2,1fr)}}
+
+/* Searchable, keyboard-accessible Website Advisor prospect picker */
+.advisor-prospect-picker{position:relative;width:100%}
+.advisor-prospect-native{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
+.advisor-prospect-trigger{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;min-height:43px;text-align:left;background:#0b1424;border:1px solid #30425d;border-radius:9px;padding:10px 11px;color:var(--text)}
+.advisor-prospect-trigger:hover,.advisor-prospect-trigger[aria-expanded="true"]{border-color:var(--blue);transform:none}
+.advisor-prospect-trigger:disabled{opacity:.65;cursor:not-allowed}
+.advisor-prospect-chevron{color:var(--blue);font-size:16px}
+.advisor-prospect-menu{position:absolute;z-index:60;top:calc(100% + 6px);left:0;right:0;padding:11px;border:1px solid #3a5272;border-radius:12px;background:#101c30;box-shadow:0 18px 45px #0009}
+.advisor-prospect-menu>label{display:block;margin:0 0 6px}
+.advisor-prospect-menu>input{width:100%;margin:0 0 9px;padding:9px 10px;border:1px solid #30425d;border-radius:8px;background:#091322;color:var(--text)}
+.advisor-prospect-options{display:grid;gap:6px;max-height:290px;overflow-y:auto}
+.advisor-prospect-option{display:block;width:100%;padding:9px 10px;text-align:left;white-space:normal;border:1px solid #263951;border-radius:8px;background:#142238}
+.advisor-prospect-option:hover,.advisor-prospect-option[aria-selected="true"]{border-color:var(--blue);background:#203b5d;transform:none}
+.advisor-prospect-option-name{display:block;font-weight:700;color:var(--text)}
+.advisor-prospect-option-meta{display:block;margin-top:2px;font-size:11px;color:var(--muted)}
+.advisor-prospect-empty{padding:12px;text-align:center;color:var(--muted);font-size:12px;border:1px dashed #30425d;border-radius:8px}
+.advisor-prospect-trigger:focus-visible,.advisor-prospect-option:focus-visible,.advisor-prospect-menu>input:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
 </style></head><body>
 <div id="auth" class="authwrap hide"><div class="authcard"><div class="authlogo">MOSLEY <em>MCAS</em></div><h1>Build better client relationships.</h1><p class="muted">Sign in to your private client-acquisition workspace.</p><div class="tabs"><button id="loginTab" class="active">Sign in</button><button id="registerTab">Create account</button></div><form id="authForm"><div class="field"><label>Email address</label><input id="authEmail" type="email" autocomplete="email" maxlength="254" required></div><div class="field"><label>Password</label><input id="authPassword" type="password" autocomplete="current-password" minlength="12" maxlength="200" required></div><button class="primary" id="authSubmit" style="width:100%">Sign in securely</button><div id="authNotice" class="notice" role="status"></div></form><div class="footnote">Your account and workspace data are stored by the MCAS server. Use a unique password and never share your login.</div></div></div>
 <div id="app" class="shell hide">
@@ -66,7 +84,20 @@
 <div class="split">
 <article class="card">
 <h2>Business discovery</h2>
-<div class="field"><label>Choose a saved prospect</label><select id="advisorLead"><option value="">Choose a prospect from your workspace</option></select></div>
+<div class="field">
+<label for="advisorLeadPickerButton">Choose a saved prospect</label>
+<div class="advisor-prospect-picker" id="advisorProspectPicker">
+<select id="advisorLead" class="advisor-prospect-native" aria-hidden="true" tabindex="-1"><option value="">Choose a prospect from your workspace</option></select>
+<button type="button" class="advisor-prospect-trigger" id="advisorLeadPickerButton" aria-haspopup="listbox" aria-expanded="false" aria-controls="advisorLeadPickerMenu" disabled>
+<span id="advisorLeadPickerLabel">Loading saved prospects…</span><span class="advisor-prospect-chevron" aria-hidden="true">▾</span>
+</button>
+<div class="advisor-prospect-menu hide" id="advisorLeadPickerMenu">
+<label for="advisorLeadSearch" class="tiny">Search by business name, location or status</label>
+<input id="advisorLeadSearch" type="search" placeholder="Start typing to filter prospects…" autocomplete="off">
+<div id="advisorLeadOptions" class="advisor-prospect-options" role="listbox" aria-label="Saved prospects"></div>
+</div>
+</div>
+</div>
 <div id="advisorLeadSummary" class="good">Choose a saved prospect to load its research evidence, or continue with the manual business profile below.</div>
 <div class="actions"><button id="advisorLiveAuditBtn" disabled>Run fresh website check</button></div>
 <div class="field"><label>Business type / industry</label><select id="advisorIndustry"><option value="professional">Professional services / consultancy</option><option value="retail">Retail / online shop</option><option value="restaurant">Restaurant / hospitality</option><option value="health">Healthcare / clinic</option><option value="education">Education / training</option><option value="realestate">Real estate / property</option><option value="creative">Creative / portfolio</option><option value="nonprofit">Non-profit / community</option><option value="local">Local service business</option><option value="startup">Startup / SaaS</option></select></div>
