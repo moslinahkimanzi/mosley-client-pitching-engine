@@ -344,7 +344,27 @@ function generateAdvisorPlan(){
  $('advisorPromptPanel').classList.remove('hide');
  note('advisorNotice','Full plan, evidence-led diagnosis, Kenya pricing estimate and AI-builder prompt generated. Review the evidence and scope before using the prompt.');
 }
-$('advisorLead').addEventListener('change',updateAdvisorProspect);
+$('advisorLead').addEventListener('change',()=>{renderAdvisorProspectPicker();updateAdvisorProspect();});
+$('advisorLeadPickerButton').addEventListener('click',()=>{const menu=$('advisorLeadPickerMenu');if(menu.classList.contains('hide'))openAdvisorProspectPicker();else closeAdvisorProspectPicker();});
+$('advisorLeadSearch').addEventListener('input',renderAdvisorProspectPicker);
+$('advisorLeadOptions').addEventListener('click',e=>{
+ const choice=e.target.closest('[data-advisor-prospect-id]');if(!choice)return;
+ const id=choice.dataset.advisorProspectId;
+ if(!state.leads.some(l=>String(l.id)===String(id)))return;
+ $('advisorLead').value=id;
+ closeAdvisorProspectPicker();
+ renderAdvisorProspectPicker();
+ updateAdvisorProspect();
+ $('advisorLeadPickerButton').focus();
+});
+$('advisorLeadSearch').addEventListener('keydown',e=>{
+ if(e.key==='Escape'){closeAdvisorProspectPicker();$('advisorLeadPickerButton').focus();}
+});
+$('advisorLeadPickerButton').addEventListener('keydown',e=>{
+ if(e.key==='Escape')closeAdvisorProspectPicker();
+ if(e.key==='ArrowDown'&&!$('advisorLeadPickerMenu').classList.contains('hide')){$('advisorLeadOptions').querySelector('button')?.focus();}
+});
+document.addEventListener('click',e=>{if(!$('advisorProspectPicker')?.contains(e.target))closeAdvisorProspectPicker();});
 $('advisorLiveAuditBtn').addEventListener('click',runAdvisorLiveAudit);
 $('advisorBuildPlan').addEventListener('click',generateAdvisorPlan);
 $('advisorCopyPrompt').addEventListener('click',async()=>{
