@@ -155,7 +155,7 @@ function updateAdvisorProspect(){
  }
  $('advisorIndustry').value=inferAdvisorIndustry(lead);
  const ev=(lead.evidence||'').toLowerCase();
- $('advisorPresence').value=lead.website?(ev.includes('returned http 404')||ev.includes('returned http 500')?'basic':'existing'):'unknown';
+ $('advisorPresence').value=lead.website?(/returned http [45]\d\d/i.test(lead.evidence||'')?'basic':'existing'):'unknown';
  $('advisorContext').value=lead.evidence||('Saved prospect: '+lead.name+'. Add verified discovery notes before finalising the scope.');
  $('advisorLeadSummary').innerHTML='<b>'+esc(lead.name)+'</b><br>'+esc(lead.market||'Location not recorded')+' · '+esc(lead.website||'No website URL saved')+'<br><span class="tiny">Prospect status: '+esc(lead.status||'Unverified')+(lead.score?' · Research priority: '+esc(lead.score)+'/100':'')+'</span>';
  $('advisorLiveAuditBtn').disabled=!lead.website;
@@ -248,7 +248,7 @@ function advisorPrice(data,lead){
  }else if(industry==='retail'&&goal==='sales'){
   item={label:'E-commerce website with local payment integration',low:80000,high:250000,scope:'Catalogue, product pages, cart, checkout, order workflow and payment integration such as M-Pesa where required.'};
  }else if(industry==='realestate'){
-  item={label:'Property listings and lead-generation website',low:120000,high:300000,scope:'Property catalogue, search/filtering, listing detail pages, enquiry and viewing-request flows.'};
+  item={label:'Property listings and lead-generation website',low:120000,high:500000,scope:'Property catalogue, search/filtering, listing detail pages, enquiry and viewing-request flows. More advanced integrations and large listing inventories may cost more.'};
  }else if(goal==='operations'||(industry==='startup'&&budget==='advanced')){
   item={label:'Custom portal or web workflow',low:150000,high:500000,scope:'User roles, custom data workflows, dashboards and integrations; complex systems may exceed this range.'};
  }else if((industry==='restaurant'&&goal==='sales')||goal==='sales'){
@@ -335,10 +335,10 @@ function generateAdvisorPlan(){
  '<div class="item"><h3>Core website requirements</h3><ul>'+universalHtml+'</ul></div>'+
  '<div class="item"><h3>Design direction and quality standard</h3><ul>'+data.quality.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul></div>'+
  '<div class="warning"><b>Before build:</b> Confirm business facts, page content, owner access, integrations, data collected, domain, hosting, maintenance and acceptance criteria with the business. Do not publish placeholder claims or fake testimonials.</div>';
- let marketNote='Published Kenyan provider guides vary substantially by scope. These are broad comparison ranges, not a guaranteed market price.';
+ let marketNote='Published Kenyan 2026 price guides vary substantially by scope: simple business sites commonly appear around KES 15,000–40,000; fuller company sites around KES 35,000–120,000; e-commerce commonly around KES 50,000–250,000; and custom portals around KES 120,000–500,000+. MCAS uses these as broad planning bands, not a guaranteed market price.';
  $('advisorPricingOutput').innerHTML='<div class="item"><span class="badge green">Indicative Kenya-market project value</span><h3>'+esc(price.label)+'</h3><div class="metric">'+moneyKES(price.low)+' – '+moneyKES(price.high)+'</div><p>'+esc(price.scope)+'</p><p class="tiny">'+esc(marketNote)+'</p></div>'+
  '<div class="item"><h3>Possible recurring costs (budget separately)</h3><p>Domain and hosting: approximately KES 3,500–15,000 per year. Optional maintenance: approximately KES 5,000–25,000 per month, depending on provider and scope.</p><p class="tiny">Indicative published guide figures; renewals, traffic, email, premium plugins, payment fees, content production and taxes may be additional.</p></div>'+
- '<div class="item"><h3>Pricing references</h3><p><a href="https://edgecom.co.ke/website-cost-kenya" target="_blank" rel="noopener noreferrer">Edgecom — Kenya website cost guide (2026)</a></p><p><a href="https://wfw.co.ke/blog/how-much-does-a-website-cost-in-kenya" target="_blank" rel="noopener noreferrer">Wallflower Agency — Kenya website pricing guide (2026)</a></p><p><a href="https://digital4africa.com/website-cost-kenya/" target="_blank" rel="noopener noreferrer">Digital4Africa — Website and running-cost guide (2026)</a></p></div>'+
+ '<div class="item"><h3>Pricing references (Kenya, 2026)</h3><p><a href="https://wfw.co.ke/blog/how-much-does-a-website-cost-in-kenya" target="_blank" rel="noopener noreferrer">Wallflower Agency — business, company and e-commerce price guide (13 September 2026)</a></p><p><a href="https://www.thabititechnologies.com/blog/website-cost-in-kenya" target="_blank" rel="noopener noreferrer">Thabiti Technologies — website types and custom system ranges (4 October 2026)</a></p><p><a href="https://digital4africa.com/website-cost-kenya/" target="_blank" rel="noopener noreferrer">Digital4Africa — website and running-cost guide (October 2026)</a></p><p><a href="https://edgecom.co.ke/website-cost-kenya" target="_blank" rel="noopener noreferrer">Edgecom — published starting prices and VAT notes (October 2026)</a></p></div>'+
  '<div class="warning"><b>Estimate only:</b> Actual value depends on the final page count, design, copywriting, integrations, e-commerce/booking workflow, data migration, hosting, support and developer experience. Confirm scope before quoting. Some published prices exclude VAT; check tax treatment and third-party charges separately.</div>';
  $('advisorPromptText').value=buildAdvisorPrompt(data,lead,price);
  $('advisorPromptPanel').classList.remove('hide');
