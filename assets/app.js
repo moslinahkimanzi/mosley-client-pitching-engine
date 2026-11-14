@@ -21,7 +21,41 @@ async function loadAll(){try{const values=await Promise.all([api('/api/leads'),a
 function renderAll(){renderMetrics();renderLeads();renderDrafts();renderFollowups();renderProposals();renderSelects();}
 function renderMetrics(){const m=state.metrics;$('mLeads').textContent=m.leads||0;$('mVerified').textContent=m.verified||0;$('mDrafts').textContent=m.pending_approval||0;$('mFollow').textContent=m.open_followups||0;$('pUnverified').textContent=state.leads.filter(l=>l.status==='Unverified').length;$('pPending').textContent=m.pending_approval||0;$('pDnc').textContent=m.do_not_contact||0;
 $('recentLeads').innerHTML=state.leads.slice(0,5).map(l=>'<div class="row"><span><b>'+esc(l.name)+'</b><br><span class="tiny">'+esc(l.market||'')+'</span></span><span class="badge">'+esc(l.status)+'</span></div>').join('')||'<div class="empty">No prospects yet. Add your first lead.</div>';}
-function renderSelects(){const options=state.leads.map(l=>'<option value="'+esc(l.id)+'">'+esc(l.name)+' — '+esc(l.market||'Location not recorded')+' — '+esc(l.status||'Unverified')+'</option>').join('');['emailLead','replyLead','proposalLead','followLead','advisorLead'].forEach(id=>{const el=$(id);if(!el)return;const old=el.value;el.innerHTML='<option value="">'+(state.leads.length?'Select a saved prospect…':'No saved prospects — add one in Prospects')+'</option>'+options;if(old&&state.leads.some(l=>l.id===old))el.value=old;});if($('advisorLead')&&$('advisorLead').value)updateAdvisorProspect();}
+function renderSelects(){
+ const options=state.leads.map(l=>'<option value="'+esc(l.id)+'">'+esc(l.name)+'</option>').join('');
+ ['emailLead','replyLead','proposalLead','followLead','advisorLead'].forEach(id=>{
+  const el=$(id);if(!el)return;
+  const old=el.value;
+  el.innerHTML='<option value="">'+(state.leads.length?'Select a saved prospect…':'No saved prospects — add one in Prospects')+'</option>'+options;
+  if(old&&state.leads.some(l=>l.id===old))el.value=old;
+ });
+ renderAdvisorProspectPicker();
+ if($('advisorLead')&&$('advisorLead').value)updateAdvisorProspect();
+}
+function renderAdvisorProspectPicker(){
+ const select=$('advisorLead'),trigger=$('advisorLeadPickerButton'),label=$('advisorLeadPickerLabel'),options=$('advisorLeadOptions');
+ if(!select||!trigger||!label||!options)return;
+ const leads=Array.isArray(state.leads)?state.leads:[];
+ const selected=leads.find(l=>String(l.id)===String(select.value));
+ trigger.disabled=leads.length===0;
+ label.textContent=selected?selected.name+' — '+(selected.market||'Location not recorded'):(leads.length?'Choose a saved prospect ('+leads.length+')':'No saved prospects — add one in Prospects');
+ const query=($('advisorLeadSearch')?.value||'').trim().toLowerCase();
+ const filtered=leads.filter(l=>[l.name,l.market,l.status,l.website,l.evidence,l.contact_email].join(' ').toLowerCase().includes(query));
+ options.innerHTML=filtered.map(l=>'<button type="button" class="advisor-prospect-option" role="option" aria-selected="'+(selected&&String(selected.id)===String(l.id)?'true':'false')+'" data-advisor-prospect-id="'+esc(l.id)+'"><span class="advisor-prospect-option-name">'+esc(l.name)+'</span><span class="advisor-prospect-option-meta">'+esc(l.market||'Location not recorded')+' · '+esc(l.status||'Unverified')+'</span></button>').join('')||'<div class="advisor-prospect-empty">'+(leads.length?'No prospects match your search.':'No saved prospects are available in this workspace yet.')+'</div>';
+}
+function closeAdvisorProspectPicker(){
+ const menu=$('advisorLeadPickerMenu'),trigger=$('advisorLeadPickerButton');
+ if(menu)menu.classList.add('hide');
+ if(trigger)trigger.setAttribute('aria-expanded','false');
+}
+function openAdvisorProspectPicker(){
+ const menu=$('advisorLeadPickerMenu'),trigger=$('advisorLeadPickerButton'),search=$('advisorLeadSearch');
+ if(!menu||!trigger||trigger.disabled)return;
+ menu.classList.remove('hide');trigger.setAttribute('aria-expanded','true');
+ if(search)search.value='';
+ renderAdvisorProspectPicker();
+ if(search)search.focus();
+}
 function renderLeads(){const q=($('leadFilter')?.value||'').toLowerCase(),st=$('leadFilterStatus')?.value||'';const items=state.leads.filter(l=>(!st||l.status===st)&&[l.name,l.market,l.evidence,l.contact_email].join(' ').toLowerCase().includes(q));$('leadList').innerHTML=items.map(l=>'<div class="item"><div class="itemtop"><strong>'+esc(l.name)+'</strong><span class="badge '+(l.do_not_contact?'red':l.status==='Verified'?'green':'')+'">'+esc(l.do_not_contact?'DO NOT CONTACT':l.status)+'</span></div><p>'+esc(l.market||'')+' · '+esc(l.website||'No website recorded')+'</p><p>'+esc(l.evidence||'No evidence recorded.')+'</p><p>'+esc(l.contact_email||'No contact email')+(l.source_url?' · <a href="'+safeLink(l.source_url)+'" target="_blank" rel="noopener noreferrer">Source</a>':'')+'</p><div class="itemactions"><button data-verify="'+esc(l.id)+'">Mark verified</button>'+(l.status!=='Won'?'<button data-win="'+esc(l.id)+'">Client accepted</button>':'<span class="badge green">Client accepted</span>')+(l.status==='Won'?'<button class="primary" data-builder-prompt="'+esc(l.id)+'">Generate AI-builder prompt</button>':'')+'<button data-dnc="'+esc(l.id)+'">'+(l.do_not_contact?'Remove DNC':'Do not contact')+'</button><button class="danger" data-delete-lead="'+esc(l.id)+'">Delete</button></div></div>').join('')||'<div class="empty">No prospects match this filter.</div>';renderSelects();}
 function safeLink(raw){try{const u=new URL(raw,location.origin);return ['http:','https:'].includes(u.protocol)?esc(u.href):'#';}catch{return '#';}}
 function renderDrafts(){$('draftList').innerHTML=state.drafts.map(d=>{const gmailAction=d.gmail_draft_id?'<span class="badge green">IN GMAIL DRAFTS</span>':(state.gmail?.connected&&d.to_email?'<button class="primary" data-gmail="'+esc(d.id)+'">Create Gmail draft</button>':'');return '<div class="item"><div class="itemtop"><strong>'+esc(d.subject)+'</strong><span class="badge amber">PENDING APPROVAL</span></div><p>'+esc(d.kind)+' · '+esc(d.to_email||'No recipient')+' · '+esc(d.created_at||'')+'</p><p>'+esc(d.body.slice(0,260))+(d.body.length>260?'…':'')+'</p><div class="itemactions">'+gmailAction+'<button class="danger" data-delete-draft="'+esc(d.id)+'">Delete</button></div></div>';}).join('')||'<div class="empty">No drafts saved yet.</div>';}
