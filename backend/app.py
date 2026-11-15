@@ -2029,6 +2029,19 @@ def updates_status(user=Depends(current_user)):
         ),
         "releases": [
             {
+                "version": "1.3.0",
+                "title": "Administrator Security and AI Safeguards",
+                "summary": "Adds administrator TOTP MFA, protected administrator bootstrap, monthly AI analysis limits, consent withdrawal and Security Guardian status.",
+                "changes": [
+                    "Configured administrator registration and first authenticator enrollment require a server-side bootstrap token.",
+                    "Administrator sign-in requires a six-digit authenticator code; five invalid codes invalidate the challenge.",
+                    "Administrator sessions are revoked after MFA enrollment.",
+                    "Customers can withdraw consent for future AI feedback analysis.",
+                    "Security-category feedback is excluded from AI analysis and feedback analysis is capped per UTC month.",
+                    "Security Guardian reports application configuration and external protections still requiring operator setup."
+                ]
+            },
+            {
                 "version": "1.2.0",
                 "title": "AI-assisted Product Improvement",
                 "summary": "Adds consent-based AI analysis of customer feedback and saved, prioritised improvement proposals.",
