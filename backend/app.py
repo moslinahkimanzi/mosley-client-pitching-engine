@@ -637,7 +637,6 @@ def login(payload: LoginIn, response: Response, request: Request):
         if not row or not verify_password(payload.password, row["password_hash"]):
             log_security_event("auth.login_failed", request)
             raise HTTPException(401, "Email or password is incorrect")
-        c.execute("DELETE FROM sessions WHERE user_id=?", (row["id"],))
         if is_configured_admin_email(row["email"]) and row["admin_totp_secret"]:
             challenge = secrets.token_urlsafe(32)
             c.execute("DELETE FROM mfa_login_challenges WHERE expires_at<?", (int(time.time()),))
@@ -650,6 +649,7 @@ def login(payload: LoginIn, response: Response, request: Request):
                                 secure=IS_PROD, samesite="strict", path="/")
             return {"mfa_required": True, "email": normalized_email,
                     "message": "Enter the current six-digit code from your administrator authenticator app."}
+        c.execute("DELETE FROM sessions WHERE user_id=?", (row["id"],))
         session = secrets.token_urlsafe(36)
         c.execute("INSERT INTO sessions VALUES(?,?,?)",
                   (token_hash(session), row["id"], int(time.time()) + SESSION_SECONDS))
@@ -706,6 +706,7 @@ def complete_admin_mfa_login(payload: MfaCodeIn, request: Request, response: Res
                 user_id = row["id"]
                 email = row["email"]
                 c.execute("DELETE FROM mfa_login_challenges WHERE user_id=?", (user_id,))
+                c.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
                 session = secrets.token_urlsafe(36)
                 c.execute("INSERT INTO sessions VALUES(?,?,?)",
                           (token_hash(session), user_id, int(time.time()) + SESSION_SECONDS))
