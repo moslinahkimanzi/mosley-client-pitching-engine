@@ -7,14 +7,39 @@ function note(id,msg,error=false){$(id).textContent=msg;$(id).className='notice'
 function cookie(name){const item=document.cookie.split('; ').find(x=>x.startsWith(name+'='));return item?decodeURIComponent(item.split('=').slice(1).join('=')):'';}
 async function refreshCsrf(){const r=await fetch('/api/auth/csrf',{credentials:'same-origin'});if(!r.ok)throw new Error('Unable to initialise security token');const j=await r.json();state.csrf=j.csrf_token||cookie('mcas_csrf');}
 async function api(path,opts={}){const method=(opts.method||'GET').toUpperCase();const headers={'Accept':'application/json',...(opts.headers||{})};if(opts.body!==undefined)headers['Content-Type']='application/json';if(['POST','PATCH','DELETE','PUT'].includes(method)){state.csrf=cookie('mcas_csrf')||state.csrf;headers['X-CSRF-Token']=state.csrf;}const r=await fetch(path,{...opts,method,headers,credentials:'same-origin'});const type=r.headers.get('content-type')||'';const data=type.includes('application/json')?await r.json():await r.text();if(!r.ok)throw new Error(data.detail||data.message||data||('Request failed ('+r.status+')'));return data;}
-function showAuth(){ $('app').classList.add('hide');$('auth').classList.remove('hide');}
+function showAuth(){ $('app').classList.add('hide');$('auth').classList.remove('hide');$('mfaChallengeForm').classList.add('hide');$('authForm').classList.remove('hide');}
 function showApp(){ $('auth').classList.add('hide');$('app').classList.remove('hide');$('signedEmail').textContent=state.user.email||'';}
 function page(name){document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id===name));document.querySelectorAll('[data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===name));if(name==='prospects')renderLeads();if(name==='studio')renderDrafts();if(name==='followups')renderFollowups();if(name==='proposals')renderProposals();if(name==='updates'){loadUpdates();loadMyFeedback();}if(name==='admin-maintenance')loadAdminMaintenance();}
 document.querySelectorAll('[data-page]').forEach(b=>b.addEventListener('click',()=>page(b.dataset.page)));
 document.querySelectorAll('[data-go]').forEach(b=>b.addEventListener('click',()=>page(b.dataset.go)));
-function setAuthMode(mode){state.authMode=mode;$('loginTab').classList.toggle('active',mode==='login');$('registerTab').classList.toggle('active',mode==='register');$('authSubmit').textContent=mode==='login'?'Sign in securely':'Create secure account';$('authPassword').autocomplete=mode==='login'?'current-password':'new-password';$('authPassword').minLength=mode==='login'?1:12;note('authNotice','');}
+function setAuthMode(mode){state.authMode=mode;$('loginTab').classList.toggle('active',mode==='login');$('registerTab').classList.toggle('active',mode==='register');$('authSubmit').textContent=mode==='login'?'Sign in securely':'Create secure account';$('authPassword').autocomplete=mode==='login'?'current-password':'new-password';$('authPassword').minLength=mode==='login'?1:12;$('authAdminBootstrapWrap').classList.toggle('hide',mode!=='register');$('authForm').classList.remove('hide');$('mfaChallengeForm').classList.add('hide');note('authNotice','');}
 $('loginTab').addEventListener('click',()=>setAuthMode('login'));$('registerTab').addEventListener('click',()=>setAuthMode('register'));
-$('authForm').addEventListener('submit',async e=>{e.preventDefault();const btn=$('authSubmit');btn.disabled=true;try{await refreshCsrf();const endpoint=state.authMode==='login'?'/api/auth/login':'/api/auth/register';const data=await api(endpoint,{method:'POST',body:JSON.stringify({email:$('authEmail').value,password:$('authPassword').value})});state.user=data;await refreshCsrf();showApp();await loadAll();}catch(err){note('authNotice',err.message,true);}finally{btn.disabled=false;}});
+$('authForm').addEventListener('submit',async e=>{
+ e.preventDefault();const btn=$('authSubmit');btn.disabled=true;
+ try{
+  await refreshCsrf();
+  const endpoint=state.authMode==='login'?'/api/auth/login':'/api/auth/register';
+  const payload={email:$('authEmail').value.trim(),password:$('authPassword').value};
+  if(state.authMode==='register')payload.admin_bootstrap_token=$('authAdminBootstrap').value;
+  const data=await api(endpoint,{method:'POST',body:JSON.stringify(payload)});
+  if(data.mfa_required){
+   $('authForm').classList.add('hide');$('mfaChallengeForm').classList.remove('hide');
+   $('mfaLoginNotice').textContent=data.message||'Enter your authenticator code.';
+   $('mfaLoginCode').focus();return;
+  }
+  await refreshCsrf();state.user=await api('/api/auth/me');showApp();await loadAll();
+ }catch(err){note('authNotice',err.message,true);}
+ finally{btn.disabled=false;}
+});
+$('mfaChallengeForm').addEventListener('submit',async e=>{
+ e.preventDefault();const btn=$('mfaLoginSubmit');btn.disabled=true;
+ try{
+  const result=await api('/api/auth/mfa',{method:'POST',body:JSON.stringify({code:$('mfaLoginCode').value.trim()})});
+  await refreshCsrf();state.user=await api('/api/auth/me');$('mfaLoginCode').value='';showApp();await loadAll();
+ }catch(err){note('mfaLoginNotice',err.message,true);}
+ finally{btn.disabled=false;}
+});
+$('mfaLoginCancel').addEventListener('click',()=>{location.reload();});
 $('logoutBtn').addEventListener('click',async()=>{try{await api('/api/auth/logout',{method:'POST'});state.user=null;showAuth();}catch(e){toast(e.message,true);}});
 async function boot(){try{await refreshCsrf();state.user=await api('/api/auth/me');showApp();await loadAll();}catch(e){showAuth();}}
 async function loadAll(){try{const values=await Promise.all([api('/api/leads'),api('/api/drafts'),api('/api/followups'),api('/api/proposals'),api('/api/metrics'),api('/api/integrations/gmail/status'),api('/api/billing/status'),api('/api/integrations/status'),api('/api/auth/me'),api('/api/updates'),api('/api/feedback'),api('/api/onboarding')]);[state.leads,state.drafts,state.followups,state.proposals,state.metrics,state.gmail,state.billing,state.config,state.user,state.updates,state.feedback,state.onboarding]=values;$('adminMaintenanceNav').classList.toggle('hide',!state.user.is_admin);renderAll();renderUpdates();renderMyFeedback();$('searchBadge').textContent=state.config.web_search_configured?'Connected':'Needs API key';$('searchBadge').className='badge '+(state.config.web_search_configured?'green':'amber');$('aiBadge').textContent=state.config.ai_configured?'Connected':'Optional';$('aiBadge').className='badge '+(state.config.ai_configured?'green':'amber');$('researchConfig').textContent=state.config.web_search_configured?'Configured':'Set SERPER_API_KEY in .env and restart MCAS';$('aiConfig').textContent=state.config.ai_configured?'Configured':'Set AI_API_KEY in .env and restart MCAS';$('gmailBadge').textContent=state.gmail.connected?'Connected':state.gmail.configured?'Ready to connect':'Not configured';$('gmailDetails').textContent=state.gmail.capability||'Gmail drafts only.';$('gmailConnect').disabled=!state.gmail.configured||state.gmail.connected;$('gmailDisconnect').disabled=!state.gmail.connected;$('billingStatus').textContent=state.billing.message;}catch(e){toast(e.message,true);}}
@@ -31,7 +56,7 @@ function renderUpdates(){
 }
 function renderMyFeedback(){
  const items=state.feedback||[];$('myFeedbackCount').textContent=items.length;
- $('myFeedbackList').innerHTML=items.map(item=>'<div class="item"><div class="itemtop"><strong>'+esc(item.title)+'</strong><span class="badge">'+esc(feedbackStatusLabel(item.status))+'</span></div><p>'+esc(item.category)+' · Submitted '+esc(item.created_at)+'</p><p>'+esc(item.message)+'</p>'+(item.admin_note?'<div class="good"><b>MCAS team note:</b> '+esc(item.admin_note)+'</div>':'')+'</div>').join('')||'<div class="empty">You have not submitted feedback yet.</div>';
+ $('myFeedbackList').innerHTML=items.map(item=>'<div class="item"><div class="itemtop"><strong>'+esc(item.title)+'</strong><span class="badge">'+esc(feedbackStatusLabel(item.status))+'</span></div><p>'+esc(item.category)+' · Submitted '+esc(item.created_at)+'</p><p>'+esc(item.message)+'</p>'+(item.admin_note?'<div class="good"><b>MCAS team note:</b> '+esc(item.admin_note)+'</div>':'')+(item.ai_analysis_consent?'<button class="quiet" data-withdraw-ai-consent="'+esc(item.id)+'">Withdraw AI-analysis consent</button>':'')+'</div>').join('')||'<div class="empty">You have not submitted feedback yet.</div>';
 }
 async function loadUpdates(){
  try{state.updates=await api('/api/updates');renderUpdates();}
@@ -57,9 +82,47 @@ $('feedbackForm').addEventListener('submit',async e=>{
 });
 async function loadAdminMaintenance(){
  if(!state.user?.is_admin){return note('adminFeedbackNotice','Administrator access is not enabled for this account.',true);}
- try{state.maintenance=await api('/api/admin/maintenance');renderAdminMaintenance();await loadImprovementReviews();}
- catch(e){note('adminFeedbackNotice','Maintenance dashboard could not be loaded: '+e.message,true);}
+ try{
+  const mfa=await api('/api/admin/mfa/status');
+  if(!mfa.enabled){
+   $('adminMfaSetupCard').classList.remove('hide');$('adminMaintenanceContent').classList.add('hide');
+   note('adminMfaNotice','Administrator MFA is required before administrator tools can be used.');
+   return;
+  }
+  $('adminMfaSetupCard').classList.add('hide');$('adminMaintenanceContent').classList.remove('hide');
+  state.maintenance=await api('/api/admin/maintenance');renderAdminMaintenance();
+  await loadImprovementReviews();await loadSecurityGuardian();
+ }catch(e){note('adminFeedbackNotice','Administrator maintenance could not be loaded: '+e.message,true);}
 }
+async function loadSecurityGuardian(){
+ try{
+  const data=await api('/api/admin/security-status');
+  $('securityGuardianList').innerHTML=(data.checks||[]).map(item=>{
+   const label={configured:'Configured',warning:'Needs attention',external_action:'External action',not_implemented:'Not implemented'}[item.status]||item.status;
+   const badge=item.status==='configured'?'green':item.status==='warning'||item.status==='not_implemented'?'red':'amber';
+   return '<div class="item"><div class="itemtop"><strong>'+esc(item.name)+'</strong><span class="badge '+badge+'">'+esc(label)+'</span></div><p>'+esc(item.detail)+'</p></div>';
+  }).join('')||'<div class="empty">No security status is available.</div>';
+  $('securityGuardianNote').textContent=data.note||'';
+ }catch(e){note('securityGuardianNote','Security status could not be loaded: '+e.message,true);}
+}
+$('refreshSecurityGuardianBtn').addEventListener('click',loadSecurityGuardian);
+$('adminMfaSetupForm').addEventListener('submit',async e=>{
+ e.preventDefault();const button=$('adminMfaStartBtn');button.disabled=true;
+ try{
+  const data=await api('/api/admin/mfa/setup',{method:'POST',body:JSON.stringify({password:$('adminMfaPassword').value,bootstrap_token:$('adminMfaBootstrap').value})});
+  $('adminMfaSecret').textContent=data.secret;$('adminMfaSetupResult').classList.remove('hide');
+  note('adminMfaNotice',data.message);
+ }catch(err){note('adminMfaNotice',err.message,true);}
+ finally{button.disabled=false;}
+});
+$('adminMfaVerifyForm').addEventListener('submit',async e=>{
+ e.preventDefault();
+ try{
+  const data=await api('/api/admin/mfa/verify',{method:'POST',body:JSON.stringify({code:$('adminMfaVerifyCode').value.trim()})});
+  $('adminMfaSecret').textContent='';$('adminMfaSetupResult').classList.add('hide');$('adminMfaSetupForm').reset();$('adminMfaVerifyForm').reset();
+  state.user=null;showAuth();note('authNotice',data.message);
+ }catch(err){note('adminMfaNotice',err.message,true);}
+});
 async function loadImprovementReviews(){
  try{state.improvements=await api('/api/admin/improvements');renderImprovementReviews();}
  catch(e){note('improvementAnalysisNotice','Could not load saved improvement reviews: '+e.message,true);}
@@ -83,6 +146,7 @@ function renderAdminMaintenance(){
  $('adminFeedbackOptedIn').textContent=data.feedback_opted_in_total||0;
  const open=Number(data.feedback_by_status?.received||0)+Number(data.feedback_by_status?.reviewing||0);
  $('adminFeedbackOpen').textContent=open;$('adminCurrentVersion').textContent='v'+data.current_version;
+ $('adminAnalysisUsage').textContent=(data.ai_monthly_analysis_used||0)+' / '+(data.ai_monthly_analysis_limit||10);
  $('maintenanceControls').innerHTML=(data.maintenance_controls||[]).map(control=>{
   const statusLabel={configured:'Configured',not_implemented:'Not implemented',external_action:'External action required',manual:'Manual approval'}[control.status]||control.status;
   const badge=control.status==='configured'?'green':control.status==='not_implemented'?'red':'amber';
@@ -101,6 +165,16 @@ $('runImprovementAnalysisBtn').addEventListener('click',async()=>{
   await loadImprovementReviews();
  }catch(err){note('improvementAnalysisNotice',err.message,true);}
  finally{button.disabled=false;button.textContent='Analyse opted-in feedback';}
+});
+$('myFeedbackList').addEventListener('click',async e=>{
+ const button=e.target.closest('[data-withdraw-ai-consent]');if(!button)return;
+ if(!confirm('Withdraw permission for MCAS to use this feedback in future AI analysis?'))return;
+ button.disabled=true;
+ try{
+  const result=await api('/api/feedback/'+encodeURIComponent(button.dataset.withdrawAiConsent)+'/ai-consent',{method:'DELETE'});
+  note('feedbackNotice',result.message);await loadMyFeedback();
+ }catch(err){note('feedbackNotice',err.message,true);}
+ finally{button.disabled=false;}
 });
 $('adminFeedbackList').addEventListener('click',async e=>{
  const button=e.target.closest('[data-feedback-save]');if(!button)return;
