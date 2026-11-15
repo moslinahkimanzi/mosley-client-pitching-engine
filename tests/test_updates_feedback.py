@@ -5,6 +5,7 @@ import uuid
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from cryptography.fernet import Fernet
 
 from backend.app import app, APP_VERSION, encrypt_mfa_secret
 
@@ -14,6 +15,11 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
         from backend.app import db
         with db() as connection:
             connection.execute("DELETE FROM security_rate_limits")
+        self.mfa_key_patch = patch.dict(os.environ, {
+            "MCAS_ADMIN_MFA_ENCRYPTION_KEY": Fernet.generate_key().decode()
+        })
+        self.mfa_key_patch.start()
+        self.addCleanup(self.mfa_key_patch.stop)
 
     def _register(self, client, email=None):
         email = email or ("updates-test-" + uuid.uuid4().hex + "@example.test")
