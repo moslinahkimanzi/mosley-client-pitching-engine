@@ -126,7 +126,7 @@ def totp_code(secret: str, timestamp: Optional[float] = None) -> str:
     moment = time.time() if timestamp is None else timestamp
     key = base64.b32decode(secret + "=" * ((8 - len(secret) % 8) % 8), casefold=True)
     counter = int(moment // 30)
-    digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+    digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha256).digest()
     offset = digest[-1] & 0x0F
     number = (struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF) % 1_000_000
     return f"{number:06d}"
@@ -2148,7 +2148,7 @@ def admin_mfa_setup(payload: AdminMfaSetupIn, user=Depends(current_user)):
         audit(c, user["id"], "admin.mfa_setup_started")
     label = urllib.parse.quote("MCAS:" + user["email"])
     uri = "otpauth://totp/" + label + "?" + urllib.parse.urlencode({
-        "secret": secret, "issuer": "MCAS", "algorithm": "SHA1", "digits": 6, "period": 30
+        "secret": secret, "issuer": "MCAS", "algorithm": "SHA256", "digits": 6, "period": 30
     })
     return {
         "secret": secret,
