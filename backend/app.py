@@ -1371,12 +1371,12 @@ def redact_feedback_text(value: str) -> str:
     """Remove common direct identifiers and credential patterns before external AI analysis."""
     text_value = str(value or "")[:3000]
     patterns = [
-        (r"(?i)\\b(?:api[_ -]?key|access[_ -]?token|password|secret|authorization)\\b\\s*[:=]\\s*[^\\s,;]+", "[REDACTED CREDENTIAL]"),
-        (r"(?i)\\bBearer\\s+[A-Za-z0-9._~+/=-]+", "[REDACTED TOKEN]"),
-        (r"\\b(?:sk-[A-Za-z0-9_-]{12,}|gsk_[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|AIza[0-9A-Za-z_-]{20,})\\b", "[REDACTED KEY]"),
-        (r"(?i)\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b", "[REDACTED EMAIL]"),
-        (r"https?://\\S+", "[REDACTED URL]"),
-        (r"(?<!\\w)(?:\\+?\\d[\\d ()-]{7,}\\d)(?!\\w)", "[REDACTED PHONE/NUMBER]"),
+        (r"(?i)\b(?:api[_ -]?key|access[_ -]?token|password|secret|authorization)\b\s*[:=]\s*[^\s,;]+", "[REDACTED CREDENTIAL]"),
+        (r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+", "[REDACTED TOKEN]"),
+        (r"\b(?:sk-[A-Za-z0-9_-]{12,}|gsk_[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|AIza[0-9A-Za-z_-]{20,})\b", "[REDACTED KEY]"),
+        (r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", "[REDACTED EMAIL]"),
+        (r"https?://\S+", "[REDACTED URL]"),
+        (r"(?<!\w)(?:\+?\d[\d ()-]{7,}\d)(?!\w)", "[REDACTED PHONE/NUMBER]"),
     ]
     for pattern, replacement in patterns:
         text_value = re.sub(pattern, replacement, text_value)
@@ -1435,7 +1435,7 @@ def call_configured_ai(messages: list[dict], temperature: float = 0.2, max_token
         raise HTTPException(502, "The configured AI provider returned HTTP " + str(exc.code) + ". No improvement plan was saved.")
     except (urllib.error.URLError, TimeoutError):
         raise HTTPException(502, "MCAS could not connect to the configured AI provider. No improvement plan was saved.")
-    except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
+    except (KeyError, IndexError, TypeError, ValueError):
         raise HTTPException(502, "The AI provider returned an invalid response. No improvement plan was saved.")
 
 
