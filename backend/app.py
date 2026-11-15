@@ -44,6 +44,9 @@ COOKIE = "mcas_session"
 CSRF_COOKIE = "mcas_csrf"
 SESSION_SECONDS = 60 * 60 * 24 * 14
 IS_PROD = os.getenv("MCAS_ENV", "development").lower() == "production"
+APP_VERSION = os.getenv("MCAS_VERSION", "1.1.0").strip()
+if not re.fullmatch(r"\d+\.\d+\.\d+", APP_VERSION):
+    raise RuntimeError("MCAS_VERSION must use semantic version format, for example 1.1.0.")
 MAX_BODY_BYTES = 1_000_000
 SECURITY_LOGGER = logging.getLogger("mcas.security")
 
@@ -146,6 +149,19 @@ def init_db():
             provider TEXT NOT NULL,encrypted_refresh_token TEXT NOT NULL,connected_at TEXT NOT NULL,
             PRIMARY KEY(user_id,provider)
         );
+        CREATE TABLE IF NOT EXISTS customer_feedback(
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            category TEXT NOT NULL,
+            title TEXT NOT NULL,
+            message TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'received',
+            admin_note TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_feedback_user_created ON customer_feedback(user_id,created_at);
+        CREATE INDEX IF NOT EXISTS idx_feedback_status_created ON customer_feedback(status,created_at);
         CREATE INDEX IF NOT EXISTS idx_leads_user_updated ON leads(user_id,updated_at);
         CREATE INDEX IF NOT EXISTS idx_drafts_user_created ON drafts(user_id,created_at);
         CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at);
@@ -264,6 +280,20 @@ def current_user(request: Request):
         raise HTTPException(401, "Session expired; sign in again")
     return dict(row)
 
+def user_is_admin(user: dict) -> bool:
+    """Administrator identities are explicitly configured by the operator, never self-selected."""
+    allowed = {
+        item.strip().lower()
+        for item in os.getenv("MCAS_ADMIN_EMAILS", "").split(",")
+        if item.strip()
+    }
+    return str(user.get("email", "")).strip().lower() in allowed
+
+def require_admin(user: dict):
+    if not user_is_admin(user):
+        raise HTTPException(403, "Administrator access is not enabled for this account.")
+    return user
+
 def owned_lead(c, lead_id, uid):
     row = c.execute("SELECT * FROM leads WHERE id=? AND user_id=?", (lead_id, uid)).fetchone()
     if not row:
@@ -300,6 +330,8 @@ async def security_middleware(request: Request, call_next):
         category, cap = "auth", 8
     elif path == "/api/assistant/draft":
         category, cap = "ai", 6
+    elif path == "/api/feedback":
+        category, cap = "feedback", 5
     elif path in {"/api/research/search", "/api/research/run"}:
         category, cap = "search", 5
     elif path == "/api/audit-website":
@@ -393,13 +425,22 @@ class AIIn(BaseModel):
     evidence: str = Field(default="", max_length=3000)
     incoming: str = Field(default="", max_length=5000)
 
+class FeedbackIn(BaseModel):
+    category: Literal["bug", "usability", "feature", "security", "other"]
+    title: str = Field(min_length=4, max_length=120)
+    message: str = Field(min_length=10, max_length=3000)
+
+class FeedbackReviewIn(BaseModel):
+    status: Literal["received", "reviewing", "planned", "in_progress", "completed", "declined"]
+    admin_note: str = Field(default="", max_length=1000)
+
 @app.get("/")
 def home():
     return FileResponse(BASE / "index.html")
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "service": "MCAS API", "version": "1.0.0", "time": now()}
+    return {"status": "ok", "service": "MCAS API", "version": APP_VERSION, "time": now()}
 
 @app.get("/api/auth/csrf")
 def get_csrf(response: Response):
@@ -468,7 +509,7 @@ def logout(request: Request, response: Response):
 
 @app.get("/api/auth/me")
 def me(user=Depends(current_user)):
-    return user
+    return {**user, "is_admin": user_is_admin(user)}
 
 @app.get("/api/leads")
 def list_leads(user=Depends(current_user)):
@@ -1593,6 +1634,144 @@ def metrics(user=Depends(current_user)):
         dnc = c.execute("SELECT COUNT(*) n FROM leads WHERE user_id=? AND do_not_contact=1", (user["id"],)).fetchone()["n"]
     return {"leads": total, "verified": verified, "drafts": drafts,
             "pending_approval": pending, "open_followups": followups, "do_not_contact": dnc, "sent": 0}
+
+@app.get("/api/updates")
+def updates_status(user=Depends(current_user)):
+    """Customer-facing release information; hosted SaaS updates are deployed centrally."""
+    return {
+        "current_version": APP_VERSION,
+        "latest_version": APP_VERSION,
+        "update_available": False,
+        "release_channel": "stable",
+        "delivery_model": "centrally_managed",
+        "message": (
+            "Your workspace is running the current version reported by this MCAS server. "
+            "Software updates are installed centrally by the MCAS operator; customers do not install server code."
+        ),
+        "releases": [
+            {
+                "version": APP_VERSION,
+                "title": "MCAS Updates & Continuous Improvement",
+                "summary": "Introduces the customer Updates centre, product feedback and administrator maintenance overview.",
+                "changes": [
+                    "Customers can review the current version and release information.",
+                    "Customers can submit product feedback and track its review status.",
+                    "Configured administrators can review feedback and maintenance readiness.",
+                    "Security and dependency maintenance checks remain subject to review before release."
+                ]
+            },
+            {
+                "version": "1.0.0",
+                "title": "MCAS Client Acquisition Workspace",
+                "summary": "Core prospect research, website advice, proposal preparation and human-reviewed outreach workflows.",
+                "changes": [
+                    "Prospect research and evidence-conscious outreach preparation.",
+                    "Website strategy advisor and proposal workflows.",
+                    "Gmail draft creation only; no inbox reading or automatic sending."
+                ]
+            }
+        ],
+        "security_note": (
+            "A displayed version is release information from this server, not proof that an external vulnerability scan "
+            "or production deployment check has just run."
+        )
+    }
+
+@app.get("/api/feedback")
+def list_customer_feedback(user=Depends(current_user)):
+    with db() as c:
+        rows = c.execute(
+            """SELECT id,category,title,message,status,admin_note,created_at,updated_at
+               FROM customer_feedback WHERE user_id=? ORDER BY created_at DESC LIMIT 100""",
+            (user["id"],)
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+@app.post("/api/feedback", status_code=201)
+def submit_customer_feedback(payload: FeedbackIn, user=Depends(current_user)):
+    title = payload.title.strip()
+    message = payload.message.strip()
+    if len(title) < 4 or len(message) < 10:
+        raise HTTPException(422, "Please provide a descriptive title and at least 10 characters of feedback.")
+    feedback_id = secrets.token_urlsafe(18)
+    stamp = now()
+    with db() as c:
+        c.execute(
+            """INSERT INTO customer_feedback
+               (id,user_id,category,title,message,status,admin_note,created_at,updated_at)
+               VALUES(?,?,?,?,?,'received','',?,?)""",
+            (feedback_id, user["id"], payload.category, title, message, stamp, stamp)
+        )
+        audit(c, user["id"], "feedback.submitted", {"feedback_id": feedback_id, "category": payload.category})
+    return {"id": feedback_id, "status": "received", "message": "Thank you. Your feedback has been recorded for review."}
+
+@app.get("/api/admin/maintenance")
+def admin_maintenance(user=Depends(current_user)):
+    require_admin(user)
+    with db() as c:
+        total = c.execute("SELECT COUNT(*) AS n FROM customer_feedback").fetchone()["n"]
+        by_status = c.execute(
+            "SELECT status,COUNT(*) AS n FROM customer_feedback GROUP BY status"
+        ).fetchall()
+        by_category = c.execute(
+            "SELECT category,COUNT(*) AS n FROM customer_feedback GROUP BY category"
+        ).fetchall()
+        feedback = c.execute(
+            """SELECT f.id,f.user_id,u.email AS customer_email,f.category,f.title,f.message,
+                      f.status,f.admin_note,f.created_at,f.updated_at
+               FROM customer_feedback f JOIN users u ON u.id=f.user_id
+               ORDER BY CASE WHEN f.status IN ('received','reviewing') THEN 0 ELSE 1 END,
+                        f.created_at DESC LIMIT 100"""
+        ).fetchall()
+    category_counts = {row["category"]: row["n"] for row in by_category}
+    recommendations = []
+    for category, label, action in [
+        ("bug", "Reliability", "Group bug reports, reproduce them in tests and fix the highest-impact issue first."),
+        ("usability", "Usability", "Review confusing workflows and prioritise changes that reduce customer effort."),
+        ("feature", "Product capability", "Compare feature requests, customer value and maintenance cost before planning work."),
+        ("security", "Security", "Escalate security feedback for prompt investigation; do not expose sensitive details in public release notes."),
+        ("other", "General feedback", "Review uncategorised feedback and route it to the appropriate product owner.")
+    ]:
+        count = int(category_counts.get(category, 0))
+        if count:
+            recommendations.append({"area": label, "count": count, "action": action})
+    controls = [
+        {"name": "Automated test workflow", "status": "configured", "detail": "The repository CI workflow runs Python tests, JavaScript syntax checks and dependency auditing. Review the latest run in GitHub Actions before release."},
+        {"name": "CodeQL security analysis", "status": "configured", "detail": "CodeQL is configured for Python and JavaScript with a scheduled weekly analysis. Check the GitHub Security tab for actual findings."},
+        {"name": "Dependabot dependency updates", "status": "configured", "detail": "Weekly dependency update pull requests are configured. Review and test every proposed update before merging."},
+        {"name": "Customer account MFA", "status": "not_implemented", "detail": "MFA for MCAS customer accounts has not been implemented in this build."},
+        {"name": "Encrypted off-site backups", "status": "external_action", "detail": "Configure backups with the hosting provider and test a restore. This dashboard cannot verify your backup provider."},
+        {"name": "Production deployment approval", "status": "manual", "detail": "A human administrator must review, test and approve production releases. Automatic self-deployment is disabled."}
+    ]
+    return {
+        "current_version": APP_VERSION,
+        "admin_email": user["email"],
+        "feedback_total": total,
+        "feedback_by_status": {row["status"]: row["n"] for row in by_status},
+        "feedback_by_category": category_counts,
+        "recommendations": recommendations,
+        "feedback": [dict(row) for row in feedback],
+        "maintenance_controls": controls,
+        "automation_boundary": (
+            "MCAS can collect feedback and display maintenance readiness. It does not rewrite production code, "
+            "change security configuration, access customer inboxes or deploy updates autonomously."
+        ),
+        "workflow_status_source": "Configuration summary only; live GitHub Actions results are not queried by this dashboard."
+    }
+
+@app.patch("/api/admin/feedback/{feedback_id}")
+def review_customer_feedback(feedback_id: str, payload: FeedbackReviewIn, user=Depends(current_user)):
+    require_admin(user)
+    with db() as c:
+        cur = c.execute(
+            """UPDATE customer_feedback SET status=?,admin_note=?,updated_at=?
+               WHERE id=?""",
+            (payload.status, payload.admin_note.strip(), now(), feedback_id)
+        )
+        if not cur.rowcount:
+            raise HTTPException(404, "Feedback item not found.")
+        audit(c, user["id"], "feedback.reviewed", {"feedback_id": feedback_id, "status": payload.status})
+    return {"ok": True, "status": payload.status}
 
 @app.get("/api/billing/status")
 def billing_status(user=Depends(current_user)):
