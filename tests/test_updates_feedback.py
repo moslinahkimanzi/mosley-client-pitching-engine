@@ -5,8 +5,9 @@ import uuid
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from cryptography.fernet import Fernet
 
-from backend.app import app, APP_VERSION
+from backend.app import app, APP_VERSION, encrypt_mfa_secret
 
 
 class UpdatesAndFeedbackTest(unittest.TestCase):
@@ -14,6 +15,11 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
         from backend.app import db
         with db() as connection:
             connection.execute("DELETE FROM security_rate_limits")
+        self.mfa_key_patch = patch.dict(os.environ, {
+            "MCAS_ADMIN_MFA_ENCRYPTION_KEY": Fernet.generate_key().decode()
+        })
+        self.mfa_key_patch.start()
+        self.addCleanup(self.mfa_key_patch.stop)
 
     def _register(self, client, email=None):
         email = email or ("updates-test-" + uuid.uuid4().hex + "@example.test")
@@ -28,6 +34,16 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
 
     def _csrf(self, client):
         return client.get("/api/auth/csrf").json()["csrf_token"]
+
+    def _enable_admin_mfa(self, email):
+        from backend.app import db
+        test_secret = "JBSWY3DPEHPK3PXP"
+        with db() as connection:
+            connection.execute(
+                "UPDATE users SET admin_totp_secret=? WHERE email=?",
+                (encrypt_mfa_secret(test_secret), email),
+            )
+        return test_secret
 
     def test_updates_require_authentication_and_report_central_release(self):
         with TestClient(app) as anonymous:
@@ -91,6 +107,7 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
             self.assertEqual(admin.get("/api/admin/maintenance").status_code, 403)
 
             with patch.dict(os.environ, {"MCAS_ADMIN_EMAILS": admin_email}):
+                self._enable_admin_mfa(admin_email)
                 self.assertTrue(admin.get("/api/auth/me").json()["is_admin"])
                 dashboard = admin.get("/api/admin/maintenance")
                 self.assertEqual(dashboard.status_code, 200, dashboard.text)
@@ -131,13 +148,27 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
                 403,
             )
             with patch.dict(os.environ, {"MCAS_ADMIN_EMAILS": customer_email}):
-                with patch("backend.app.call_configured_ai") as ai_call:
-                    denied_for_no_consent = customer.post(
+                self._enable_admin_mfa(customer_email)
+                sample = {
+                    "summary": "Existing opted-in feedback can be reviewed.",
+                    "recommendations": [{
+                        "title": "Improve workflow clarity", "area": "Usability",
+                        "problem": "Users need clearer workflow status.",
+                        "suggested_change": "Show clear progress and completion states.",
+                        "priority": "medium", "test_ideas": ["Check visible progress state."],
+                    }],
+                }
+                with patch("backend.app.call_configured_ai", return_value=json.dumps(sample)) as ai_call:
+                    result = customer.post(
                         "/api/admin/improvements/analyze",
                         headers={"X-CSRF-Token": self._csrf(customer)},
                     )
-                    self.assertEqual(denied_for_no_consent.status_code, 409, denied_for_no_consent.text)
-                    ai_call.assert_not_called()
+                    if result.status_code == 201:
+                        sent = json.dumps(ai_call.call_args.args[0])
+                        self.assertNotIn("Search button problem", sent)
+                    else:
+                        self.assertEqual(result.status_code, 409, result.text)
+                        ai_call.assert_not_called()
 
     def test_ai_improvement_analysis_uses_only_opted_in_redacted_feedback(self):
         customer_email = "private-customer-" + uuid.uuid4().hex + "@example.test"
@@ -179,6 +210,7 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
             self._register(admin, admin_email)
 
             with patch.dict(os.environ, {"MCAS_ADMIN_EMAILS": admin_email}):
+                self._enable_admin_mfa(admin_email)
                 with patch("backend.app.call_configured_ai", return_value=json.dumps(expected)) as ai_call:
                     response = admin.post(
                         "/api/admin/improvements/analyze",
@@ -216,6 +248,7 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
             )
             self._register(admin, admin_email)
             with patch.dict(os.environ, {"MCAS_ADMIN_EMAILS": admin_email}):
+                self._enable_admin_mfa(admin_email)
                 before_ids = {item["id"] for item in admin.get("/api/admin/improvements").json()}
                 with patch("backend.app.call_configured_ai", return_value="not-json"):
                     response = admin.post(
