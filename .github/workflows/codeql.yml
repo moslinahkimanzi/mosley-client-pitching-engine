@@ -34,12 +34,22 @@ jobs:
           build-mode: ${{ matrix.build-mode }}
           queries: security-extended
       - name: Perform CodeQL Analysis
+        id: analyze
         uses: github/codeql-action/analyze@v4
-      - name: Upload short-lived SARIF for alert investigation
+        with:
+          output: results
+          upload: never
+      - name: Retain short-lived SARIF for alert investigation
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: mcas-codeql-sarif-${{ matrix.language }}
-          path: results/*.sarif
-          if-no-files-found: warn
+          path: results/${{ matrix.language }}.sarif
+          if-no-files-found: error
           retention-days: 1
+      - name: Upload CodeQL results to Code Scanning
+        if: success()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: results/${{ matrix.language }}.sarif
+          category: /language:${{ matrix.language }}
