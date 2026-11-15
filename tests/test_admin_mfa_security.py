@@ -149,6 +149,12 @@ class AdminSecurityTest(unittest.TestCase):
                         headers={"X-CSRF-Token": self.csrf(admin)})
                     self.assertEqual(first.status_code, 201, first.text)
                     self.assertEqual(first.json()["monthly_analysis_limit"], 1)
+                    extra = customer.post("/api/feedback", json={
+                        "category": "usability", "title": "Third feedback",
+                        "message": "Research should show a clear completion notice.",
+                        "ai_analysis_consent": True,
+                    }, headers={"X-CSRF-Token": self.csrf(customer)})
+                    self.assertEqual(extra.status_code, 201, extra.text)
                     second = admin.post("/api/admin/improvements/analyze",
                         headers={"X-CSRF-Token": self.csrf(admin)})
                     self.assertEqual(second.status_code, 429, second.text)
