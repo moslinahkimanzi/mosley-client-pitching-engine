@@ -121,6 +121,8 @@ class AdminSecurityTest(unittest.TestCase):
 
     def test_monthly_ai_analysis_quota_is_enforced(self):
         admin_email = "quota-admin-" + uuid.uuid4().hex + "@example.test"
+        with db() as connection:
+            connection.execute("DELETE FROM ai_analysis_usage WHERE month='2099-01'")
         with TestClient(app) as customer, TestClient(app) as admin:
             self.assertEqual(self.register(customer, "quota-user-" + uuid.uuid4().hex + "@example.test").status_code, 201)
             for title, msg in [
