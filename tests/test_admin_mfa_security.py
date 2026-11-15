@@ -22,6 +22,12 @@ AI_RESULT = {
 
 
 class AdminSecurityTest(unittest.TestCase):
+    def setUp(self):
+        # Rate limits are keyed by IP and shared across TestClient instances.
+        # Clear them between tests so one test cannot throttle another.
+        with db() as connection:
+            connection.execute("DELETE FROM security_rate_limits")
+
     def csrf(self, client):
         return client.get("/api/auth/csrf").json()["csrf_token"]
 
