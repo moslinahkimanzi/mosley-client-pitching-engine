@@ -34,7 +34,7 @@ Each configured administrator must enrol a time-based one-time password (TOTP) a
 
 After all configured administrators have enrolled MFA, remove `MCAS_ADMIN_BOOTSTRAP_TOKEN` from the runtime environment. Add it temporarily again only for an authorised new administrator provisioning event, then remove it after setup. Never commit the token or share it in support tickets.
 
-MFA is enforced on every new administrator sign-in. The password step creates a short-lived challenge; five invalid authenticator codes invalidate that challenge. Initial authenticator enrollment is also limited to five incorrect codes; the pending setup is cancelled and must be restarted after five failures. Enabling MFA revokes the setup session, requiring a fresh password-plus-authenticator sign-in. Customer accounts do not yet have MFA in this release.
+MFA is enforced on every new administrator sign-in. The password step creates a short-lived challenge; five invalid authenticator codes invalidate that challenge. Initial authenticator enrollment is also limited to five incorrect codes; the pending setup is cancelled and must be restarted after five failures. Opaque session, MFA-challenge and OAuth state tokens are stored as HMAC-SHA-256 digests keyed by the stable server signing secret; this is separate from password storage, which uses PBKDF2. Because the token-digest format changes from unkeyed SHA-256, deployment invalidates existing sessions and pending OAuth state once, and customers/operators must sign in again. Enabling MFA revokes the setup session, requiring a fresh password-plus-authenticator sign-in. Customer accounts do not yet have MFA in this release.
 
 ## Security Guardian and external controls
 
