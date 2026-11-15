@@ -45,7 +45,7 @@ COOKIE = "mcas_session"
 CSRF_COOKIE = "mcas_csrf"
 SESSION_SECONDS = 60 * 60 * 24 * 14
 IS_PROD = os.getenv("MCAS_ENV", "development").lower() == "production"
-APP_VERSION = os.getenv("MCAS_VERSION", "1.2.0").strip()
+APP_VERSION = os.getenv("MCAS_VERSION", "1.3.0").strip()
 if not re.fullmatch(r"\d+\.\d+\.\d+", APP_VERSION):
     raise RuntimeError("MCAS_VERSION must use semantic version format, for example 1.1.0.")
 MAX_BODY_BYTES = 1_000_000
@@ -720,11 +720,16 @@ def complete_admin_mfa_login(payload: MfaCodeIn, request: Request, response: Res
 @app.post("/api/auth/logout")
 def logout(request: Request, response: Response):
     token = request.cookies.get(COOKIE)
+    challenge = request.cookies.get("mcas_mfa_challenge", "")
     if token:
         with db() as c:
             c.execute("DELETE FROM sessions WHERE token_hash=?", (token_hash(token),))
+    if challenge:
+        with db() as c:
+            c.execute("DELETE FROM mfa_login_challenges WHERE token_hash=?", (token_hash(challenge),))
     response.delete_cookie(COOKIE, path="/", httponly=True, secure=IS_PROD, samesite="lax")
     response.delete_cookie(CSRF_COOKIE, path="/", secure=IS_PROD, samesite="strict")
+    response.delete_cookie("mcas_mfa_challenge", path="/", httponly=True, secure=IS_PROD, samesite="strict")
     return {"ok": True}
 
 @app.get("/api/auth/me")
@@ -1579,6 +1584,9 @@ def redact_feedback_text(value: str) -> str:
         (r"\b(?:sk-[A-Za-z0-9_-]{12,}|gsk_[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|AIza[0-9A-Za-z_-]{20,})\b", "[REDACTED KEY]"),
         (r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", "[REDACTED EMAIL]"),
         (r"https?://\S+", "[REDACTED URL]"),
+        (r"(?i)\b(?:AKIA|ASIA)[A-Z0-9]{16}\b", "[REDACTED KEY]"),
+        (r"\b(?:\d[ -]*?){13,19}\b", "[REDACTED CARD/NUMBER]"),
+        (r"\b(?:\d{1,3}\.){3}\d{1,3}\b", "[REDACTED IP ADDRESS]"),
         (r"(?<!\w)(?:\+?\d[\d ()-]{7,}\d)(?!\w)", "[REDACTED PHONE/NUMBER]"),
     ]
     for pattern, replacement in patterns:
