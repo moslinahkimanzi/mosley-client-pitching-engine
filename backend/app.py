@@ -324,7 +324,14 @@ def verify_password(password: str, encoded: str) -> bool:
         return False
 
 def token_hash(token: str) -> str:
-    return hashlib.sha256(token.encode()).hexdigest()
+    """Return a keyed digest for high-entropy opaque tokens, never for human passwords.
+
+    The HMAC key is the server's stable signing secret. This prevents a database-only
+    disclosure from allowing offline guessing of cookie/challenge values and avoids
+    treating a bearer token like a password hash. Human passwords use PBKDF2 above.
+    """
+    message = b"MCAS opaque-token v1:" + token.encode("utf-8")
+    return hmac.new(SECRET.encode("utf-8"), message, hashlib.sha256).hexdigest()
 
 
 def log_security_event(event: str, request: Request, **details):
