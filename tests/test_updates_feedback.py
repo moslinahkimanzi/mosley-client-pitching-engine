@@ -142,6 +142,7 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
                 403,
             )
             with patch.dict(os.environ, {"MCAS_ADMIN_EMAILS": customer_email}):
+                self._enable_admin_mfa(customer_email)
                 with patch("backend.app.call_configured_ai") as ai_call:
                     denied_for_no_consent = customer.post(
                         "/api/admin/improvements/analyze",
