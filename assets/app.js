@@ -84,12 +84,13 @@ async function loadAdminMaintenance(){
  if(!state.user?.is_admin){return note('adminFeedbackNotice','Administrator access is not enabled for this account.',true);}
  try{
   const mfa=await api('/api/admin/mfa/status');
-  if(!mfa.enabled){
+  if(mfa.required&&!mfa.enabled){
    $('adminMfaSetupCard').classList.remove('hide');$('adminMaintenanceContent').classList.add('hide');
    note('adminMfaNotice','Administrator MFA is required before administrator tools can be used.');
    return;
   }
   $('adminMfaSetupCard').classList.add('hide');$('adminMaintenanceContent').classList.remove('hide');
+  if(!mfa.required)note('adminMfaNotice','Authenticator app is not required on this development server. Password-only access is active; do not expose this server publicly.');
   state.maintenance=await api('/api/admin/maintenance');renderAdminMaintenance();
   await loadImprovementReviews();await loadSecurityGuardian();
  }catch(e){note('adminFeedbackNotice','Administrator maintenance could not be loaded: '+e.message,true);}
