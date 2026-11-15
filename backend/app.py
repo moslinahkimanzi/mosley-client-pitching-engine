@@ -331,7 +331,7 @@ def token_hash(token: str) -> str:
     treating a bearer token like a password hash. Human passwords use PBKDF2 above.
     """
     message = b"MCAS opaque-token v1:" + token.encode("utf-8")
-    return hmac.new(SECRET.encode("utf-8"), message, hashlib.sha256).hexdigest()
+    return hmac.digest(SECRET.encode("utf-8"), message, "sha256").hex()
 
 
 def log_security_event(event: str, request: Request, **details):
