@@ -110,6 +110,36 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
             self.assertEqual(customer_item["status"], "planned")
             self.assertEqual(customer_item["admin_note"], "Added to the product review backlog.")
 
+    def test_onboarding_requires_authentication(self):
+        with TestClient(app) as client:
+            self.assertEqual(client.get("/api/onboarding").status_code, 401)
+
+    def test_onboarding_progress_is_workspace_specific(self):
+        with TestClient(app) as first, TestClient(app) as second:
+            self._register(first)
+            self._register(second)
+
+            initial = first.get("/api/onboarding")
+            self.assertEqual(initial.status_code, 200, initial.text)
+            self.assertEqual(initial.json()["completed"], 0)
+            self.assertEqual(initial.json()["percent"], 0)
+
+            created = first.post(
+                "/api/leads",
+                json={"name": "Onboarding Sample Prospect", "market": "Nairobi"},
+                headers={"X-CSRF-Token": self._csrf(first)},
+            )
+            self.assertEqual(created.status_code, 201, created.text)
+
+            updated = first.get("/api/onboarding").json()
+            other = second.get("/api/onboarding").json()
+            self.assertEqual(updated["completed"], 1)
+            self.assertEqual(updated["steps"][0]["id"], "prospect")
+            self.assertTrue(updated["steps"][0]["completed"])
+            self.assertEqual(other["completed"], 0)
+            self.assertEqual(other["percent"], 0)
+            self.assertTrue(updated["optional_steps"][0]["optional"])
+
     def test_non_admin_cannot_change_feedback_status(self):
         with TestClient(app) as client:
             self._register(client)

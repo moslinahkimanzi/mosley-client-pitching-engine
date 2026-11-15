@@ -1635,6 +1635,85 @@ def metrics(user=Depends(current_user)):
     return {"leads": total, "verified": verified, "drafts": drafts,
             "pending_approval": pending, "open_followups": followups, "do_not_contact": dnc, "sent": 0}
 
+@app.get("/api/onboarding")
+def onboarding_status(user=Depends(current_user)):
+    """Return workspace-specific first-run guidance based only on this user's own records."""
+    with db() as c:
+        lead_count = c.execute(
+            "SELECT COUNT(*) AS n FROM leads WHERE user_id=?", (user["id"],)
+        ).fetchone()["n"]
+        research_count = c.execute(
+            """SELECT COUNT(*) AS n FROM audit_log
+               WHERE user_id=? AND action IN ('research.run','research.search')""",
+            (user["id"],)
+        ).fetchone()["n"]
+        draft_count = c.execute(
+            "SELECT COUNT(*) AS n FROM drafts WHERE user_id=?", (user["id"],)
+        ).fetchone()["n"]
+        proposal_count = c.execute(
+            "SELECT COUNT(*) AS n FROM proposals WHERE user_id=?", (user["id"],)
+        ).fetchone()["n"]
+        gmail_connected = bool(c.execute(
+            "SELECT 1 FROM integrations WHERE user_id=? AND provider='gmail'", (user["id"],)
+        ).fetchone())
+
+    core_steps = [
+        {
+            "id": "prospect",
+            "title": "Add your first prospect",
+            "description": "Save a business you want to research or approach. Keep its facts and contact details accurate.",
+            "target": "prospects",
+            "completed": lead_count > 0,
+        },
+        {
+            "id": "research",
+            "title": "Run your first research search",
+            "description": "Choose a town or city and a business category. Treat discoveries as unverified until you check them.",
+            "target": "research",
+            "completed": research_count > 0,
+        },
+        {
+            "id": "draft",
+            "title": "Prepare your first email draft",
+            "description": "Select a prospect, prepare a relevant message and review it before using Gmail.",
+            "target": "studio",
+            "completed": draft_count > 0,
+        },
+        {
+            "id": "proposal",
+            "title": "Create your first proposal",
+            "description": "Turn verified requirements into a scope for the customer's review.",
+            "target": "proposals",
+            "completed": proposal_count > 0,
+        },
+    ]
+    completed = sum(1 for step in core_steps if step["completed"])
+    optional_steps = [
+        {
+            "id": "gmail",
+            "title": "Connect Gmail (optional)",
+            "description": "MCAS can create Gmail drafts only. It does not read your inbox or send messages.",
+            "target": "integrations",
+            "completed": gmail_connected,
+            "optional": True,
+        }
+    ]
+    return {
+        "completed": completed,
+        "total": len(core_steps),
+        "percent": round((completed / len(core_steps)) * 100),
+        "steps": core_steps,
+        "optional_steps": optional_steps,
+        "workflow": [
+            "Discover a business",
+            "Verify its details and website evidence",
+            "Prepare a proposal or email draft",
+            "Review and approve every customer-facing message yourself",
+        ],
+        "privacy_note": "Progress is calculated only from records in your own workspace.",
+    }
+
+
 @app.get("/api/updates")
 def updates_status(user=Depends(current_user)):
     """Customer-facing release information; hosted SaaS updates are deployed centrally."""
