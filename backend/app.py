@@ -14,6 +14,7 @@ import secrets
 import socket
 import sqlite3
 import ssl
+import struct
 import time
 import urllib.error
 import urllib.parse
@@ -97,6 +98,98 @@ def add_column(con, table, name, definition):
     if name not in cols:
         con.execute("ALTER TABLE " + table + " ADD COLUMN " + name + " " + definition)
 
+def mfa_cipher():
+    """Encrypt administrator TOTP secrets using a key derived from the application secret."""
+    if Fernet is None:
+        raise RuntimeError("The cryptography package is required for administrator MFA.")
+    key_material = hashlib.sha256(("mcas-admin-mfa-v1:" + SECRET).encode()).digest()
+    return Fernet(base64.urlsafe_b64encode(key_material))
+
+
+def encrypt_mfa_secret(secret: str) -> str:
+    return mfa_cipher().encrypt(secret.encode()).decode()
+
+
+def decrypt_mfa_secret(token: str) -> str:
+    try:
+        return mfa_cipher().decrypt(token.encode()).decode()
+    except Exception:
+        raise HTTPException(503, "Stored administrator MFA secret cannot be decrypted. Contact the MCAS operator.")
+
+
+def generate_totp_secret() -> str:
+    return base64.b32encode(secrets.token_bytes(20)).decode().rstrip("=")
+
+
+def totp_code(secret: str, timestamp: Optional[float] = None) -> str:
+    """RFC 6238 six-digit TOTP helper; used by the app and deterministic tests."""
+    moment = time.time() if timestamp is None else timestamp
+    key = base64.b32decode(secret + "=" * ((8 - len(secret) % 8) % 8), casefold=True)
+    counter = int(moment // 30)
+    digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    number = (struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF) % 1_000_000
+    return f"{number:06d}"
+
+
+def verify_totp(secret: str, code: str, timestamp: Optional[float] = None) -> bool:
+    if not re.fullmatch(r"\d{6}", str(code or "")):
+        return False
+    moment = time.time() if timestamp is None else timestamp
+    return any(hmac.compare_digest(totp_code(secret, moment + offset * 30), code)
+               for offset in (-1, 0, 1))
+
+
+def is_configured_admin_email(email: str) -> bool:
+    allowed = {
+        item.strip().lower()
+        for item in os.getenv("MCAS_ADMIN_EMAILS", "").split(",")
+        if item.strip()
+    }
+    return str(email or "").strip().lower() in allowed
+
+
+def configured_ai_monthly_limit() -> int:
+    try:
+        limit = int(os.getenv("MCAS_AI_IMPROVEMENT_MONTHLY_LIMIT", "10"))
+    except ValueError:
+        raise HTTPException(503, "MCAS_AI_IMPROVEMENT_MONTHLY_LIMIT must be a whole number.")
+    if not 1 <= limit <= 1000:
+        raise HTTPException(503, "MCAS_AI_IMPROVEMENT_MONTHLY_LIMIT must be between 1 and 1000.")
+    return limit
+
+
+def utc_month() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m")
+
+
+def monthly_ai_usage() -> tuple[int, int]:
+    limit = configured_ai_monthly_limit()
+    with db() as c:
+        row = c.execute("SELECT requests FROM ai_analysis_usage WHERE month=?", (utc_month(),)).fetchone()
+    return (int(row["requests"]) if row else 0, limit)
+
+
+def reserve_monthly_ai_analysis_slot() -> tuple[int, int]:
+    """Atomically reserve one attempt; failed provider calls also count against the cap."""
+    month = utc_month()
+    limit = configured_ai_monthly_limit()
+    with db() as c:
+        c.execute("BEGIN IMMEDIATE")
+        row = c.execute("SELECT requests FROM ai_analysis_usage WHERE month=?", (month,)).fetchone()
+        used = int(row["requests"]) if row else 0
+        if used >= limit:
+            raise HTTPException(429, "The MCAS monthly AI improvement-analysis limit has been reached. Try again next month or ask the operator to review the limit.")
+        used += 1
+        c.execute(
+            """INSERT INTO ai_analysis_usage(month,requests) VALUES(?,?)
+               ON CONFLICT(month) DO UPDATE SET requests=excluded.requests""",
+            (month, used),
+        )
+        c.execute("DELETE FROM ai_analysis_usage WHERE month < ?", (month,))
+    return used, limit
+
+
 def init_db():
     with db() as c:
         c.execute("PRAGMA journal_mode=WAL")
@@ -160,6 +253,15 @@ def init_db():
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS mfa_login_challenges(
+            token_hash TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            expires_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS ai_analysis_usage(
+            month TEXT PRIMARY KEY,
+            requests INTEGER NOT NULL DEFAULT 0
+        );
         CREATE TABLE IF NOT EXISTS improvement_reviews(
             id TEXT PRIMARY KEY,
             created_by TEXT NOT NULL REFERENCES users(id),
@@ -188,6 +290,9 @@ def init_db():
         add_column(c, "drafts", "to_email", "TEXT")
         add_column(c, "drafts", "gmail_draft_id", "TEXT")
         add_column(c, "customer_feedback", "ai_analysis_consent", "INTEGER NOT NULL DEFAULT 0")
+        add_column(c, "users", "admin_totp_secret", "TEXT")
+        add_column(c, "users", "admin_totp_pending_secret", "TEXT")
+        add_column(c, "users", "admin_totp_pending_expires", "INTEGER")
 
 init_db()
 
@@ -286,8 +391,9 @@ def current_user(request: Request):
     if not token:
         raise HTTPException(401, "Sign in required")
     with db() as c:
-        row = c.execute("""SELECT users.id,users.email FROM sessions
-            JOIN users ON users.id=sessions.user_id
+        row = c.execute("""SELECT users.id,users.email,
+            CASE WHEN users.admin_totp_secret IS NULL THEN 0 ELSE 1 END AS admin_mfa_enabled
+            FROM sessions JOIN users ON users.id=sessions.user_id
             WHERE token_hash=? AND expires_at>?""",
             (token_hash(token), int(time.time()))).fetchone()
     if not row:
@@ -296,16 +402,21 @@ def current_user(request: Request):
 
 def user_is_admin(user: dict) -> bool:
     """Administrator identities are explicitly configured by the operator, never self-selected."""
-    allowed = {
-        item.strip().lower()
-        for item in os.getenv("MCAS_ADMIN_EMAILS", "").split(",")
-        if item.strip()
-    }
-    return str(user.get("email", "")).strip().lower() in allowed
+    return is_configured_admin_email(user.get("email", ""))
 
-def require_admin(user: dict):
+
+def require_configured_admin(user: dict):
     if not user_is_admin(user):
         raise HTTPException(403, "Administrator access is not enabled for this account.")
+    return user
+
+
+def require_admin(user: dict):
+    require_configured_admin(user)
+    with db() as c:
+        row = c.execute("SELECT admin_totp_secret FROM users WHERE id=?", (user["id"],)).fetchone()
+    if not row or not row["admin_totp_secret"]:
+        raise HTTPException(403, "Administrator MFA is required. Set up an authenticator app before using administrator tools.")
     return user
 
 def owned_lead(c, lead_id, uid):
@@ -348,6 +459,8 @@ async def security_middleware(request: Request, call_next):
         category, cap = "feedback", 5
     elif path == "/api/admin/improvements/analyze":
         category, cap = "improvement_analysis", 3
+    elif path in {"/api/auth/mfa", "/api/admin/mfa/setup", "/api/admin/mfa/verify"}:
+        category, cap = "admin_mfa", 6
     elif path in {"/api/research/search", "/api/research/run"}:
         category, cap = "search", 5
     elif path == "/api/audit-website":
@@ -387,6 +500,14 @@ async def security_middleware(request: Request, call_next):
 class RegisterIn(BaseModel):
     email: str = Field(min_length=5, max_length=254)
     password: str = Field(min_length=12, max_length=200)
+    admin_bootstrap_token: str = Field(default="", max_length=200)
+
+class MfaCodeIn(BaseModel):
+    code: str = Field(pattern=r"^\d{6}$")
+
+
+class AdminMfaSetupIn(BaseModel):
+    password: str = Field(min_length=1, max_length=200)
 
 class LoginIn(BaseModel):
     email: str = Field(min_length=5, max_length=254)
@@ -476,11 +597,18 @@ def register(payload: RegisterIn, response: Response):
     validate_email(email)
     if len(set(payload.password)) < 5:
         raise HTTPException(422, "Choose a stronger password with more varied characters")
+    if is_configured_admin_email(email):
+        bootstrap = os.getenv("MCAS_ADMIN_BOOTSTRAP_TOKEN", "")
+        if not bootstrap or len(bootstrap) < 32:
+            raise HTTPException(503, "The configured administrator account has not been provisioned. The operator must set a random MCAS_ADMIN_BOOTSTRAP_TOKEN first.")
+        if not hmac.compare_digest(bootstrap, payload.admin_bootstrap_token):
+            raise HTTPException(403, "A valid administrator bootstrap code is required to create this account.")
     uid = secrets.token_urlsafe(18)
     session = secrets.token_urlsafe(36)
     try:
         with db() as c:
-            c.execute("INSERT INTO users VALUES(?,?,?,?)", (uid, email, password_hash(payload.password), now()))
+            c.execute("INSERT INTO users(id,email,password_hash,created_at) VALUES(?,?,?,?)",
+                      (uid, email, password_hash(payload.password), now()))
             c.execute("INSERT INTO sessions VALUES(?,?,?)", (token_hash(session), uid, int(time.time()) + SESSION_SECONDS))
             audit(c, uid, "account.created")
     except sqlite3.IntegrityError:
