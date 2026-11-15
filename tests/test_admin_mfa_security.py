@@ -1,14 +1,17 @@
+import base64
 import json
 import os
+import secrets
 import unittest
 import uuid
 from unittest.mock import patch
 from fastapi.testclient import TestClient
 from backend.app import app, db, encrypt_mfa_secret, totp_code
 
-PASSWORD = "UniqueStrongPassphrase!2026"
-BOOTSTRAP = "mcas-test-bootstrap-token-" + ("A" * 40)
-TOTP_SECRET = "JBSWY3DPEHPK3PXP"
+# Generate disposable test credentials at runtime; do not commit fixed secrets.
+PASSWORD = secrets.token_urlsafe(32) + "!A1"
+BOOTSTRAP = secrets.token_urlsafe(48)
+TOTP_SECRET = base64.b32encode(secrets.token_bytes(20)).decode().rstrip("=")
 AI_RESULT = {
     "summary": "Feedback points to unclear research status and a need for progress information.",
     "recommendations": [{
