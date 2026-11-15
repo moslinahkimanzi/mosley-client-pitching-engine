@@ -130,7 +130,6 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
                                headers={"X-CSRF-Token": self._csrf(non_admin)}).status_code,
                 403,
             )
-            self._register(customer, admin_email) if False else None
             with patch.dict(os.environ, {"MCAS_ADMIN_EMAILS": customer_email}):
                 with patch("backend.app.call_configured_ai") as ai_call:
                     denied_for_no_consent = customer.post(
