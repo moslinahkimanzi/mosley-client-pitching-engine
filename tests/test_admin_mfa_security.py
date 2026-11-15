@@ -127,6 +127,37 @@ class AdminSecurityTest(unittest.TestCase):
                 self.assertEqual(result.status_code, 401)
             self.assertEqual(client.get("/api/auth/me").status_code, 401)
 
+    def test_admin_mfa_enrollment_locks_after_five_invalid_codes(self):
+        email = "mfa-enroll-lock-" + uuid.uuid4().hex + "@example.test"
+        with TestClient(app) as client, patch.dict(os.environ, {
+            "MCAS_ADMIN_EMAILS": email, "MCAS_ADMIN_BOOTSTRAP_TOKEN": BOOTSTRAP
+        }):
+            self.assertEqual(self.register(client, email, BOOTSTRAP).status_code, 201)
+            setup = client.post(
+                "/api/admin/mfa/setup",
+                json={"password": PASSWORD, "bootstrap_token": BOOTSTRAP},
+                headers={"X-CSRF-Token": self.csrf(client)},
+            )
+            self.assertEqual(setup.status_code, 200, setup.text)
+            secret = setup.json()["secret"]
+            valid_code = totp_code(secret)
+            wrong = "000000" if valid_code != "000000" else "000001"
+            for attempt in range(5):
+                result = client.post(
+                    "/api/admin/mfa/verify",
+                    json={"code": wrong},
+                    headers={"X-CSRF-Token": self.csrf(client)},
+                )
+                self.assertEqual(result.status_code, 429 if attempt == 4 else 422, result.text)
+            status = client.get("/api/admin/mfa/status")
+            self.assertFalse(status.json()["setup_pending"])
+            retry = client.post(
+                "/api/admin/mfa/verify",
+                json={"code": valid_code},
+                headers={"X-CSRF-Token": self.csrf(client)},
+            )
+            self.assertEqual(retry.status_code, 409, retry.text)
+
     def test_customer_can_withdraw_only_their_own_ai_consent(self):
         with TestClient(app) as owner, TestClient(app) as other:
             owner_email = "consent-owner-" + uuid.uuid4().hex + "@example.test"
