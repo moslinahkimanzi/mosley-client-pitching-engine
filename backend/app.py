@@ -57,11 +57,11 @@ hosts_setting = os.getenv("MCAS_ALLOWED_HOSTS")
 if IS_PROD:
     if not origins_setting or not hosts_setting:
         raise RuntimeError("Production requires explicit MCAS_ALLOWED_ORIGINS and MCAS_ALLOWED_HOSTS values.")
-    if any(host.strip().lower() in {"*", "localhost", "127.0.0.1", "testserver"} for host in hosts_setting.split(",")):
-        raise RuntimeError("Production MCAS_ALLOWED_HOSTS must contain only your real application hostnames.")
+    if any("*" in host.strip() or host.strip().lower() in {"localhost", "127.0.0.1", "testserver"} for host in hosts_setting.split(",")):
+        raise RuntimeError("Production MCAS_ALLOWED_HOSTS must contain only explicit real application hostnames; wildcards and local hosts are forbidden.")
 origins = [x.strip() for x in (origins_setting or default_origins).split(",") if x.strip()]
 hosts = [x.strip() for x in (hosts_setting or default_hosts).split(",") if x.strip()]
-if not origins or not hosts or "*" in origins or "*" in hosts:
+if not origins or not hosts or any("*" in item for item in origins + hosts):
     raise RuntimeError("MCAS allowed origins and hosts must be explicit; wildcard values are not permitted.")
 
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -1310,7 +1310,7 @@ def assistant_system_prompt(task: str) -> str:
 
 
 @app.post("/api/assistant/draft")
-def ai_assistant(payload: AIIn, user=Depends(current_user)):
+def ai_assistant(payload: AIIn, request: Request, user=Depends(current_user)):
     base = os.getenv("AI_API_BASE_URL", "").rstrip("/")
     key = os.getenv("AI_API_KEY", "")
     model = os.getenv("AI_MODEL", "")
@@ -1323,7 +1323,11 @@ def ai_assistant(payload: AIIn, user=Depends(current_user)):
         raise HTTPException(503, "Production AI endpoints must use HTTPS.")
     if parsed.scheme != "https" and (IS_PROD or parsed.hostname.lower() not in {"localhost", "127.0.0.1"}):
         raise HTTPException(503, "AI endpoint must use HTTPS except for local development.")
-    if parsed.port not in {None, 443} and parsed.scheme == "https":
+    try:
+        endpoint_port = parsed.port
+    except ValueError:
+        raise HTTPException(503, "AI_API_BASE_URL contains an invalid port.")
+    if parsed.scheme == "https" and endpoint_port not in {None, 443}:
         raise HTTPException(503, "AI endpoint must use the standard HTTPS port.")
     configured_hosts = {
         item.strip().lower().rstrip(".")
