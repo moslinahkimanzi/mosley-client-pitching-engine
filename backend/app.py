@@ -99,11 +99,16 @@ def add_column(con, table, name, definition):
         con.execute("ALTER TABLE " + table + " ADD COLUMN " + name + " " + definition)
 
 def mfa_cipher():
-    """Encrypt administrator TOTP secrets using a key derived from the application secret."""
+    """Encrypt administrator TOTP secrets with a separate, operator-managed Fernet key."""
     if Fernet is None:
-        raise RuntimeError("The cryptography package is required for administrator MFA.")
-    key_material = hashlib.sha256(("mcas-admin-mfa-v1:" + SECRET).encode()).digest()
-    return Fernet(base64.urlsafe_b64encode(key_material))
+        raise HTTPException(503, "The cryptography package is required for administrator MFA.")
+    configured_key = os.getenv("MCAS_ADMIN_MFA_ENCRYPTION_KEY", "").strip()
+    if not configured_key:
+        raise HTTPException(503, "Set MCAS_ADMIN_MFA_ENCRYPTION_KEY before enrolling administrator MFA.")
+    try:
+        return Fernet(configured_key.encode())
+    except Exception:
+        raise HTTPException(503, "MCAS_ADMIN_MFA_ENCRYPTION_KEY is invalid. Generate a Fernet key and keep it stable.")
 
 
 def encrypt_mfa_secret(secret: str) -> str:
@@ -2215,6 +2220,8 @@ def admin_security_status(user=Depends(current_user)):
          "detail": "Production security mode is active." if IS_PROD else "This server is in development mode; do not expose it publicly."},
         {"name": "Application signing secret", "status": "configured" if signing_secret_ok else "warning",
          "detail": "A non-default application secret is configured." if signing_secret_ok else "A development or short signing secret is in use."},
+        {"name": "Administrator MFA encryption key", "status": "configured" if os.getenv("MCAS_ADMIN_MFA_ENCRYPTION_KEY") and Fernet is not None else "warning",
+         "detail": "A separate operator-managed Fernet key is configured." if os.getenv("MCAS_ADMIN_MFA_ENCRYPTION_KEY") and Fernet is not None else "Set MCAS_ADMIN_MFA_ENCRYPTION_KEY before enrolling administrator MFA."},
         {"name": "Administrator MFA", "status": "configured" if admin_total > 0 and mfa_total >= admin_total else "warning",
          "detail": str(mfa_total) + " enrolled administrator account(s) out of " + str(admin_total) + " registered configured administrator account(s)."},
         {"name": "AI endpoint hostname allowlist", "status": "configured" if (not IS_PROD or bool(allowed_ai_hosts)) else "warning",
