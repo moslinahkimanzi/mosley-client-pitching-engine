@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from backend.app import app, APP_VERSION
+from backend.app import app, APP_VERSION, encrypt_mfa_secret
 
 
 class UpdatesAndFeedbackTest(unittest.TestCase):
@@ -28,6 +28,16 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
 
     def _csrf(self, client):
         return client.get("/api/auth/csrf").json()["csrf_token"]
+
+    def _enable_admin_mfa(self, email):
+        from backend.app import db
+        test_secret = "JBSWY3DPEHPK3PXP"
+        with db() as connection:
+            connection.execute(
+                "UPDATE users SET admin_totp_secret=? WHERE email=?",
+                (encrypt_mfa_secret(test_secret), email),
+            )
+        return test_secret
 
     def test_updates_require_authentication_and_report_central_release(self):
         with TestClient(app) as anonymous:
@@ -91,6 +101,7 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
             self.assertEqual(admin.get("/api/admin/maintenance").status_code, 403)
 
             with patch.dict(os.environ, {"MCAS_ADMIN_EMAILS": admin_email}):
+                self._enable_admin_mfa(admin_email)
                 self.assertTrue(admin.get("/api/auth/me").json()["is_admin"])
                 dashboard = admin.get("/api/admin/maintenance")
                 self.assertEqual(dashboard.status_code, 200, dashboard.text)
@@ -179,6 +190,7 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
             self._register(admin, admin_email)
 
             with patch.dict(os.environ, {"MCAS_ADMIN_EMAILS": admin_email}):
+                self._enable_admin_mfa(admin_email)
                 with patch("backend.app.call_configured_ai", return_value=json.dumps(expected)) as ai_call:
                     response = admin.post(
                         "/api/admin/improvements/analyze",
@@ -216,6 +228,7 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
             )
             self._register(admin, admin_email)
             with patch.dict(os.environ, {"MCAS_ADMIN_EMAILS": admin_email}):
+                self._enable_admin_mfa(admin_email)
                 before_ids = {item["id"] for item in admin.get("/api/admin/improvements").json()}
                 with patch("backend.app.call_configured_ai", return_value="not-json"):
                     response = admin.post(
