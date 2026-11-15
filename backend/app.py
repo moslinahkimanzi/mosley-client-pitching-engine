@@ -45,6 +45,12 @@ COOKIE = "mcas_session"
 CSRF_COOKIE = "mcas_csrf"
 SESSION_SECONDS = 60 * 60 * 24 * 14
 IS_PROD = os.getenv("MCAS_ENV", "development").lower() == "production"
+mfa_required_setting = os.getenv("MCAS_ADMIN_MFA_REQUIRED", "true").strip().lower()
+if mfa_required_setting not in {"true", "false"}:
+    raise RuntimeError("MCAS_ADMIN_MFA_REQUIRED must be true or false.")
+ADMIN_MFA_REQUIRED = mfa_required_setting == "true"
+if IS_PROD and not ADMIN_MFA_REQUIRED:
+    raise RuntimeError("Production requires MCAS_ADMIN_MFA_REQUIRED=true. Password-only administrator access is development-only.")
 APP_VERSION = os.getenv("MCAS_VERSION", "1.3.0").strip()
 if not re.fullmatch(r"\d+\.\d+\.\d+", APP_VERSION):
     raise RuntimeError("MCAS_VERSION must use semantic version format, for example 1.1.0.")
@@ -431,6 +437,8 @@ def require_configured_admin(user: dict):
 
 def require_admin(user: dict):
     require_configured_admin(user)
+    if not ADMIN_MFA_REQUIRED:
+        return user
     with db() as c:
         row = c.execute("SELECT admin_totp_secret FROM users WHERE id=?", (user["id"],)).fetchone()
     if not row or not row["admin_totp_secret"]:
@@ -653,7 +661,7 @@ def login(payload: LoginIn, response: Response, request: Request):
         if not row or not verify_password(payload.password, row["password_hash"]):
             log_security_event("auth.login_failed", request)
             raise HTTPException(401, "Email or password is incorrect")
-        if is_configured_admin_email(row["email"]) and row["admin_totp_secret"]:
+        if ADMIN_MFA_REQUIRED and is_configured_admin_email(row["email"]) and row["admin_totp_secret"]:
             challenge = secrets.token_urlsafe(32)
             c.execute("DELETE FROM mfa_login_challenges WHERE expires_at<?", (int(time.time()),))
             c.execute(
@@ -2140,7 +2148,12 @@ def admin_mfa_status(user=Depends(current_user)):
         "enabled": bool(row and row["admin_totp_secret"]),
         "setup_pending": bool(row and row["admin_totp_pending_secret"]
                               and int(row["admin_totp_pending_expires"] or 0) > int(time.time())),
-        "message": "Administrator access requires an authenticator code at every new sign-in.",
+        "required": ADMIN_MFA_REQUIRED,
+        "message": (
+            "Administrator access requires an authenticator code at every new sign-in."
+            if ADMIN_MFA_REQUIRED else
+            "Authenticator MFA is disabled for this development server. Administrator tools use password-only login."
+        ),
     }
 
 
@@ -2280,8 +2293,12 @@ def admin_security_status(user=Depends(current_user)):
          "detail": "A non-default application secret is configured." if signing_secret_ok else "A development or short signing secret is in use."},
         {"name": "Administrator MFA encryption key", "status": "configured" if os.getenv("MCAS_ADMIN_MFA_ENCRYPTION_KEY") and Fernet is not None else "warning",
          "detail": "A separate operator-managed Fernet key is configured." if os.getenv("MCAS_ADMIN_MFA_ENCRYPTION_KEY") and Fernet is not None else "Set MCAS_ADMIN_MFA_ENCRYPTION_KEY before enrolling administrator MFA."},
-        {"name": "Administrator MFA", "status": "configured" if admin_total > 0 and mfa_total >= admin_total else "warning",
-         "detail": str(mfa_total) + " enrolled administrator account(s) out of " + str(admin_total) + " registered configured administrator account(s)."},
+        {"name": "Administrator MFA", "status": "configured" if ADMIN_MFA_REQUIRED and admin_total > 0 and mfa_total >= admin_total else "warning",
+         "detail": (
+             str(mfa_total) + " enrolled administrator account(s) out of " + str(admin_total) + " registered configured administrator account(s)."
+             if ADMIN_MFA_REQUIRED else
+             "Disabled for development mode. Password-only administrator access must never be exposed publicly."
+         )},,
         {"name": "AI endpoint hostname allowlist", "status": "configured" if (not IS_PROD or bool(allowed_ai_hosts)) else "warning",
          "detail": "Configured AI hosts: " + (", ".join(allowed_ai_hosts) if allowed_ai_hosts else "none; required in production.")},
         {"name": "Monthly AI analysis cap", "status": "configured",
@@ -2482,7 +2499,7 @@ def admin_maintenance(user=Depends(current_user)):
                 "SELECT COUNT(*) AS n FROM users WHERE lower(email)=? AND admin_totp_secret IS NOT NULL",
                 (configured_email,),
             ).fetchone()["n"]
-    admin_mfa_ready = bool(configured_admin_emails) and admin_mfa_total >= len(configured_admin_emails)
+    admin_mfa_ready = ADMIN_MFA_REQUIRED and bool(configured_admin_emails) and admin_mfa_total >= len(configured_admin_emails)
     category_counts = {row["category"]: row["n"] for row in by_category}
     recommendations = []
     for category, label, action in [
@@ -2497,7 +2514,11 @@ def admin_maintenance(user=Depends(current_user)):
             recommendations.append({"area": label, "count": count, "action": action})
     controls = [
         {"name": "Administrator MFA", "status": "configured" if admin_mfa_ready else "warning",
-         "detail": str(admin_mfa_total) + " of " + str(len(configured_admin_emails)) + " configured administrator account(s) have enrolled an authenticator. Customer-account MFA is not enabled."},
+         "detail": (
+             str(admin_mfa_total) + " of " + str(len(configured_admin_emails)) + " configured administrator account(s) have enrolled an authenticator. Customer-account MFA is not enabled."
+             if ADMIN_MFA_REQUIRED else
+             "Disabled for development mode. Password-only administrator access must never be exposed publicly."
+         )},
         {"name": "AI feedback improvement analysis", "status": "configured" if os.getenv("AI_API_BASE_URL") and os.getenv("AI_API_KEY") and os.getenv("AI_MODEL") else "not_configured",
          "detail": "Only explicitly opted-in non-security feedback is eligible. The system is capped at " + str(ai_monthly_limit) + " analysis attempts per UTC month."},
         {"name": "Customer email verification", "status": "not_implemented",
