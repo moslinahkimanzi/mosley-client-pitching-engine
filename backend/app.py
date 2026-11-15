@@ -2373,8 +2373,9 @@ def admin_maintenance(user=Depends(current_user)):
     require_admin(user)
     with db() as c:
         total = c.execute("SELECT COUNT(*) AS n FROM customer_feedback").fetchone()["n"]
-        opted_in_total = c.execute("SELECT COUNT(*) AS n FROM customer_feedback WHERE ai_analysis_consent=1 AND category!='security'").fetchone()["n"]
-    ai_monthly_used, ai_monthly_limit = monthly_ai_usage()
+        opted_in_total = c.execute(
+            "SELECT COUNT(*) AS n FROM customer_feedback WHERE ai_analysis_consent=1 AND category!='security'"
+        ).fetchone()["n"]
         by_status = c.execute(
             "SELECT status,COUNT(*) AS n FROM customer_feedback GROUP BY status"
         ).fetchall()
@@ -2388,26 +2389,45 @@ def admin_maintenance(user=Depends(current_user)):
                ORDER BY CASE WHEN f.status IN ('received','reviewing') THEN 0 ELSE 1 END,
                         f.created_at DESC LIMIT 100"""
         ).fetchall()
+    ai_monthly_used, ai_monthly_limit = monthly_ai_usage()
+    configured_admin_emails = [x.strip().lower() for x in os.getenv("MCAS_ADMIN_EMAILS", "").split(",") if x.strip()]
+    if configured_admin_emails:
+        placeholders = ",".join("?" for _ in configured_admin_emails)
+        with db() as c:
+            admin_mfa_total = c.execute(
+                "SELECT COUNT(*) AS n FROM users WHERE lower(email) IN (" + placeholders + ") AND admin_totp_secret IS NOT NULL",
+                tuple(configured_admin_emails),
+            ).fetchone()["n"]
+    else:
+        admin_mfa_total = 0
+    admin_mfa_ready = bool(configured_admin_emails) and admin_mfa_total >= len(configured_admin_emails)
     category_counts = {row["category"]: row["n"] for row in by_category}
     recommendations = []
     for category, label, action in [
         ("bug", "Reliability", "Group bug reports, reproduce them in tests and fix the highest-impact issue first."),
         ("usability", "Usability", "Review confusing workflows and prioritise changes that reduce customer effort."),
         ("feature", "Product capability", "Compare feature requests, customer value and maintenance cost before planning work."),
-        ("security", "Security", "Escalate security feedback for prompt investigation; do not expose sensitive details in public release notes."),
+        ("security", "Security", "Escalate security feedback for prompt investigation; do not send security reports to the general AI improvement analyst."),
         ("other", "General feedback", "Review uncategorised feedback and route it to the appropriate product owner.")
     ]:
         count = int(category_counts.get(category, 0))
         if count:
             recommendations.append({"area": label, "count": count, "action": action})
     controls = [
-        {"name": "Automated test workflow", "status": "configured", "detail": "The repository CI workflow runs Python tests, JavaScript syntax checks and dependency auditing. Review the latest run in GitHub Actions before release."},
-        {"name": "CodeQL security analysis", "status": "configured", "detail": "CodeQL is configured for Python and JavaScript with a scheduled weekly analysis. Check the GitHub Security tab for actual findings."},
-        {"name": "Dependabot dependency updates", "status": "configured", "detail": "Weekly dependency update pull requests are configured. Review and test every proposed update before merging."},
-        {"name": "AI feedback improvement analysis", "status": "configured" if os.getenv("AI_API_BASE_URL") and os.getenv("AI_API_KEY") and os.getenv("AI_MODEL") else "not_configured", "detail": "Only explicitly opted-in non-security feedback is eligible. The system is capped at " + str(ai_monthly_limit) + " analysis attempts per UTC month."},
-        {"name": "Customer account MFA", "status": "not_implemented", "detail": "MFA for MCAS customer accounts has not been implemented in this build."},
-        {"name": "Encrypted off-site backups", "status": "external_action", "detail": "Configure backups with the hosting provider and test a restore. This dashboard cannot verify your backup provider."},
-        {"name": "Production deployment approval", "status": "manual", "detail": "A human administrator must review, test and approve production releases. Automatic self-deployment is disabled."}
+        {"name": "Administrator MFA", "status": "configured" if admin_mfa_ready else "warning",
+         "detail": str(admin_mfa_total) + " of " + str(len(configured_admin_emails)) + " configured administrator account(s) have enrolled an authenticator. Customer-account MFA is not enabled."},
+        {"name": "AI feedback improvement analysis", "status": "configured" if os.getenv("AI_API_BASE_URL") and os.getenv("AI_API_KEY") and os.getenv("AI_MODEL") else "not_configured",
+         "detail": "Only explicitly opted-in non-security feedback is eligible. The system is capped at " + str(ai_monthly_limit) + " analysis attempts per UTC month."},
+        {"name": "Customer email verification", "status": "not_implemented",
+         "detail": "Customer registration does not verify email ownership in this release."},
+        {"name": "Database encryption at rest", "status": "external_action",
+         "detail": "MCAS does not encrypt the SQLite database file. Configure encrypted storage or a managed database with encryption at rest."},
+        {"name": "Encrypted off-site backups", "status": "external_action",
+         "detail": "Configure encrypted off-site backups and verify restoration with the hosting provider."},
+        {"name": "GitHub branch protection", "status": "external_action",
+         "detail": "Enable required CI and CodeQL checks and restrict direct pushes to main in GitHub repository settings."},
+        {"name": "Production deployment approval", "status": "manual",
+         "detail": "A human administrator must review, test and approve production releases. Automatic self-deployment is disabled."}
     ]
     return {
         "current_version": APP_VERSION,
@@ -2422,8 +2442,8 @@ def admin_maintenance(user=Depends(current_user)):
         "feedback": [dict(row) for row in feedback],
         "maintenance_controls": controls,
         "automation_boundary": (
-            "MCAS can analyse explicitly opted-in feedback and save improvement proposals. It does not rewrite production code, "
-            "change security configuration, access customer inboxes or deploy updates autonomously."
+            "MCAS can analyse explicitly opted-in non-security feedback and save improvement proposals. "
+            "It does not rewrite production code, change security configuration, access customer inboxes or deploy autonomously."
         ),
         "workflow_status_source": "Configuration summary only; live GitHub Actions results are not queried by this dashboard."
     }
