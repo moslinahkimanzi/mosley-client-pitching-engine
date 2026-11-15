@@ -44,7 +44,7 @@ COOKIE = "mcas_session"
 CSRF_COOKIE = "mcas_csrf"
 SESSION_SECONDS = 60 * 60 * 24 * 14
 IS_PROD = os.getenv("MCAS_ENV", "development").lower() == "production"
-APP_VERSION = os.getenv("MCAS_VERSION", "1.1.0").strip()
+APP_VERSION = os.getenv("MCAS_VERSION", "1.2.0").strip()
 if not re.fullmatch(r"\d+\.\d+\.\d+", APP_VERSION):
     raise RuntimeError("MCAS_VERSION must use semantic version format, for example 1.1.0.")
 MAX_BODY_BYTES = 1_000_000
@@ -1818,7 +1818,18 @@ def updates_status(user=Depends(current_user)):
         ),
         "releases": [
             {
-                "version": APP_VERSION,
+                "version": "1.2.0",
+                "title": "AI-assisted Product Improvement",
+                "summary": "Adds consent-based AI analysis of customer feedback and saved, prioritised improvement proposals.",
+                "changes": [
+                    "Customers can optionally consent to AI analysis when submitting feedback.",
+                    "Common email, phone/number, URL and credential patterns are redacted before AI processing.",
+                    "Administrators can analyse new opted-in feedback and review structured recommendations and test ideas.",
+                    "Analysis proposals are saved for human validation; MCAS does not generate, merge or deploy code automatically."
+                ]
+            },
+            {
+                "version": "1.1.0",
                 "title": "MCAS Updates & Continuous Improvement",
                 "summary": "Introduces the customer Updates centre, product feedback and administrator maintenance overview.",
                 "changes": [
