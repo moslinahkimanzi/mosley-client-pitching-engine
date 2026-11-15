@@ -1,4 +1,5 @@
 import os
+import json
 import unittest
 import uuid
 from unittest.mock import patch
@@ -109,6 +110,119 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
             customer_item = customer.get("/api/feedback").json()[0]
             self.assertEqual(customer_item["status"], "planned")
             self.assertEqual(customer_item["admin_note"], "Added to the product review backlog.")
+
+
+    def test_ai_feedback_analysis_requires_explicit_consent_and_admin(self):
+        customer_email = "optout-" + uuid.uuid4().hex + "@example.test"
+        admin_email = "planner-" + uuid.uuid4().hex + "@example.test"
+        with TestClient(app) as customer, TestClient(app) as non_admin:
+            self._register(customer, customer_email)
+            self._register(non_admin)
+            created = customer.post(
+                "/api/feedback",
+                json={"category": "bug", "title": "Search button problem",
+                      "message": "The search button does not respond after I click it."},
+                headers={"X-CSRF-Token": self._csrf(customer)},
+            )
+            self.assertEqual(created.status_code, 201, created.text)
+            self.assertEqual(
+                non_admin.post("/api/admin/improvements/analyze",
+                               headers={"X-CSRF-Token": self._csrf(non_admin)}).status_code,
+                403,
+            )
+            self._register(customer, admin_email) if False else None
+            with patch.dict(os.environ, {"MCAS_ADMIN_EMAILS": customer_email}):
+                with patch("backend.app.call_configured_ai") as ai_call:
+                    denied_for_no_consent = customer.post(
+                        "/api/admin/improvements/analyze",
+                        headers={"X-CSRF-Token": self._csrf(customer)},
+                    )
+                    self.assertEqual(denied_for_no_consent.status_code, 409, denied_for_no_consent.text)
+                    ai_call.assert_not_called()
+
+    def test_ai_improvement_analysis_uses_only_opted_in_redacted_feedback(self):
+        customer_email = "private-customer-" + uuid.uuid4().hex + "@example.test"
+        admin_email = "improvement-admin-" + uuid.uuid4().hex + "@example.test"
+        expected = {
+            "summary": "Customers report a confusing search interaction and need clearer feedback.",
+            "recommendations": [{
+                "title": "Clarify search progress",
+                "area": "Research workflow",
+                "problem": "Users cannot tell whether a search is still running.",
+                "suggested_change": "Show a visible progress state and a clear success or error result.",
+                "priority": "medium",
+                "test_ideas": ["Verify progress appears while a search is running."],
+            }],
+        }
+        with TestClient(app) as customer, TestClient(app) as admin:
+            self._register(customer, customer_email)
+            opted_in = customer.post(
+                "/api/feedback",
+                json={
+                    "category": "usability",
+                    "title": "Search feedback",
+                    "message": "Please contact me at tester@example.test. The research button gives no progress.",
+                    "ai_analysis_consent": True,
+                },
+                headers={"X-CSRF-Token": self._csrf(customer)},
+            )
+            self.assertEqual(opted_in.status_code, 201, opted_in.text)
+            not_opted_in = customer.post(
+                "/api/feedback",
+                json={
+                    "category": "feature",
+                    "title": "Private feature idea",
+                    "message": "Please do not send this text to an AI provider.",
+                },
+                headers={"X-CSRF-Token": self._csrf(customer)},
+            )
+            self.assertEqual(not_opted_in.status_code, 201, not_opted_in.text)
+            self._register(admin, admin_email)
+
+            with patch.dict(os.environ, {"MCAS_ADMIN_EMAILS": admin_email}):
+                with patch("backend.app.call_configured_ai", return_value=json.dumps(expected)) as ai_call:
+                    response = admin.post(
+                        "/api/admin/improvements/analyze",
+                        headers={"X-CSRF-Token": self._csrf(admin)},
+                    )
+                    self.assertEqual(response.status_code, 201, response.text)
+                    self.assertEqual(response.json()["feedback_count"], 1)
+                    sent_text = json.dumps(ai_call.call_args.args[0])
+                    self.assertNotIn(customer_email, sent_text)
+                    self.assertNotIn("tester@example.test", sent_text)
+                    self.assertIn("[REDACTED EMAIL]", sent_text)
+                    self.assertNotIn("Private feature idea", sent_text)
+                    listing = admin.get("/api/admin/improvements")
+                    self.assertEqual(listing.status_code, 200, listing.text)
+                    self.assertEqual(len(listing.json()), 1)
+                    self.assertEqual(listing.json()[0]["feedback_count"], 1)
+                    repeated = admin.post(
+                        "/api/admin/improvements/analyze",
+                        headers={"X-CSRF-Token": self._csrf(admin)},
+                    )
+                    self.assertEqual(repeated.status_code, 409, repeated.text)
+
+    def test_invalid_ai_improvement_response_is_not_saved(self):
+        customer_email = "invalid-ai-" + uuid.uuid4().hex + "@example.test"
+        admin_email = "invalid-ai-admin-" + uuid.uuid4().hex + "@example.test"
+        with TestClient(app) as customer, TestClient(app) as admin:
+            self._register(customer, customer_email)
+            customer.post(
+                "/api/feedback",
+                json={"category": "bug", "title": "Search crashes",
+                      "message": "Search crashes when I press the run button.",
+                      "ai_analysis_consent": True},
+                headers={"X-CSRF-Token": self._csrf(customer)},
+            )
+            self._register(admin, admin_email)
+            with patch.dict(os.environ, {"MCAS_ADMIN_EMAILS": admin_email}):
+                with patch("backend.app.call_configured_ai", return_value="not-json"):
+                    response = admin.post(
+                        "/api/admin/improvements/analyze",
+                        headers={"X-CSRF-Token": self._csrf(admin)},
+                    )
+                    self.assertEqual(response.status_code, 502, response.text)
+                self.assertEqual(admin.get("/api/admin/improvements").json(), [])
 
     def test_onboarding_requires_authentication(self):
         with TestClient(app) as client:
