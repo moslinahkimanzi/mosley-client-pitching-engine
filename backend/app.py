@@ -299,6 +299,7 @@ def init_db():
         add_column(c, "users", "admin_totp_secret", "TEXT")
         add_column(c, "users", "admin_totp_pending_secret", "TEXT")
         add_column(c, "users", "admin_totp_pending_expires", "INTEGER")
+        add_column(c, "users", "admin_totp_pending_attempts", "INTEGER NOT NULL DEFAULT 0")
         add_column(c, "mfa_login_challenges", "attempts", "INTEGER NOT NULL DEFAULT 0")
 
 init_db()
@@ -2147,7 +2148,8 @@ def admin_mfa_setup(payload: AdminMfaSetupIn, user=Depends(current_user)):
             raise HTTPException(409, "Administrator MFA is already enabled.")
         secret = generate_totp_secret()
         c.execute(
-            "UPDATE users SET admin_totp_pending_secret=?,admin_totp_pending_expires=? WHERE id=?",
+            """UPDATE users SET admin_totp_pending_secret=?,admin_totp_pending_expires=?,
+               admin_totp_pending_attempts=0 WHERE id=?""",
             (encrypt_mfa_secret(secret), int(time.time()) + 600, user["id"]),
         )
         audit(c, user["id"], "admin.mfa_setup_started")
@@ -2164,28 +2166,74 @@ def admin_mfa_setup(payload: AdminMfaSetupIn, user=Depends(current_user)):
 
 
 @app.post("/api/admin/mfa/verify")
-def admin_mfa_verify(payload: MfaCodeIn, response: Response, user=Depends(current_user)):
+def admin_mfa_verify(payload: MfaCodeIn, response: Response, request: Request,
+                     user=Depends(current_user)):
     require_configured_admin(user)
+    failure_status = None
+    failure_message = ""
+    enabled = False
     with db() as c:
         row = c.execute(
-            "SELECT admin_totp_pending_secret,admin_totp_pending_expires,admin_totp_secret FROM users WHERE id=?",
+            """SELECT admin_totp_pending_secret,admin_totp_pending_expires,
+                      admin_totp_pending_attempts,admin_totp_secret
+               FROM users WHERE id=?""",
             (user["id"],),
         ).fetchone()
         if not row or row["admin_totp_secret"]:
-            raise HTTPException(409, "Administrator MFA is already enabled or setup is unavailable.")
-        if not row["admin_totp_pending_secret"] or int(row["admin_totp_pending_expires"] or 0) <= int(time.time()):
-            raise HTTPException(409, "MFA setup has expired. Start setup again.")
-        secret = decrypt_mfa_secret(row["admin_totp_pending_secret"])
-        if not verify_totp(secret, payload.code):
-            raise HTTPException(422, "The authenticator code is incorrect. Check your device clock and try again.")
-        c.execute(
-            """UPDATE users SET admin_totp_secret=admin_totp_pending_secret,
-               admin_totp_pending_secret=NULL,admin_totp_pending_expires=NULL WHERE id=?""",
-            (user["id"],),
-        )
-        c.execute("DELETE FROM sessions WHERE user_id=?", (user["id"],))
-        c.execute("DELETE FROM mfa_login_challenges WHERE user_id=?", (user["id"],))
-        audit(c, user["id"], "admin.mfa_enabled")
+            failure_status = 409
+            failure_message = "Administrator MFA is already enabled or setup is unavailable."
+        elif (not row["admin_totp_pending_secret"]
+              or int(row["admin_totp_pending_expires"] or 0) <= int(time.time())):
+            failure_status = 409
+            failure_message = "MFA setup has expired. Start setup again."
+        else:
+            attempts = int(row["admin_totp_pending_attempts"] or 0)
+            if attempts >= 5:
+                c.execute(
+                    """UPDATE users SET admin_totp_pending_secret=NULL,
+                       admin_totp_pending_expires=NULL,admin_totp_pending_attempts=0 WHERE id=?""",
+                    (user["id"],),
+                )
+                audit(c, user["id"], "admin.mfa_setup_locked")
+                failure_status = 429
+                failure_message = "Too many incorrect authenticator codes. This setup was cancelled; start again."
+            else:
+                secret = decrypt_mfa_secret(row["admin_totp_pending_secret"])
+                if not verify_totp(secret, payload.code):
+                    attempts += 1
+                    if attempts >= 5:
+                        c.execute(
+                            """UPDATE users SET admin_totp_pending_secret=NULL,
+                               admin_totp_pending_expires=NULL,admin_totp_pending_attempts=0 WHERE id=?""",
+                            (user["id"],),
+                        )
+                        audit(c, user["id"], "admin.mfa_setup_locked")
+                        failure_status = 429
+                        failure_message = "Five incorrect authenticator codes were entered. This setup was cancelled; start again."
+                    else:
+                        c.execute(
+                            "UPDATE users SET admin_totp_pending_attempts=? WHERE id=?",
+                            (attempts, user["id"]),
+                        )
+                        audit(c, user["id"], "admin.mfa_setup_code_failed", {"attempts": attempts})
+                        failure_status = 422
+                        failure_message = "The authenticator code is incorrect. Check your device clock and try again."
+                    log_security_event("admin.mfa_setup_code_failed", request, attempts=attempts)
+                else:
+                    c.execute(
+                        """UPDATE users SET admin_totp_secret=admin_totp_pending_secret,
+                           admin_totp_pending_secret=NULL,admin_totp_pending_expires=NULL,
+                           admin_totp_pending_attempts=0 WHERE id=?""",
+                        (user["id"],),
+                    )
+                    c.execute("DELETE FROM sessions WHERE user_id=?", (user["id"],))
+                    c.execute("DELETE FROM mfa_login_challenges WHERE user_id=?", (user["id"],))
+                    audit(c, user["id"], "admin.mfa_enabled")
+                    enabled = True
+    if failure_status is not None:
+        raise HTTPException(failure_status, failure_message)
+    if not enabled:
+        raise HTTPException(500, "Administrator MFA could not be enabled.")
     response.delete_cookie(COOKIE, path="/", httponly=True, secure=IS_PROD, samesite="lax")
     response.delete_cookie(CSRF_COOKIE, path="/", secure=IS_PROD, samesite="strict")
     return {
