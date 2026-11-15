@@ -10,7 +10,8 @@ import backend.app as mcas
 
 class ResearchWorkflowTest(unittest.TestCase):
     def setUp(self):
-        mcas._rate_windows.clear()
+        with mcas.db() as connection:
+            connection.execute("DELETE FROM security_rate_limits")
         mcas._SERPER_CACHE.clear()
 
     def _registered_client(self):
