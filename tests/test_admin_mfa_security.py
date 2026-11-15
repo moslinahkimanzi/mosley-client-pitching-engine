@@ -81,6 +81,21 @@ class AdminSecurityTest(unittest.TestCase):
             self.assertTrue(client.get("/api/auth/me").json()["is_admin"])
             self.assertEqual(client.get("/api/admin/maintenance").status_code, 200)
 
+            # A correct password alone must not revoke the current session.
+            second_password_step = client.post(
+                "/api/auth/login",
+                json={"email": email, "password": PASSWORD},
+                headers={"X-CSRF-Token": self.csrf(client)},
+            )
+            self.assertTrue(second_password_step.json()["mfa_required"])
+            self.assertEqual(client.get("/api/auth/me").status_code, 200)
+            second_factor = client.post(
+                "/api/auth/mfa",
+                json={"code": totp_code(secret)},
+                headers={"X-CSRF-Token": self.csrf(client)},
+            )
+            self.assertEqual(second_factor.status_code, 200, second_factor.text)
+
     def test_invalid_mfa_codes_are_limited_to_five_per_challenge(self):
         email = "mfa-lock-" + uuid.uuid4().hex + "@example.test"
         with TestClient(app) as client, patch.dict(os.environ, {
