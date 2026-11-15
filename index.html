@@ -104,6 +104,7 @@
 <div class="field"><label for="feedbackCategory">Feedback type</label><select id="feedbackCategory" required><option value="usability">Usability / confusing workflow</option><option value="bug">Bug / something not working</option><option value="feature">Feature request</option><option value="security">Security concern</option><option value="other">Other feedback</option></select></div>
 <div class="field"><label for="feedbackTitle">Title</label><input id="feedbackTitle" maxlength="120" minlength="4" required placeholder="Briefly describe the issue or idea"></div>
 <div class="field"><label for="feedbackMessage">Details</label><textarea id="feedbackMessage" maxlength="3000" minlength="10" required placeholder="What happened? What did you expect? What would make it easier?"></textarea></div>
+<div class="field"><label class="tiny"><input id="feedbackAiConsent" type="checkbox" style="width:auto"> Optional: I consent to MCAS sending this feedback text, after automatic redaction of common email addresses, phone numbers, URLs and credential patterns, to its configured AI provider to help identify product improvements. Do not include sensitive information. My workspace records are not included.</label></div>
 <button class="primary" id="feedbackSubmit">Submit feedback</button><div id="feedbackNotice" class="notice" role="status"></div>
 </form></article>
 </div>
@@ -117,12 +118,14 @@
 <div class="grid">
 <article class="card"><div class="label">ALL FEEDBACK</div><div class="metric" id="adminFeedbackTotal">0</div></article>
 <article class="card"><div class="label">AWAITING REVIEW</div><div class="metric" id="adminFeedbackOpen">0</div></article>
+<article class="card"><div class="label">AI-ANALYSIS OPT-INS</div><div class="metric" id="adminFeedbackOptedIn">0</div></article>
 <article class="card"><div class="label">CURRENT VERSION</div><div class="metric" id="adminCurrentVersion">—</div></article>
 <article class="card"><div class="label">AUTOMATIC DEPLOYMENT</div><div class="metric" style="font-size:20px">Disabled</div></article>
 </div>
 <div class="cols">
 <article class="card"><h2>Maintenance controls</h2><div id="maintenanceControls" class="list"><div class="empty">Loading maintenance information…</div></div></article>
-<article class="card"><h2>Improvement opportunities</h2><p class="tiny">Themes are prioritised from the number and category of customer feedback submissions; they are not an automatic code change.</p><div id="improvementRecommendations" class="list"><div class="empty">No recommendations yet.</div></div><div id="automationBoundary" class="tiny"></div></article>
+<article class="card"><h2>Improvement opportunities</h2><p class="tiny">Themes are prioritised from customer feedback submissions. AI analysis is separate and only uses feedback that customers explicitly opted in to share.</p><div id="improvementRecommendations" class="list"><div class="empty">No recommendations yet.</div></div><div id="automationBoundary" class="tiny"></div></article>
+<article class="card"><h2>AI improvement analyst</h2><p class="muted">Analyse new, explicitly opted-in feedback and save prioritised product recommendations with test ideas. Feedback is sent to the configured AI provider after common identifier and credential redaction.</p><button class="primary" id="runImprovementAnalysisBtn">Analyse opted-in feedback</button><div id="improvementAnalysisNotice" class="notice" role="status"></div><div id="improvementReviewList" class="list"><div class="empty">No AI improvement reviews yet.</div></div></article>
 </div>
 <article class="card" style="margin-top:14px"><h2>Customer feedback review queue</h2><div id="adminFeedbackList" class="list"><div class="empty">No feedback has been submitted yet.</div></div><div id="adminFeedbackNotice" class="notice" role="status"></div></article>
 </section>

@@ -1,7 +1,7 @@
 (()=>{'use strict';
 const $=id=>document.getElementById(id);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state={csrf:'',user:null,leads:[],drafts:[],followups:[],proposals:[],metrics:{},gmail:null,config:{search:false,ai:false},updates:null,feedback:[],maintenance:null,onboarding:null,authMode:'login'};
+const state={csrf:'',user:null,leads:[],drafts:[],followups:[],proposals:[],metrics:{},gmail:null,config:{search:false,ai:false},updates:null,feedback:[],maintenance:null,improvements:[],onboarding:null,authMode:'login'};
 function toast(msg,error=false){$('toast').textContent=msg;$('toast').className='notice'+(error?' error':'');}
 function note(id,msg,error=false){$(id).textContent=msg;$(id).className='notice'+(error?' error':'');}
 function cookie(name){const item=document.cookie.split('; ').find(x=>x.startsWith(name+'='));return item?decodeURIComponent(item.split('=').slice(1).join('=')):'';}
@@ -49,7 +49,7 @@ $('refreshUpdatesBtn').addEventListener('click',async()=>{
 $('feedbackForm').addEventListener('submit',async e=>{
  e.preventDefault();const btn=$('feedbackSubmit');btn.disabled=true;
  try{
-  await api('/api/feedback',{method:'POST',body:JSON.stringify({category:$('feedbackCategory').value,title:$('feedbackTitle').value.trim(),message:$('feedbackMessage').value.trim()})});
+  await api('/api/feedback',{method:'POST',body:JSON.stringify({category:$('feedbackCategory').value,title:$('feedbackTitle').value.trim(),message:$('feedbackMessage').value.trim(),ai_analysis_consent:$('feedbackAiConsent').checked})});
   $('feedbackForm').reset();note('feedbackNotice','Thank you. Your feedback has been submitted for review.');
   await loadMyFeedback();
  }catch(err){note('feedbackNotice',err.message,true);}
@@ -57,12 +57,30 @@ $('feedbackForm').addEventListener('submit',async e=>{
 });
 async function loadAdminMaintenance(){
  if(!state.user?.is_admin){return note('adminFeedbackNotice','Administrator access is not enabled for this account.',true);}
- try{state.maintenance=await api('/api/admin/maintenance');renderAdminMaintenance();}
+ try{state.maintenance=await api('/api/admin/maintenance');renderAdminMaintenance();await loadImprovementReviews();}
  catch(e){note('adminFeedbackNotice','Maintenance dashboard could not be loaded: '+e.message,true);}
+}
+async function loadImprovementReviews(){
+ try{state.improvements=await api('/api/admin/improvements');renderImprovementReviews();}
+ catch(e){note('improvementAnalysisNotice','Could not load saved improvement reviews: '+e.message,true);}
+}
+function renderImprovementReviews(){
+ const items=state.improvements||[];
+ $('improvementReviewList').innerHTML=items.map(review=>
+  '<div class="item"><div class="itemtop"><strong>AI review · '+esc(review.feedback_count)+' feedback item(s)</strong><span class="badge">Human review required</span></div>'+
+  '<p>'+esc(review.created_at)+'</p><p>'+esc(review.summary)+'</p>'+
+  (review.recommendations||[]).map(item=>
+   '<div class="item"><div class="itemtop"><strong>'+esc(item.title)+'</strong><span class="badge">'+esc(item.priority)+' priority</span></div>'+
+   '<p><b>Area:</b> '+esc(item.area)+'</p><p><b>Problem:</b> '+esc(item.problem)+'</p>'+
+   '<p><b>Suggested change:</b> '+esc(item.suggested_change)+'</p>'+
+   '<p><b>Test ideas:</b> '+(item.test_ideas||[]).map(esc).join(' · ')+'</p></div>'
+  ).join('')+'</div>'
+ ).join('')||'<div class="empty">No AI improvement reviews have been created yet.</div>';
 }
 function renderAdminMaintenance(){
  const data=state.maintenance;if(!data)return;
  $('adminFeedbackTotal').textContent=data.feedback_total;
+ $('adminFeedbackOptedIn').textContent=data.feedback_opted_in_total||0;
  const open=Number(data.feedback_by_status?.received||0)+Number(data.feedback_by_status?.reviewing||0);
  $('adminFeedbackOpen').textContent=open;$('adminCurrentVersion').textContent='v'+data.current_version;
  $('maintenanceControls').innerHTML=(data.maintenance_controls||[]).map(control=>{
@@ -75,6 +93,15 @@ function renderAdminMaintenance(){
  $('adminFeedbackList').innerHTML=(data.feedback||[]).map(item=>'<div class="item" data-feedback-card="'+esc(item.id)+'"><div class="itemtop"><strong>'+esc(item.title)+'</strong><span class="badge">'+esc(feedbackStatusLabel(item.status))+'</span></div><p>'+esc(item.category)+' · '+esc(item.customer_email)+' · '+esc(item.created_at)+'</p><p>'+esc(item.message)+'</p><div class="field"><label>Review status</label><select data-feedback-status><option value="received" '+(item.status==='received'?'selected':'')+'>Received</option><option value="reviewing" '+(item.status==='reviewing'?'selected':'')+'>Under review</option><option value="planned" '+(item.status==='planned'?'selected':'')+'>Planned</option><option value="in_progress" '+(item.status==='in_progress'?'selected':'')+'>In progress</option><option value="completed" '+(item.status==='completed'?'selected':'')+'>Completed</option><option value="declined" '+(item.status==='declined'?'selected':'')+'>Not planned</option></select></div><div class="field"><label>Reply / internal note (visible to this customer)</label><textarea data-feedback-note maxlength="1000">'+esc(item.admin_note||'')+'</textarea></div><button data-feedback-save="'+esc(item.id)+'" class="primary">Save review</button></div>').join('')||'<div class="empty">No customer feedback has been submitted.</div>';
 }
 $('refreshMaintenanceBtn').addEventListener('click',loadAdminMaintenance);
+$('runImprovementAnalysisBtn').addEventListener('click',async()=>{
+ const button=$('runImprovementAnalysisBtn');button.disabled=true;button.textContent='Analysing feedback…';
+ try{
+  const result=await api('/api/admin/improvements/analyze',{method:'POST'});
+  note('improvementAnalysisNotice','Analysis complete: '+result.feedback_count+' opted-in feedback item(s) reviewed. The proposal is saved; no code was changed or deployed.');
+  await loadImprovementReviews();
+ }catch(err){note('improvementAnalysisNotice',err.message,true);}
+ finally{button.disabled=false;button.textContent='Analyse opted-in feedback';}
+});
 $('adminFeedbackList').addEventListener('click',async e=>{
  const button=e.target.closest('[data-feedback-save]');if(!button)return;
  const card=button.closest('[data-feedback-card]');if(!card)return;
