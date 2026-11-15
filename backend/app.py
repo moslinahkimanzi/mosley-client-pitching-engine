@@ -309,7 +309,8 @@ async def security_middleware(request: Request, call_next):
     else:
         category, cap = "general", 120
 
-    keys = [ip + ":" + category]
+    ip_tag = hashlib.sha256(ip.encode()).hexdigest()[:24]
+    keys = ["ip:" + ip_tag + ":" + category]
     if token and category not in {"auth", "general"}:
         keys.append("session:" + token_hash(token)[:24] + ":" + category)
     if consume_rate_limits(keys, cap, 60):
@@ -436,7 +437,8 @@ def login(payload: LoginIn, response: Response, request: Request):
     normalized_email = payload.email.strip().lower()
     ip = request.client.host if request.client else "unknown"
     email_tag = hashlib.sha256(normalized_email.encode()).hexdigest()
-    if consume_rate_limits([ip + ":login-email:" + email_tag], 10, 900):
+    ip_tag = hashlib.sha256(ip.encode()).hexdigest()[:24]
+    if consume_rate_limits(["login:" + ip_tag + ":" + email_tag], 10, 900):
         log_security_event("auth.login_rate_limited", request)
         raise HTTPException(429, "Too many sign-in attempts for this account from this connection. Try again later.")
     with db() as c:
@@ -1327,6 +1329,8 @@ def ai_assistant(payload: AIIn, user=Depends(current_user)):
         item.strip().lower().rstrip(".")
         for item in os.getenv("MCAS_AI_ALLOWED_HOSTS", "").split(",") if item.strip()
     }
+    if IS_PROD and not configured_hosts:
+        raise HTTPException(503, "Production AI use requires an explicit MCAS_AI_ALLOWED_HOSTS allowlist.")
     if configured_hosts and parsed.hostname.lower().rstrip(".") not in configured_hosts:
         log_security_event("ai.endpoint_host_rejected", request)
         raise HTTPException(503, "The configured AI endpoint host is not in MCAS_AI_ALLOWED_HOSTS.")
