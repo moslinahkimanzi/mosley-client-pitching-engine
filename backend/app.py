@@ -462,7 +462,9 @@ async def security_middleware(request: Request, call_next):
     elif path == "/api/admin/improvements/analyze":
         category, cap = "improvement_analysis", 3
     elif path in {"/api/auth/mfa", "/api/admin/mfa/setup", "/api/admin/mfa/verify"}:
-        category, cap = "admin_mfa", 6
+        # The per-challenge TOTP verifier separately locks after five invalid codes.
+        # This IP-level ceiling allows the enrollment + challenge lifecycle to complete.
+        category, cap = "admin_mfa", 12
     elif path in {"/api/research/search", "/api/research/run"}:
         category, cap = "search", 5
     elif path == "/api/audit-website":
