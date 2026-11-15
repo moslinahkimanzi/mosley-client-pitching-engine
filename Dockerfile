@@ -13,7 +13,7 @@ USER appuser
 
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=3)" || exit 1
+  CMD python -c "import os,urllib.request; host=os.environ['MCAS_ALLOWED_HOSTS'].split(',')[0].strip(); req=urllib.request.Request('http://127.0.0.1:8000/api/health',headers={'Host':host}); urllib.request.urlopen(req,timeout=3)" || exit 1
 
 # Configure MCAS_ALLOWED_ORIGINS, MCAS_ALLOWED_HOSTS and MCAS_SECRET_KEY at runtime.
 # Never bake credentials or production environment values into the image.
