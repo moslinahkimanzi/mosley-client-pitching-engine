@@ -1,7 +1,7 @@
 (()=>{'use strict';
 const $=id=>document.getElementById(id);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state={csrf:'',user:null,leads:[],drafts:[],followups:[],proposals:[],metrics:{},gmail:null,config:{search:false,ai:false},updates:null,feedback:[],maintenance:null,authMode:'login'};
+const state={csrf:'',user:null,leads:[],drafts:[],followups:[],proposals:[],metrics:{},gmail:null,config:{search:false,ai:false},updates:null,feedback:[],maintenance:null,onboarding:null,authMode:'login'};
 function toast(msg,error=false){$('toast').textContent=msg;$('toast').className='notice'+(error?' error':'');}
 function note(id,msg,error=false){$(id).textContent=msg;$(id).className='notice'+(error?' error':'');}
 function cookie(name){const item=document.cookie.split('; ').find(x=>x.startsWith(name+'='));return item?decodeURIComponent(item.split('=').slice(1).join('=')):'';}
@@ -17,8 +17,8 @@ $('loginTab').addEventListener('click',()=>setAuthMode('login'));$('registerTab'
 $('authForm').addEventListener('submit',async e=>{e.preventDefault();const btn=$('authSubmit');btn.disabled=true;try{await refreshCsrf();const endpoint=state.authMode==='login'?'/api/auth/login':'/api/auth/register';const data=await api(endpoint,{method:'POST',body:JSON.stringify({email:$('authEmail').value,password:$('authPassword').value})});state.user=data;await refreshCsrf();showApp();await loadAll();}catch(err){note('authNotice',err.message,true);}finally{btn.disabled=false;}});
 $('logoutBtn').addEventListener('click',async()=>{try{await api('/api/auth/logout',{method:'POST'});state.user=null;showAuth();}catch(e){toast(e.message,true);}});
 async function boot(){try{await refreshCsrf();state.user=await api('/api/auth/me');showApp();await loadAll();}catch(e){showAuth();}}
-async function loadAll(){try{const values=await Promise.all([api('/api/leads'),api('/api/drafts'),api('/api/followups'),api('/api/proposals'),api('/api/metrics'),api('/api/integrations/gmail/status'),api('/api/billing/status'),api('/api/integrations/status'),api('/api/auth/me'),api('/api/updates'),api('/api/feedback')]);[state.leads,state.drafts,state.followups,state.proposals,state.metrics,state.gmail,state.billing,state.config,state.user,state.updates,state.feedback]=values;$('adminMaintenanceNav').classList.toggle('hide',!state.user.is_admin);renderAll();renderUpdates();renderMyFeedback();$('searchBadge').textContent=state.config.web_search_configured?'Connected':'Needs API key';$('searchBadge').className='badge '+(state.config.web_search_configured?'green':'amber');$('aiBadge').textContent=state.config.ai_configured?'Connected':'Optional';$('aiBadge').className='badge '+(state.config.ai_configured?'green':'amber');$('researchConfig').textContent=state.config.web_search_configured?'Configured':'Set SERPER_API_KEY in .env and restart MCAS';$('aiConfig').textContent=state.config.ai_configured?'Configured':'Set AI_API_KEY in .env and restart MCAS';$('gmailBadge').textContent=state.gmail.connected?'Connected':state.gmail.configured?'Ready to connect':'Not configured';$('gmailDetails').textContent=state.gmail.capability||'Gmail drafts only.';$('gmailConnect').disabled=!state.gmail.configured||state.gmail.connected;$('gmailDisconnect').disabled=!state.gmail.connected;$('billingStatus').textContent=state.billing.message;}catch(e){toast(e.message,true);}}
-function renderAll(){renderMetrics();renderLeads();renderDrafts();renderFollowups();renderProposals();renderSelects();renderUpdates();renderMyFeedback();}
+async function loadAll(){try{const values=await Promise.all([api('/api/leads'),api('/api/drafts'),api('/api/followups'),api('/api/proposals'),api('/api/metrics'),api('/api/integrations/gmail/status'),api('/api/billing/status'),api('/api/integrations/status'),api('/api/auth/me'),api('/api/updates'),api('/api/feedback'),api('/api/onboarding')]);[state.leads,state.drafts,state.followups,state.proposals,state.metrics,state.gmail,state.billing,state.config,state.user,state.updates,state.feedback,state.onboarding]=values;$('adminMaintenanceNav').classList.toggle('hide',!state.user.is_admin);renderAll();renderUpdates();renderMyFeedback();$('searchBadge').textContent=state.config.web_search_configured?'Connected':'Needs API key';$('searchBadge').className='badge '+(state.config.web_search_configured?'green':'amber');$('aiBadge').textContent=state.config.ai_configured?'Connected':'Optional';$('aiBadge').className='badge '+(state.config.ai_configured?'green':'amber');$('researchConfig').textContent=state.config.web_search_configured?'Configured':'Set SERPER_API_KEY in .env and restart MCAS';$('aiConfig').textContent=state.config.ai_configured?'Configured':'Set AI_API_KEY in .env and restart MCAS';$('gmailBadge').textContent=state.gmail.connected?'Connected':state.gmail.configured?'Ready to connect':'Not configured';$('gmailDetails').textContent=state.gmail.capability||'Gmail drafts only.';$('gmailConnect').disabled=!state.gmail.configured||state.gmail.connected;$('gmailDisconnect').disabled=!state.gmail.connected;$('billingStatus').textContent=state.billing.message;}catch(e){toast(e.message,true);}}
+function renderAll(){renderMetrics();renderLeads();renderDrafts();renderFollowups();renderProposals();renderSelects();renderUpdates();renderMyFeedback();renderOnboarding();}
 
 function feedbackStatusLabel(value){return ({received:'Received',reviewing:'Under review',planned:'Planned',in_progress:'In progress',completed:'Completed',declined:'Not planned'})[value]||value;}
 function renderUpdates(){
@@ -85,6 +85,22 @@ $('adminFeedbackList').addEventListener('click',async e=>{
   await loadAdminMaintenance();
  }catch(err){note('adminFeedbackNotice',err.message,true);}
  finally{button.disabled=false;}
+});
+
+
+function renderOnboarding(){
+ const data=state.onboarding;if(!data)return;
+ $('onboardingProgress').value=Number(data.percent)||0;
+ $('onboardingProgressLabel').textContent=(data.completed||0)+' of '+(data.total||0)+' key steps complete';
+ const makeStep=(step)=>'<div class="item"><div class="itemtop"><div><strong>'+(step.completed?'✓ ':'')+esc(step.title)+'</strong><p>'+esc(step.description)+'</p></div><span class="badge '+(step.completed?'green':'amber')+'">'+(step.completed?'Complete':'Next step')+'</span></div><div class="itemactions"><button type="button" '+(step.completed?'':'class="primary" ')+'data-onboarding-target="'+esc(step.target)+'">'+(step.completed?'Open':'Continue')+'</button></div></div>';
+ $('onboardingSteps').innerHTML=(data.steps||[]).map(makeStep).join('')||'<div class="empty">Your setup steps will appear here.</div>';
+ $('onboardingOptionalSteps').innerHTML=(data.optional_steps||[]).map(step=>'<div class="item"><div class="itemtop"><div><strong>'+esc(step.title)+'</strong><p>'+esc(step.description)+'</p></div><span class="badge '+(step.completed?'green':'')+'">'+(step.completed?'Connected':'Optional')+'</span></div><div class="itemactions"><button type="button" data-onboarding-target="'+esc(step.target)+'">'+(step.completed?'Manage':'Set up')+'</button></div></div>').join('');
+ $('onboardingPrivacyNote').textContent=data.privacy_note||'Progress is based on your own workspace.';
+}
+$('onboardingCard').addEventListener('click',e=>{
+ const button=e.target.closest('[data-onboarding-target]');if(!button)return;
+ const target=button.dataset.onboardingTarget;
+ if(target)page(target);
 });
 
 function renderMetrics(){const m=state.metrics;$('mLeads').textContent=m.leads||0;$('mVerified').textContent=m.verified||0;$('mDrafts').textContent=m.pending_approval||0;$('mFollow').textContent=m.open_followups||0;$('pUnverified').textContent=state.leads.filter(l=>l.status==='Unverified').length;$('pPending').textContent=m.pending_approval||0;$('pDnc').textContent=m.do_not_contact||0;
