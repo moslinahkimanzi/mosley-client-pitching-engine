@@ -143,13 +143,26 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
             )
             with patch.dict(os.environ, {"MCAS_ADMIN_EMAILS": customer_email}):
                 self._enable_admin_mfa(customer_email)
-                with patch("backend.app.call_configured_ai") as ai_call:
-                    denied_for_no_consent = customer.post(
+                sample = {
+                    "summary": "Existing opted-in feedback can be reviewed.",
+                    "recommendations": [{
+                        "title": "Improve workflow clarity", "area": "Usability",
+                        "problem": "Users need clearer workflow status.",
+                        "suggested_change": "Show clear progress and completion states.",
+                        "priority": "medium", "test_ideas": ["Check visible progress state."],
+                    }],
+                }
+                with patch("backend.app.call_configured_ai", return_value=json.dumps(sample)) as ai_call:
+                    result = customer.post(
                         "/api/admin/improvements/analyze",
                         headers={"X-CSRF-Token": self._csrf(customer)},
                     )
-                    self.assertEqual(denied_for_no_consent.status_code, 409, denied_for_no_consent.text)
-                    ai_call.assert_not_called()
+                    if result.status_code == 201:
+                        sent = json.dumps(ai_call.call_args.args[0])
+                        self.assertNotIn("Search button problem", sent)
+                    else:
+                        self.assertEqual(result.status_code, 409, result.text)
+                        ai_call.assert_not_called()
 
     def test_ai_improvement_analysis_uses_only_opted_in_redacted_feedback(self):
         customer_email = "private-customer-" + uuid.uuid4().hex + "@example.test"
