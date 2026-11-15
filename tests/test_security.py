@@ -14,14 +14,13 @@ class SecurityHelpersTest(unittest.TestCase):
         self.assertFalse(verify_password("wrong-password", first))
 
     def test_opaque_token_digest_uses_keyed_sha256(self):
-        import hashlib
         import hmac
         value = "random-high-entropy-cookie-token"
-        expected = hmac.new(
+        expected = hmac.digest(
             SECRET.encode("utf-8"),
             b"MCAS opaque-token v1:" + value.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
+            "sha256",
+        ).hex()
         self.assertEqual(token_hash(value), expected)
         self.assertNotEqual(token_hash(value), value)
         self.assertNotEqual(token_hash(value), token_hash(value + "-different"))
