@@ -2192,20 +2192,21 @@ def admin_mfa_verify(payload: MfaCodeIn, response: Response, user=Depends(curren
 @app.get("/api/admin/security-status")
 def admin_security_status(user=Depends(current_user)):
     require_admin(user)
-    configured_emails = [x.strip().lower() for x in os.getenv("MCAS_ADMIN_EMAILS", "").split(",") if x.strip()]
+    configured_emails = sorted({
+        x.strip().lower() for x in os.getenv("MCAS_ADMIN_EMAILS", "").split(",") if x.strip()
+    })
+    admin_total = 0
+    mfa_total = 0
     with db() as c:
-        if configured_emails:
-            placeholders = ",".join("?" for _ in configured_emails)
-            admin_total = c.execute(
-                "SELECT COUNT(*) AS n FROM users WHERE lower(email) IN (" + placeholders + ")",
-                tuple(configured_emails),
+        for configured_email in configured_emails:
+            admin_total += c.execute(
+                "SELECT COUNT(*) AS n FROM users WHERE lower(email)=?",
+                (configured_email,),
             ).fetchone()["n"]
-            mfa_total = c.execute(
-                "SELECT COUNT(*) AS n FROM users WHERE lower(email) IN (" + placeholders + ") AND admin_totp_secret IS NOT NULL",
-                tuple(configured_emails),
+            mfa_total += c.execute(
+                "SELECT COUNT(*) AS n FROM users WHERE lower(email)=? AND admin_totp_secret IS NOT NULL",
+                (configured_email,),
             ).fetchone()["n"]
-        else:
-            admin_total = mfa_total = 0
     ai_used, ai_limit = monthly_ai_usage()
     allowed_ai_hosts = [x.strip() for x in os.getenv("MCAS_AI_ALLOWED_HOSTS", "").split(",") if x.strip()]
     signing_secret_ok = len(SECRET) >= 40 and not SECRET.startswith("development-only")
@@ -2406,16 +2407,16 @@ def admin_maintenance(user=Depends(current_user)):
                         f.created_at DESC LIMIT 100"""
         ).fetchall()
     ai_monthly_used, ai_monthly_limit = monthly_ai_usage()
-    configured_admin_emails = [x.strip().lower() for x in os.getenv("MCAS_ADMIN_EMAILS", "").split(",") if x.strip()]
-    if configured_admin_emails:
-        placeholders = ",".join("?" for _ in configured_admin_emails)
-        with db() as c:
-            admin_mfa_total = c.execute(
-                "SELECT COUNT(*) AS n FROM users WHERE lower(email) IN (" + placeholders + ") AND admin_totp_secret IS NOT NULL",
-                tuple(configured_admin_emails),
+    configured_admin_emails = sorted({
+        x.strip().lower() for x in os.getenv("MCAS_ADMIN_EMAILS", "").split(",") if x.strip()
+    })
+    admin_mfa_total = 0
+    with db() as c:
+        for configured_email in configured_admin_emails:
+            admin_mfa_total += c.execute(
+                "SELECT COUNT(*) AS n FROM users WHERE lower(email)=? AND admin_totp_secret IS NOT NULL",
+                (configured_email,),
             ).fetchone()["n"]
-    else:
-        admin_mfa_total = 0
     admin_mfa_ready = bool(configured_admin_emails) and admin_mfa_total >= len(configured_admin_emails)
     category_counts = {row["category"]: row["n"] for row in by_category}
     recommendations = []
