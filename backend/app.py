@@ -664,6 +664,11 @@ def complete_admin_mfa_login(payload: MfaCodeIn, request: Request, response: Res
     if not challenge:
         raise HTTPException(401, "The administrator sign-in challenge is missing or expired. Sign in again.")
     challenge_hash = token_hash(challenge)
+    failure_status = None
+    failure_message = ""
+    session = None
+    user_id = None
+    email = None
     with db() as c:
         row = c.execute(
             """SELECT u.id,u.email,u.admin_totp_secret,ch.expires_at,ch.attempts
@@ -673,33 +678,43 @@ def complete_admin_mfa_login(payload: MfaCodeIn, request: Request, response: Res
         ).fetchone()
         if not row or int(row["expires_at"]) <= int(time.time()):
             c.execute("DELETE FROM mfa_login_challenges WHERE token_hash=?", (challenge_hash,))
-            raise HTTPException(401, "The administrator sign-in challenge has expired. Sign in again.")
-        if not row["admin_totp_secret"] or not is_configured_admin_email(row["email"]):
-            raise HTTPException(403, "Administrator MFA is not available for this account.")
-        if int(row["attempts"]) >= 5:
+            failure_status = 401
+            failure_message = "The administrator sign-in challenge has expired. Sign in again."
+        elif not row["admin_totp_secret"] or not is_configured_admin_email(row["email"]):
+            failure_status = 403
+            failure_message = "Administrator MFA is not available for this account."
+        elif int(row["attempts"]) >= 5:
             c.execute("DELETE FROM mfa_login_challenges WHERE token_hash=?", (challenge_hash,))
-            raise HTTPException(429, "Too many authenticator attempts. Sign in again and retry.")
-        secret = decrypt_mfa_secret(row["admin_totp_secret"])
-        if not verify_totp(secret, payload.code):
-            attempts = int(row["attempts"]) + 1
-            if attempts >= 5:
-                c.execute("DELETE FROM mfa_login_challenges WHERE token_hash=?", (challenge_hash,))
-                log_security_event("admin.mfa_challenge_locked", request)
+            failure_status = 429
+            failure_message = "Too many authenticator attempts. Sign in again and retry."
+        else:
+            secret = decrypt_mfa_secret(row["admin_totp_secret"])
+            if not verify_totp(secret, payload.code):
+                attempts = int(row["attempts"]) + 1
+                if attempts >= 5:
+                    c.execute("DELETE FROM mfa_login_challenges WHERE token_hash=?", (challenge_hash,))
+                    log_security_event("admin.mfa_challenge_locked", request)
+                else:
+                    c.execute("UPDATE mfa_login_challenges SET attempts=? WHERE token_hash=?",
+                              (attempts, challenge_hash))
+                    log_security_event("admin.mfa_login_failed", request, attempts=attempts)
+                failure_status = 401
+                failure_message = "The authenticator code is incorrect. Check your app clock and try again."
             else:
-                c.execute("UPDATE mfa_login_challenges SET attempts=? WHERE token_hash=?",
-                          (attempts, challenge_hash))
-                log_security_event("admin.mfa_login_failed", request, attempts=attempts)
-            raise HTTPException(401, "The authenticator code is incorrect. Check your app clock and try again.")
-        c.execute("DELETE FROM mfa_login_challenges WHERE user_id=?", (row["id"],))
-        session = secrets.token_urlsafe(36)
-        c.execute("INSERT INTO sessions VALUES(?,?,?)",
-                  (token_hash(session), row["id"], int(time.time()) + SESSION_SECONDS))
-        audit(c, row["id"], "account.login_mfa")
+                user_id = row["id"]
+                email = row["email"]
+                c.execute("DELETE FROM mfa_login_challenges WHERE user_id=?", (user_id,))
+                session = secrets.token_urlsafe(36)
+                c.execute("INSERT INTO sessions VALUES(?,?,?)",
+                          (token_hash(session), user_id, int(time.time()) + SESSION_SECONDS))
+                audit(c, user_id, "account.login_mfa")
+    if failure_status is not None:
+        raise HTTPException(failure_status, failure_message)
     response.delete_cookie("mcas_mfa_challenge", path="/", httponly=True, secure=IS_PROD, samesite="strict")
     response.set_cookie(COOKIE, session, max_age=SESSION_SECONDS, httponly=True,
                         secure=IS_PROD, samesite="lax", path="/")
     set_csrf(response)
-    return {"id": row["id"], "email": row["email"], "mfa_verified": True}
+    return {"id": user_id, "email": email, "mfa_verified": True}
 
 
 @app.post("/api/auth/logout")
