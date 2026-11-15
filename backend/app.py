@@ -2073,6 +2073,132 @@ def submit_customer_feedback(payload: FeedbackIn, user=Depends(current_user)):
         audit(c, user["id"], "feedback.submitted", {"feedback_id": feedback_id, "category": payload.category})
     return {"id": feedback_id, "status": "received", "message": "Thank you. Your feedback has been recorded for review."}
 
+@app.get("/api/admin/mfa/status")
+def admin_mfa_status(user=Depends(current_user)):
+    require_configured_admin(user)
+    with db() as c:
+        row = c.execute(
+            "SELECT admin_totp_secret,admin_totp_pending_secret,admin_totp_pending_expires FROM users WHERE id=?",
+            (user["id"],),
+        ).fetchone()
+    return {
+        "enabled": bool(row and row["admin_totp_secret"]),
+        "setup_pending": bool(row and row["admin_totp_pending_secret"]
+                              and int(row["admin_totp_pending_expires"] or 0) > int(time.time())),
+        "message": "Administrator access requires an authenticator code at every new sign-in.",
+    }
+
+
+@app.post("/api/admin/mfa/setup")
+def admin_mfa_setup(payload: AdminMfaSetupIn, user=Depends(current_user)):
+    require_configured_admin(user)
+    bootstrap = os.getenv("MCAS_ADMIN_BOOTSTRAP_TOKEN", "")
+    if len(bootstrap) < 32 or not hmac.compare_digest(bootstrap, payload.bootstrap_token):
+        raise HTTPException(403, "A valid server-side administrator bootstrap token is required for first-time MFA enrollment.")
+    with db() as c:
+        row = c.execute("SELECT password_hash,admin_totp_secret FROM users WHERE id=?", (user["id"],)).fetchone()
+        if not row or not verify_password(payload.password, row["password_hash"]):
+            raise HTTPException(401, "Re-enter your MCAS password to begin administrator MFA setup.")
+        if row["admin_totp_secret"]:
+            raise HTTPException(409, "Administrator MFA is already enabled.")
+        secret = generate_totp_secret()
+        c.execute(
+            "UPDATE users SET admin_totp_pending_secret=?,admin_totp_pending_expires=? WHERE id=?",
+            (encrypt_mfa_secret(secret), int(time.time()) + 600, user["id"]),
+        )
+        audit(c, user["id"], "admin.mfa_setup_started")
+    label = urllib.parse.quote("MCAS:" + user["email"])
+    uri = "otpauth://totp/" + label + "?" + urllib.parse.urlencode({
+        "secret": secret, "issuer": "MCAS", "algorithm": "SHA1", "digits": 6, "period": 30
+    })
+    return {
+        "secret": secret,
+        "otpauth_uri": uri,
+        "expires_in_seconds": 600,
+        "message": "Add this account to an authenticator app, then enter its current six-digit code to enable MFA. MCAS does not yet provide recovery codes.",
+    }
+
+
+@app.post("/api/admin/mfa/verify")
+def admin_mfa_verify(payload: MfaCodeIn, response: Response, user=Depends(current_user)):
+    require_configured_admin(user)
+    with db() as c:
+        row = c.execute(
+            "SELECT admin_totp_pending_secret,admin_totp_pending_expires,admin_totp_secret FROM users WHERE id=?",
+            (user["id"],),
+        ).fetchone()
+        if not row or row["admin_totp_secret"]:
+            raise HTTPException(409, "Administrator MFA is already enabled or setup is unavailable.")
+        if not row["admin_totp_pending_secret"] or int(row["admin_totp_pending_expires"] or 0) <= int(time.time()):
+            raise HTTPException(409, "MFA setup has expired. Start setup again.")
+        secret = decrypt_mfa_secret(row["admin_totp_pending_secret"])
+        if not verify_totp(secret, payload.code):
+            raise HTTPException(422, "The authenticator code is incorrect. Check your device clock and try again.")
+        c.execute(
+            """UPDATE users SET admin_totp_secret=admin_totp_pending_secret,
+               admin_totp_pending_secret=NULL,admin_totp_pending_expires=NULL WHERE id=?""",
+            (user["id"],),
+        )
+        c.execute("DELETE FROM sessions WHERE user_id=?", (user["id"],))
+        c.execute("DELETE FROM mfa_login_challenges WHERE user_id=?", (user["id"],))
+        audit(c, user["id"], "admin.mfa_enabled")
+    response.delete_cookie(COOKIE, path="/", httponly=True, secure=IS_PROD, samesite="lax")
+    response.delete_cookie(CSRF_COOKIE, path="/", secure=IS_PROD, samesite="strict")
+    return {
+        "enabled": True,
+        "message": "Administrator MFA is enabled. Your setup session was revoked; sign in again using your password and authenticator code.",
+    }
+
+
+@app.get("/api/admin/security-status")
+def admin_security_status(user=Depends(current_user)):
+    require_admin(user)
+    configured_emails = [x.strip().lower() for x in os.getenv("MCAS_ADMIN_EMAILS", "").split(",") if x.strip()]
+    with db() as c:
+        if configured_emails:
+            placeholders = ",".join("?" for _ in configured_emails)
+            admin_total = c.execute(
+                "SELECT COUNT(*) AS n FROM users WHERE lower(email) IN (" + placeholders + ")",
+                tuple(configured_emails),
+            ).fetchone()["n"]
+            mfa_total = c.execute(
+                "SELECT COUNT(*) AS n FROM users WHERE lower(email) IN (" + placeholders + ") AND admin_totp_secret IS NOT NULL",
+                tuple(configured_emails),
+            ).fetchone()["n"]
+        else:
+            admin_total = mfa_total = 0
+    ai_used, ai_limit = monthly_ai_usage()
+    allowed_ai_hosts = [x.strip() for x in os.getenv("MCAS_AI_ALLOWED_HOSTS", "").split(",") if x.strip()]
+    signing_secret_ok = len(SECRET) >= 40 and not SECRET.startswith("development-only")
+    checks = [
+        {"name": "Production mode", "status": "configured" if IS_PROD else "warning",
+         "detail": "Production security mode is active." if IS_PROD else "This server is in development mode; do not expose it publicly."},
+        {"name": "Application signing secret", "status": "configured" if signing_secret_ok else "warning",
+         "detail": "A non-default application secret is configured." if signing_secret_ok else "A development or short signing secret is in use."},
+        {"name": "Administrator MFA", "status": "configured" if admin_total > 0 and mfa_total >= admin_total else "warning",
+         "detail": str(mfa_total) + " enrolled administrator account(s) out of " + str(admin_total) + " registered configured administrator account(s)."},
+        {"name": "AI endpoint hostname allowlist", "status": "configured" if (not IS_PROD or bool(allowed_ai_hosts)) else "warning",
+         "detail": "Configured AI hosts: " + (", ".join(allowed_ai_hosts) if allowed_ai_hosts else "none; required in production.")},
+        {"name": "Monthly AI analysis cap", "status": "configured",
+         "detail": str(ai_used) + " of " + str(ai_limit) + " feedback-analysis attempts used this UTC month."},
+        {"name": "Database encryption at rest", "status": "external_action",
+         "detail": "MCAS does not encrypt its SQLite database file. Configure encrypted storage or a managed database with encryption at rest."},
+        {"name": "Encrypted backups and restore test", "status": "external_action",
+         "detail": "Configure encrypted off-site backups and regularly verify a restore with the hosting provider."},
+        {"name": "Customer email verification", "status": "not_implemented",
+         "detail": "Customer registration does not verify email ownership in this release."},
+        {"name": "GitHub branch protection", "status": "external_action",
+         "detail": "Enable required CI and CodeQL checks and restrict direct pushes to main in GitHub repository settings."},
+    ]
+    return {
+        "checks": checks,
+        "administrator_accounts": admin_total,
+        "administrator_mfa_enabled": mfa_total,
+        "ai_monthly_usage": {"used": ai_used, "limit": ai_limit},
+        "note": "Configuration summary only. This is not a penetration test or proof of production security.",
+    }
+
+
 @app.get("/api/admin/improvements")
 def list_improvement_reviews(user=Depends(current_user)):
     require_admin(user)
