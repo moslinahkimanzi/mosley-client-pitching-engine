@@ -2048,7 +2048,7 @@ def updates_status(user=Depends(current_user)):
 def list_customer_feedback(user=Depends(current_user)):
     with db() as c:
         rows = c.execute(
-            """SELECT id,category,title,message,status,admin_note,created_at,updated_at
+            """SELECT id,category,title,message,status,admin_note,created_at,updated_at,ai_analysis_consent
                FROM customer_feedback WHERE user_id=? ORDER BY created_at DESC LIMIT 100""",
             (user["id"],)
         ).fetchall()
@@ -2199,6 +2199,31 @@ def admin_security_status(user=Depends(current_user)):
     }
 
 
+@app.delete("/api/feedback/{feedback_id}/ai-consent")
+def withdraw_feedback_ai_consent(feedback_id: str, user=Depends(current_user)):
+    with db() as c:
+        row = c.execute(
+            "SELECT id FROM customer_feedback WHERE id=? AND user_id=?",
+            (feedback_id, user["id"]),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Feedback item not found.")
+        already_analysed = c.execute(
+            "SELECT 1 FROM improvement_review_feedback WHERE feedback_id=? LIMIT 1",
+            (feedback_id,),
+        ).fetchone() is not None
+        c.execute(
+            "UPDATE customer_feedback SET ai_analysis_consent=0,updated_at=? WHERE id=? AND user_id=?",
+            (now(), feedback_id, user["id"]),
+        )
+        audit(c, user["id"], "feedback.ai_consent_withdrawn",
+              {"feedback_id": feedback_id, "already_analysed": already_analysed})
+    message = "Consent withdrawn. This feedback will not be sent for future AI analysis."
+    if already_analysed:
+        message += " It was analysed previously; MCAS cannot undo processing already performed by the external AI provider."
+    return {"ok": True, "already_analysed": already_analysed, "message": message}
+
+
 @app.get("/api/admin/improvements")
 def list_improvement_reviews(user=Depends(current_user)):
     require_admin(user)
@@ -2224,16 +2249,16 @@ def analyze_opted_in_feedback(user=Depends(current_user)):
             """SELECT f.id,f.category,f.title,f.message
                FROM customer_feedback f
                LEFT JOIN improvement_review_feedback link ON link.feedback_id=f.id
-               WHERE f.ai_analysis_consent=1 AND link.feedback_id IS NULL
-               ORDER BY f.created_at ASC LIMIT 50"""
+               WHERE f.ai_analysis_consent=1 AND f.category!='security' AND link.feedback_id IS NULL
+               ORDER BY f.created_at ASC LIMIT 20"""
         ).fetchall()
     if not rows:
         raise HTTPException(409, "There is no new customer feedback with explicit AI-analysis consent.")
     feedback_for_ai = [
         {
             "category": row["category"],
-            "title": redact_feedback_text(row["title"]),
-            "details": redact_feedback_text(row["message"]),
+            "title": redact_feedback_text(row["title"])[:300],
+            "details": redact_feedback_text(row["message"])[:1200],
         }
         for row in rows
     ]
@@ -2255,7 +2280,8 @@ def analyze_opted_in_feedback(user=Depends(current_user)):
             "content": json.dumps({"opted_in_feedback": feedback_for_ai}, ensure_ascii=False),
         },
     ]
-    raw = call_configured_ai(messages, temperature=0.15, max_tokens=1800)
+    used, monthly_limit = reserve_monthly_ai_analysis_slot()
+    raw = call_configured_ai(messages, temperature=0.15, max_tokens=1200)
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
@@ -2311,6 +2337,8 @@ def analyze_opted_in_feedback(user=Depends(current_user)):
         "summary": summary.strip(),
         "recommendations": clean_recommendations,
         "feedback_count": len(rows),
+        "monthly_analysis_used": used,
+        "monthly_analysis_limit": monthly_limit,
         "created_at": stamp,
         "status": "proposed_for_human_review",
         "message": "AI improvement analysis created. No code was changed or deployed.",
@@ -2322,7 +2350,8 @@ def admin_maintenance(user=Depends(current_user)):
     require_admin(user)
     with db() as c:
         total = c.execute("SELECT COUNT(*) AS n FROM customer_feedback").fetchone()["n"]
-        opted_in_total = c.execute("SELECT COUNT(*) AS n FROM customer_feedback WHERE ai_analysis_consent=1").fetchone()["n"]
+        opted_in_total = c.execute("SELECT COUNT(*) AS n FROM customer_feedback WHERE ai_analysis_consent=1 AND category!='security'").fetchone()["n"]
+    ai_monthly_used, ai_monthly_limit = monthly_ai_usage()
         by_status = c.execute(
             "SELECT status,COUNT(*) AS n FROM customer_feedback GROUP BY status"
         ).fetchall()
@@ -2352,7 +2381,7 @@ def admin_maintenance(user=Depends(current_user)):
         {"name": "Automated test workflow", "status": "configured", "detail": "The repository CI workflow runs Python tests, JavaScript syntax checks and dependency auditing. Review the latest run in GitHub Actions before release."},
         {"name": "CodeQL security analysis", "status": "configured", "detail": "CodeQL is configured for Python and JavaScript with a scheduled weekly analysis. Check the GitHub Security tab for actual findings."},
         {"name": "Dependabot dependency updates", "status": "configured", "detail": "Weekly dependency update pull requests are configured. Review and test every proposed update before merging."},
-        {"name": "AI feedback improvement analysis", "status": "configured" if os.getenv("AI_API_BASE_URL") and os.getenv("AI_API_KEY") and os.getenv("AI_MODEL") else "not_configured", "detail": "An administrator can analyse only feedback for which the customer explicitly opted in. MCAS saves prioritised proposals and test ideas; it does not generate, merge or deploy code."},
+        {"name": "AI feedback improvement analysis", "status": "configured" if os.getenv("AI_API_BASE_URL") and os.getenv("AI_API_KEY") and os.getenv("AI_MODEL") else "not_configured", "detail": "Only explicitly opted-in non-security feedback is eligible. The system is capped at " + str(ai_monthly_limit) + " analysis attempts per UTC month."},
         {"name": "Customer account MFA", "status": "not_implemented", "detail": "MFA for MCAS customer accounts has not been implemented in this build."},
         {"name": "Encrypted off-site backups", "status": "external_action", "detail": "Configure backups with the hosting provider and test a restore. This dashboard cannot verify your backup provider."},
         {"name": "Production deployment approval", "status": "manual", "detail": "A human administrator must review, test and approve production releases. Automatic self-deployment is disabled."}
@@ -2362,6 +2391,8 @@ def admin_maintenance(user=Depends(current_user)):
         "admin_email": user["email"],
         "feedback_total": total,
         "feedback_opted_in_total": opted_in_total,
+        "ai_monthly_analysis_used": ai_monthly_used,
+        "ai_monthly_analysis_limit": ai_monthly_limit,
         "feedback_by_status": {row["status"]: row["n"] for row in by_status},
         "feedback_by_category": category_counts,
         "recommendations": recommendations,
