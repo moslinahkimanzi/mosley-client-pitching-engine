@@ -6,6 +6,7 @@ import unittest
 import uuid
 from unittest.mock import patch
 from fastapi.testclient import TestClient
+from cryptography.fernet import Fernet
 from backend.app import app, db, encrypt_mfa_secret, totp_code
 
 # Generate disposable test credentials at runtime; do not commit fixed secrets.
@@ -30,6 +31,11 @@ class AdminSecurityTest(unittest.TestCase):
         # Clear them between tests so one test cannot throttle another.
         with db() as connection:
             connection.execute("DELETE FROM security_rate_limits")
+        self.mfa_key_patch = patch.dict(os.environ, {
+            "MCAS_ADMIN_MFA_ENCRYPTION_KEY": Fernet.generate_key().decode()
+        })
+        self.mfa_key_patch.start()
+        self.addCleanup(self.mfa_key_patch.stop)
 
     def csrf(self, client):
         return client.get("/api/auth/csrf").json()["csrf_token"]
