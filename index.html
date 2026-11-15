@@ -36,7 +36,8 @@
 <button data-page="replies"><span class="navicon">↩</span>Reply assistant</button>
 <button data-page="proposals"><span class="navicon">▤</span>Proposals</button>
 <button data-page="followups"><span class="navicon">◷</span>Follow-ups</button>
-</nav><div class="navgroup">Settings</div><nav class="nav"><button data-page="integrations"><span class="navicon">⌘</span>Integrations</button><button data-page="security"><span class="navicon">⬡</span>Security & plans</button></nav><div class="sidebarfoot"><div class="tiny">MCAS · Private workspace</div><div class="tiny">Human approval required for outreach.</div></div></aside>
+<button data-page="updates"><span class="navicon">↻</span>Updates & feedback</button>
+</nav><div class="navgroup">Settings</div><nav class="nav"><button data-page="integrations"><span class="navicon">⌘</span>Integrations</button><button data-page="security"><span class="navicon">⬡</span>Security & plans</button><button id="adminMaintenanceNav" class="hide" data-page="admin-maintenance"><span class="navicon">⚙</span>Admin maintenance</button></nav><div class="sidebarfoot"><div class="tiny">MCAS · Private workspace</div><div class="tiny">Human approval required for outreach.</div></div></aside>
 <main class="main">
 <section id="overview" class="page active"><div class="pagehead"><div><h1>Overview</h1><p>Your acquisition pipeline at a glance.</p></div><button class="primary" data-go="prospects">＋ Add prospect</button></div><div class="grid">
 <div class="card"><div class="label">TOTAL PROSPECTS</div><div class="metric" id="mLeads">0</div><div class="metricnote">In your workspace</div></div>
@@ -79,7 +80,46 @@
 
 <section id="security" class="page"><div class="pagehead"><div><h1>Security & plans</h1><p>Controls, privacy boundaries and commercial readiness.</p></div></div><div class="good">Security is layered, not absolute. Keep the application updated, configure HTTPS and backups, and review logs for suspicious activity.</div><article class="card"><h2>Application protections</h2><div class="row"><span>Passwords hashed with PBKDF2 + per-user salts</span><span class="badge green">Enabled</span></div><div class="row"><span>HttpOnly, SameSite session cookies</span><span class="badge green">Enabled</span></div><div class="row"><span>CSRF token and origin checks</span><span class="badge green">Enabled</span></div><div class="row"><span>Tenant-scoped prospects and drafts</span><span class="badge green">Enabled</span></div><div class="row"><span>Rate limiting / security headers</span><span class="badge amber">Basic, single instance</span></div><div class="row"><span>Website SSRF protection</span><span class="badge green">Pinned public IP + redirect checks</span></div><div class="row"><span>Encrypted Gmail refresh token storage</span><span class="badge green">When configured</span></div><div class="row"><span>Backups, MFA, verified email, recovery</span><span class="badge red">Not yet implemented</span></div><div class="row"><span>Independent penetration test</span><span class="badge red">Required before public launch</span></div></article><div class="cols"><article class="card"><h2>Subscription status</h2><div id="billingStatus" class="muted">Checking…</div><p class="tiny">Billing checkout is intentionally disabled until a payment provider and signed webhook verification are configured.</p></article><article class="card"><h2>Before production launch</h2><p class="muted">Use a managed PostgreSQL database, strong secrets, HTTPS-only cookies, trusted host allowlist, shared rate limiter, verified backups, error monitoring, dependency scanning and a security review.</p><button id="downloadExport">Export my workspace data</button><div id="exportNotice" class="notice"></div></article></div></section>
 
-<section id="website-advisor" class="page">
+
+<section id="updates" class="page">
+<div class="pagehead"><div><h1>Updates & feedback</h1><p>See what's new in MCAS, check the version reported by this server and help improve the product.</p></div><button class="primary" id="refreshUpdatesBtn">↻ Refresh update information</button></div>
+<div class="grid">
+<article class="card"><div class="label">CURRENT VERSION</div><div class="metric" id="currentVersion">—</div><div class="metricnote">Version reported by this MCAS server</div></article>
+<article class="card"><div class="label">LATEST VERSION</div><div class="metric" id="latestVersion">—</div><div class="metricnote" id="updateAvailability">Checking release information…</div></article>
+<article class="card"><div class="label">UPDATE DELIVERY</div><div class="metric" style="font-size:20px">Managed</div><div class="metricnote">Updates are deployed centrally by the MCAS operator</div></article>
+<article class="card"><div class="label">YOUR FEEDBACK</div><div class="metric" id="myFeedbackCount">0</div><div class="metricnote">Submissions in this workspace</div></article>
+</div>
+<div class="good" id="updateMessage">Release information is loaded from the MCAS server. Customers do not install server code themselves; approved releases are deployed centrally.</div>
+<div class="cols">
+<article class="card"><h2>Release history</h2><p class="tiny">What's new and what has improved in each listed release.</p><div id="releaseList" class="list"><div class="empty">Loading release history…</div></div></article>
+<article class="card"><h2>Send product feedback</h2><p class="muted">Report a bug, suggest a feature or tell us where a workflow is confusing. Do not include passwords, API keys, private customer records or sensitive personal information.</p>
+<form id="feedbackForm">
+<div class="field"><label for="feedbackCategory">Feedback type</label><select id="feedbackCategory" required><option value="usability">Usability / confusing workflow</option><option value="bug">Bug / something not working</option><option value="feature">Feature request</option><option value="security">Security concern</option><option value="other">Other feedback</option></select></div>
+<div class="field"><label for="feedbackTitle">Title</label><input id="feedbackTitle" maxlength="120" minlength="4" required placeholder="Briefly describe the issue or idea"></div>
+<div class="field"><label for="feedbackMessage">Details</label><textarea id="feedbackMessage" maxlength="3000" minlength="10" required placeholder="What happened? What did you expect? What would make it easier?"></textarea></div>
+<button class="primary" id="feedbackSubmit">Submit feedback</button><div id="feedbackNotice" class="notice" role="status"></div>
+</form></article>
+</div>
+<article class="card" style="margin-top:14px"><h2>Your feedback history</h2><p class="tiny">Only you can see the feedback submitted from your account. The MCAS team can review it to plan future improvements.</p><div id="myFeedbackList" class="list"><div class="empty">No feedback submitted yet.</div></div></article>
+<div class="warning">Update availability shown here is the release information published by this server. It does not independently check GitHub or install software on your device. In the hosted SaaS model, the operator tests and deploys updates centrally.</div>
+</section>
+
+<section id="admin-maintenance" class="page">
+<div class="pagehead"><div><h1>Administrator maintenance</h1><p>Review product feedback, improvement themes and security-maintenance readiness.</p></div><button class="primary" id="refreshMaintenanceBtn">↻ Refresh dashboard</button></div>
+<div class="warning">Administrator-only view. This page reports configuration and feedback; it does not run a penetration test, verify off-site backups, fetch live GitHub workflow results or deploy code.</div>
+<div class="grid">
+<article class="card"><div class="label">ALL FEEDBACK</div><div class="metric" id="adminFeedbackTotal">0</div></article>
+<article class="card"><div class="label">AWAITING REVIEW</div><div class="metric" id="adminFeedbackOpen">0</div></article>
+<article class="card"><div class="label">CURRENT VERSION</div><div class="metric" id="adminCurrentVersion">—</div></article>
+<article class="card"><div class="label">AUTOMATIC DEPLOYMENT</div><div class="metric" style="font-size:20px">Disabled</div></article>
+</div>
+<div class="cols">
+<article class="card"><h2>Maintenance controls</h2><div id="maintenanceControls" class="list"><div class="empty">Loading maintenance information…</div></div></article>
+<article class="card"><h2>Improvement opportunities</h2><p class="tiny">Themes are prioritised from the number and category of customer feedback submissions; they are not an automatic code change.</p><div id="improvementRecommendations" class="list"><div class="empty">No recommendations yet.</div></div><div id="automationBoundary" class="tiny"></div></article>
+</div>
+<article class="card" style="margin-top:14px"><h2>Customer feedback review queue</h2><div id="adminFeedbackList" class="list"><div class="empty">No feedback has been submitted yet.</div></div><div id="adminFeedbackNotice" class="notice" role="status"></div></article>
+</section>
+\n<section id="website-advisor" class="page">
 <div class="pagehead"><div><h1>Website strategy advisor</h1><p>Turn saved prospect research into an evidence-led website plan, commercial estimate and copy-ready AI-builder brief.</p></div></div>
 <div class="split">
 <article class="card">

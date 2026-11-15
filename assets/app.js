@@ -1,7 +1,7 @@
 (()=>{'use strict';
 const $=id=>document.getElementById(id);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state={csrf:'',user:null,leads:[],drafts:[],followups:[],proposals:[],metrics:{},gmail:null,config:{search:false,ai:false},authMode:'login'};
+const state={csrf:'',user:null,leads:[],drafts:[],followups:[],proposals:[],metrics:{},gmail:null,config:{search:false,ai:false},updates:null,feedback:[],maintenance:null,authMode:'login'};
 function toast(msg,error=false){$('toast').textContent=msg;$('toast').className='notice'+(error?' error':'');}
 function note(id,msg,error=false){$(id).textContent=msg;$(id).className='notice'+(error?' error':'');}
 function cookie(name){const item=document.cookie.split('; ').find(x=>x.startsWith(name+'='));return item?decodeURIComponent(item.split('=').slice(1).join('=')):'';}
@@ -9,7 +9,7 @@ async function refreshCsrf(){const r=await fetch('/api/auth/csrf',{credentials:'
 async function api(path,opts={}){const method=(opts.method||'GET').toUpperCase();const headers={'Accept':'application/json',...(opts.headers||{})};if(opts.body!==undefined)headers['Content-Type']='application/json';if(['POST','PATCH','DELETE','PUT'].includes(method)){state.csrf=cookie('mcas_csrf')||state.csrf;headers['X-CSRF-Token']=state.csrf;}const r=await fetch(path,{...opts,method,headers,credentials:'same-origin'});const type=r.headers.get('content-type')||'';const data=type.includes('application/json')?await r.json():await r.text();if(!r.ok)throw new Error(data.detail||data.message||data||('Request failed ('+r.status+')'));return data;}
 function showAuth(){ $('app').classList.add('hide');$('auth').classList.remove('hide');}
 function showApp(){ $('auth').classList.add('hide');$('app').classList.remove('hide');$('signedEmail').textContent=state.user.email||'';}
-function page(name){document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id===name));document.querySelectorAll('[data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===name));if(name==='prospects')renderLeads();if(name==='studio')renderDrafts();if(name==='followups')renderFollowups();if(name==='proposals')renderProposals();}
+function page(name){document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id===name));document.querySelectorAll('[data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===name));if(name==='prospects')renderLeads();if(name==='studio')renderDrafts();if(name==='followups')renderFollowups();if(name==='proposals')renderProposals();if(name==='updates'){loadUpdates();loadMyFeedback();}if(name==='admin-maintenance')loadAdminMaintenance();}
 document.querySelectorAll('[data-page]').forEach(b=>b.addEventListener('click',()=>page(b.dataset.page)));
 document.querySelectorAll('[data-go]').forEach(b=>b.addEventListener('click',()=>page(b.dataset.go)));
 function setAuthMode(mode){state.authMode=mode;$('loginTab').classList.toggle('active',mode==='login');$('registerTab').classList.toggle('active',mode==='register');$('authSubmit').textContent=mode==='login'?'Sign in securely':'Create secure account';$('authPassword').autocomplete=mode==='login'?'current-password':'new-password';$('authPassword').minLength=mode==='login'?1:12;note('authNotice','');}
@@ -17,8 +17,76 @@ $('loginTab').addEventListener('click',()=>setAuthMode('login'));$('registerTab'
 $('authForm').addEventListener('submit',async e=>{e.preventDefault();const btn=$('authSubmit');btn.disabled=true;try{await refreshCsrf();const endpoint=state.authMode==='login'?'/api/auth/login':'/api/auth/register';const data=await api(endpoint,{method:'POST',body:JSON.stringify({email:$('authEmail').value,password:$('authPassword').value})});state.user=data;await refreshCsrf();showApp();await loadAll();}catch(err){note('authNotice',err.message,true);}finally{btn.disabled=false;}});
 $('logoutBtn').addEventListener('click',async()=>{try{await api('/api/auth/logout',{method:'POST'});state.user=null;showAuth();}catch(e){toast(e.message,true);}});
 async function boot(){try{await refreshCsrf();state.user=await api('/api/auth/me');showApp();await loadAll();}catch(e){showAuth();}}
-async function loadAll(){try{const values=await Promise.all([api('/api/leads'),api('/api/drafts'),api('/api/followups'),api('/api/proposals'),api('/api/metrics'),api('/api/integrations/gmail/status'),api('/api/billing/status'),api('/api/integrations/status')]);[state.leads,state.drafts,state.followups,state.proposals,state.metrics,state.gmail,state.billing,state.config]=values;renderAll();$('searchBadge').textContent=state.config.web_search_configured?'Connected':'Needs API key';$('searchBadge').className='badge '+(state.config.web_search_configured?'green':'amber');$('aiBadge').textContent=state.config.ai_configured?'Connected':'Optional';$('aiBadge').className='badge '+(state.config.ai_configured?'green':'amber');$('researchConfig').textContent=state.config.web_search_configured?'Configured':'Set SERPER_API_KEY in .env and restart MCAS';$('aiConfig').textContent=state.config.ai_configured?'Configured':'Set AI_API_KEY in .env and restart MCAS';$('gmailBadge').textContent=state.gmail.connected?'Connected':state.gmail.configured?'Ready to connect':'Not configured';$('gmailDetails').textContent=state.gmail.capability||'Gmail drafts only.';$('gmailConnect').disabled=!state.gmail.configured||state.gmail.connected;$('gmailDisconnect').disabled=!state.gmail.connected;$('billingStatus').textContent=state.billing.message;}catch(e){toast(e.message,true);}}
-function renderAll(){renderMetrics();renderLeads();renderDrafts();renderFollowups();renderProposals();renderSelects();}
+async function loadAll(){try{const values=await Promise.all([api('/api/leads'),api('/api/drafts'),api('/api/followups'),api('/api/proposals'),api('/api/metrics'),api('/api/integrations/gmail/status'),api('/api/billing/status'),api('/api/integrations/status'),api('/api/auth/me'),api('/api/updates'),api('/api/feedback')]);[state.leads,state.drafts,state.followups,state.proposals,state.metrics,state.gmail,state.billing,state.config,state.user,state.updates,state.feedback]=values;$('adminMaintenanceNav').classList.toggle('hide',!state.user.is_admin);renderAll();renderUpdates();renderMyFeedback();$('searchBadge').textContent=state.config.web_search_configured?'Connected':'Needs API key';$('searchBadge').className='badge '+(state.config.web_search_configured?'green':'amber');$('aiBadge').textContent=state.config.ai_configured?'Connected':'Optional';$('aiBadge').className='badge '+(state.config.ai_configured?'green':'amber');$('researchConfig').textContent=state.config.web_search_configured?'Configured':'Set SERPER_API_KEY in .env and restart MCAS';$('aiConfig').textContent=state.config.ai_configured?'Configured':'Set AI_API_KEY in .env and restart MCAS';$('gmailBadge').textContent=state.gmail.connected?'Connected':state.gmail.configured?'Ready to connect':'Not configured';$('gmailDetails').textContent=state.gmail.capability||'Gmail drafts only.';$('gmailConnect').disabled=!state.gmail.configured||state.gmail.connected;$('gmailDisconnect').disabled=!state.gmail.connected;$('billingStatus').textContent=state.billing.message;}catch(e){toast(e.message,true);}}
+function renderAll(){renderMetrics();renderLeads();renderDrafts();renderFollowups();renderProposals();renderSelects();renderUpdates();renderMyFeedback();}
+
+function feedbackStatusLabel(value){return ({received:'Received',reviewing:'Under review',planned:'Planned',in_progress:'In progress',completed:'Completed',declined:'Not planned'})[value]||value;}
+function renderUpdates(){
+ const data=state.updates;if(!data)return;
+ $('currentVersion').textContent='v'+data.current_version;$('latestVersion').textContent='v'+data.latest_version;
+ $('updateAvailability').textContent=data.update_available?'A centrally managed update is available':'Current version';
+ $('updateAvailability').className='metricnote';
+ $('updateMessage').textContent=data.message||'Release information loaded.';
+ $('releaseList').innerHTML=(data.releases||[]).map(item=>'<div class="item"><div class="itemtop"><strong>v'+esc(item.version)+' · '+esc(item.title)+'</strong><span class="badge green">Release notes</span></div><p>'+esc(item.summary)+'</p><ul>'+((item.changes||[]).map(change=>'<li>'+esc(change)+'</li>').join(''))+'</ul></div>').join('')||'<div class="empty">No release notes have been published.</div>';
+}
+function renderMyFeedback(){
+ const items=state.feedback||[];$('myFeedbackCount').textContent=items.length;
+ $('myFeedbackList').innerHTML=items.map(item=>'<div class="item"><div class="itemtop"><strong>'+esc(item.title)+'</strong><span class="badge">'+esc(feedbackStatusLabel(item.status))+'</span></div><p>'+esc(item.category)+' · Submitted '+esc(item.created_at)+'</p><p>'+esc(item.message)+'</p>'+(item.admin_note?'<div class="good"><b>MCAS team note:</b> '+esc(item.admin_note)+'</div>':'')+'</div>').join('')||'<div class="empty">You have not submitted feedback yet.</div>';
+}
+async function loadUpdates(){
+ try{state.updates=await api('/api/updates');renderUpdates();}
+ catch(e){note('feedbackNotice','Could not refresh release information: '+e.message,true);}
+}
+async function loadMyFeedback(){
+ try{state.feedback=await api('/api/feedback');renderMyFeedback();}
+ catch(e){note('feedbackNotice','Could not load your feedback history: '+e.message,true);}
+}
+$('refreshUpdatesBtn').addEventListener('click',async()=>{
+ $('refreshUpdatesBtn').disabled=true;
+ await loadUpdates();await loadMyFeedback();
+ $('refreshUpdatesBtn').disabled=false;
+});
+$('feedbackForm').addEventListener('submit',async e=>{
+ e.preventDefault();const btn=$('feedbackSubmit');btn.disabled=true;
+ try{
+  await api('/api/feedback',{method:'POST',body:JSON.stringify({category:$('feedbackCategory').value,title:$('feedbackTitle').value.trim(),message:$('feedbackMessage').value.trim()})});
+  $('feedbackForm').reset();note('feedbackNotice','Thank you. Your feedback has been submitted for review.');
+  await loadMyFeedback();
+ }catch(err){note('feedbackNotice',err.message,true);}
+ finally{btn.disabled=false;}
+});
+async function loadAdminMaintenance(){
+ if(!state.user?.is_admin){return note('adminFeedbackNotice','Administrator access is not enabled for this account.',true);}
+ try{state.maintenance=await api('/api/admin/maintenance');renderAdminMaintenance();}
+ catch(e){note('adminFeedbackNotice','Maintenance dashboard could not be loaded: '+e.message,true);}
+}
+function renderAdminMaintenance(){
+ const data=state.maintenance;if(!data)return;
+ $('adminFeedbackTotal').textContent=data.feedback_total;
+ const open=Number(data.feedback_by_status?.received||0)+Number(data.feedback_by_status?.reviewing||0);
+ $('adminFeedbackOpen').textContent=open;$('adminCurrentVersion').textContent='v'+data.current_version;
+ $('maintenanceControls').innerHTML=(data.maintenance_controls||[]).map(control=>{
+  const statusLabel={configured:'Configured',not_implemented:'Not implemented',external_action:'External action required',manual:'Manual approval'}[control.status]||control.status;
+  const badge=control.status==='configured'?'green':control.status==='not_implemented'?'red':'amber';
+  return '<div class="item"><div class="itemtop"><strong>'+esc(control.name)+'</strong><span class="badge '+badge+'">'+esc(statusLabel)+'</span></div><p>'+esc(control.detail)+'</p></div>';
+ }).join('');
+ $('improvementRecommendations').innerHTML=(data.recommendations||[]).map(item=>'<div class="item"><div class="itemtop"><strong>'+esc(item.area)+'</strong><span class="badge">'+esc(item.count)+' report(s)</span></div><p>'+esc(item.action)+'</p></div>').join('')||'<div class="empty">No feedback themes yet. Customer submissions will help identify improvement priorities.</div>';
+ $('automationBoundary').textContent=data.automation_boundary+' '+data.workflow_status_source;
+ $('adminFeedbackList').innerHTML=(data.feedback||[]).map(item=>'<div class="item" data-feedback-card="'+esc(item.id)+'"><div class="itemtop"><strong>'+esc(item.title)+'</strong><span class="badge">'+esc(feedbackStatusLabel(item.status))+'</span></div><p>'+esc(item.category)+' · '+esc(item.customer_email)+' · '+esc(item.created_at)+'</p><p>'+esc(item.message)+'</p><div class="field"><label>Review status</label><select data-feedback-status><option value="received" '+(item.status==='received'?'selected':'')+'>Received</option><option value="reviewing" '+(item.status==='reviewing'?'selected':'')+'>Under review</option><option value="planned" '+(item.status==='planned'?'selected':'')+'>Planned</option><option value="in_progress" '+(item.status==='in_progress'?'selected':'')+'>In progress</option><option value="completed" '+(item.status==='completed'?'selected':'')+'>Completed</option><option value="declined" '+(item.status==='declined'?'selected':'')+'>Not planned</option></select></div><div class="field"><label>Reply / internal note (visible to this customer)</label><textarea data-feedback-note maxlength="1000">'+esc(item.admin_note||'')+'</textarea></div><button data-feedback-save="'+esc(item.id)+'" class="primary">Save review</button></div>').join('')||'<div class="empty">No customer feedback has been submitted.</div>';
+}
+$('refreshMaintenanceBtn').addEventListener('click',loadAdminMaintenance);
+$('adminFeedbackList').addEventListener('click',async e=>{
+ const button=e.target.closest('[data-feedback-save]');if(!button)return;
+ const card=button.closest('[data-feedback-card]');if(!card)return;
+ button.disabled=true;
+ try{
+  await api('/api/admin/feedback/'+encodeURIComponent(button.dataset.feedbackSave),{method:'PATCH',body:JSON.stringify({status:card.querySelector('[data-feedback-status]').value,admin_note:card.querySelector('[data-feedback-note]').value})});
+  note('adminFeedbackNotice','Feedback review saved. The customer can see the updated status and note.');
+  await loadAdminMaintenance();
+ }catch(err){note('adminFeedbackNotice',err.message,true);}
+ finally{button.disabled=false;}
+});
+
 function renderMetrics(){const m=state.metrics;$('mLeads').textContent=m.leads||0;$('mVerified').textContent=m.verified||0;$('mDrafts').textContent=m.pending_approval||0;$('mFollow').textContent=m.open_followups||0;$('pUnverified').textContent=state.leads.filter(l=>l.status==='Unverified').length;$('pPending').textContent=m.pending_approval||0;$('pDnc').textContent=m.do_not_contact||0;
 $('recentLeads').innerHTML=state.leads.slice(0,5).map(l=>'<div class="row"><span><b>'+esc(l.name)+'</b><br><span class="tiny">'+esc(l.market||'')+'</span></span><span class="badge">'+esc(l.status)+'</span></div>').join('')||'<div class="empty">No prospects yet. Add your first lead.</div>';}
 function renderSelects(){
