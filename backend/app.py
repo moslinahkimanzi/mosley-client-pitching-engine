@@ -324,14 +324,17 @@ def verify_password(password: str, encoded: str) -> bool:
         return False
 
 def token_hash(token: str) -> str:
-    """Return a keyed digest for high-entropy opaque tokens, never for human passwords.
-
-    The HMAC key is the server's stable signing secret. This prevents a database-only
-    disclosure from allowing offline guessing of cookie/challenge values and avoids
-    treating a bearer token like a password hash. Human passwords use PBKDF2 above.
-    """
+    """Return a keyed digest for high-entropy session/OAuth tokens, not human passwords."""
     message = b"MCAS opaque-token v1:" + token.encode("utf-8")
     return hmac.digest(SECRET.encode("utf-8"), message, "sha256").hex()
+
+
+def mfa_challenge_hash(challenge: str) -> str:
+    """Use a costly, deterministic digest for the short-lived MFA challenge cookie."""
+    salt = b"MCAS MFA challenge v1:" + SECRET.encode("utf-8")
+    return hashlib.pbkdf2_hmac(
+        "sha256", challenge.encode("utf-8"), salt, 100_000
+    ).hex()
 
 
 def log_security_event(event: str, request: Request, **details):
@@ -655,7 +658,7 @@ def login(payload: LoginIn, response: Response, request: Request):
             c.execute("DELETE FROM mfa_login_challenges WHERE expires_at<?", (int(time.time()),))
             c.execute(
                 "INSERT INTO mfa_login_challenges(token_hash,user_id,expires_at,attempts) VALUES(?,?,?,0)",
-                (token_hash(challenge), row["id"], int(time.time()) + 300),
+                (mfa_challenge_hash(challenge), row["id"], int(time.time()) + 300),
             )
             audit(c, row["id"], "admin.mfa_challenge_issued")
             response.set_cookie("mcas_mfa_challenge", challenge, max_age=300, httponly=True,
@@ -678,7 +681,7 @@ def complete_admin_mfa_login(payload: MfaCodeIn, request: Request, response: Res
     challenge = request.cookies.get("mcas_mfa_challenge", "")
     if not challenge:
         raise HTTPException(401, "The administrator sign-in challenge is missing or expired. Sign in again.")
-    challenge_hash = token_hash(challenge)
+    challenge_hash = mfa_challenge_hash(challenge)
     failure_status = None
     failure_message = ""
     session = None
@@ -742,7 +745,7 @@ def logout(request: Request, response: Response):
             c.execute("DELETE FROM sessions WHERE token_hash=?", (token_hash(token),))
     if challenge:
         with db() as c:
-            c.execute("DELETE FROM mfa_login_challenges WHERE token_hash=?", (token_hash(challenge),))
+            c.execute("DELETE FROM mfa_login_challenges WHERE token_hash=?", (mfa_challenge_hash(challenge),))
     response.delete_cookie(COOKIE, path="/", httponly=True, secure=IS_PROD, samesite="lax")
     response.delete_cookie(CSRF_COOKIE, path="/", secure=IS_PROD, samesite="strict")
     response.delete_cookie("mcas_mfa_challenge", path="/", httponly=True, secure=IS_PROD, samesite="strict")
