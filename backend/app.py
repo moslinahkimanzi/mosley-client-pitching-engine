@@ -2298,7 +2298,7 @@ def admin_security_status(user=Depends(current_user)):
              str(mfa_total) + " enrolled administrator account(s) out of " + str(admin_total) + " registered configured administrator account(s)."
              if ADMIN_MFA_REQUIRED else
              "Disabled for development mode. Password-only administrator access must never be exposed publicly."
-         )},,
+         )},
         {"name": "AI endpoint hostname allowlist", "status": "configured" if (not IS_PROD or bool(allowed_ai_hosts)) else "warning",
          "detail": "Configured AI hosts: " + (", ".join(allowed_ai_hosts) if allowed_ai_hosts else "none; required in production.")},
         {"name": "Monthly AI analysis cap", "status": "configured",
