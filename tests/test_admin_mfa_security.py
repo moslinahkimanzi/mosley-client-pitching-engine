@@ -62,6 +62,25 @@ class AdminSecurityTest(unittest.TestCase):
             accepted = self.register(client, email, BOOTSTRAP)
             self.assertEqual(accepted.status_code, 201, accepted.text)
 
+    def test_development_password_only_mode_bypasses_authenticator_requirement(self):
+        email = "password-only-admin-" + uuid.uuid4().hex + "@example.test"
+        with TestClient(app) as client, patch.dict(os.environ, {
+            "MCAS_ADMIN_EMAILS": email, "MCAS_ADMIN_BOOTSTRAP_TOKEN": BOOTSTRAP
+        }), patch("backend.app.ADMIN_MFA_REQUIRED", False):
+            self.assertEqual(self.register(client, email, BOOTSTRAP).status_code, 201)
+            status = client.get("/api/admin/mfa/status")
+            self.assertEqual(status.status_code, 200, status.text)
+            self.assertFalse(status.json()["required"])
+            self.assertFalse(status.json()["enabled"])
+
+            login = client.post("/api/auth/login", json={"email": email, "password": PASSWORD},
+                headers={"X-CSRF-Token": self.csrf(client)})
+            self.assertEqual(login.status_code, 200, login.text)
+            self.assertFalse(login.json().get("mfa_required", False))
+            self.assertTrue(client.get("/api/auth/me").json()["is_admin"])
+            self.assertEqual(client.get("/api/admin/maintenance").status_code, 200)
+            self.assertEqual(client.get("/api/admin/security-status").status_code, 200)
+
     def test_admin_mfa_setup_revokes_session_and_login_requires_totp(self):
         email = "mfa-admin-" + uuid.uuid4().hex + "@example.test"
         with TestClient(app) as client, patch.dict(os.environ, {
