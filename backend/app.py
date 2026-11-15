@@ -79,7 +79,6 @@ def db():
     con = sqlite3.connect(DB_PATH, timeout=15)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys=ON")
-    con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA busy_timeout=15000")
     try:
         yield con
@@ -97,6 +96,7 @@ def add_column(con, table, name, definition):
 
 def init_db():
     with db() as c:
+        c.execute("PRAGMA journal_mode=WAL")
         c.executescript("""
         CREATE TABLE IF NOT EXISTS users(
             id TEXT PRIMARY KEY,email TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,created_at TEXT NOT NULL
