@@ -193,8 +193,9 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
                     self.assertNotIn("Private feature idea", sent_text)
                     listing = admin.get("/api/admin/improvements")
                     self.assertEqual(listing.status_code, 200, listing.text)
-                    self.assertEqual(len(listing.json()), 1)
-                    self.assertEqual(listing.json()[0]["feedback_count"], 1)
+                    saved = [item for item in listing.json() if item["id"] == response.json()["id"]]
+                    self.assertEqual(len(saved), 1)
+                    self.assertEqual(saved[0]["feedback_count"], 1)
                     repeated = admin.post(
                         "/api/admin/improvements/analyze",
                         headers={"X-CSRF-Token": self._csrf(admin)},
@@ -215,13 +216,15 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
             )
             self._register(admin, admin_email)
             with patch.dict(os.environ, {"MCAS_ADMIN_EMAILS": admin_email}):
+                before_ids = {item["id"] for item in admin.get("/api/admin/improvements").json()}
                 with patch("backend.app.call_configured_ai", return_value="not-json"):
                     response = admin.post(
                         "/api/admin/improvements/analyze",
                         headers={"X-CSRF-Token": self._csrf(admin)},
                     )
                     self.assertEqual(response.status_code, 502, response.text)
-                self.assertEqual(admin.get("/api/admin/improvements").json(), [])
+                after_ids = {item["id"] for item in admin.get("/api/admin/improvements").json()}
+                self.assertEqual(after_ids, before_ids)
 
     def test_onboarding_requires_authentication(self):
         with TestClient(app) as client:
