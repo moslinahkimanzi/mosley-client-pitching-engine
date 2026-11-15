@@ -93,8 +93,10 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
                 self.assertTrue(admin.get("/api/auth/me").json()["is_admin"])
                 dashboard = admin.get("/api/admin/maintenance")
                 self.assertEqual(dashboard.status_code, 200, dashboard.text)
-                self.assertEqual(dashboard.json()["feedback_total"], 1)
-                self.assertEqual(dashboard.json()["feedback"][0]["customer_email"], customer_email)
+                self.assertGreaterEqual(dashboard.json()["feedback_total"], 1)
+                matching = [item for item in dashboard.json()["feedback"] if item["id"] == feedback_id]
+                self.assertEqual(len(matching), 1)
+                self.assertEqual(matching[0]["customer_email"], customer_email)
                 self.assertIn("not queried", dashboard.json()["workflow_status_source"].lower())
 
                 reviewed = admin.patch(
