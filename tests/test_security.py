@@ -82,7 +82,7 @@ class ApiSecurityTest(unittest.TestCase):
         self.assertEqual(response.status_code, 201, response.text)
         verification = response.json().get("development_verification_url")
         self.assertTrue(verification, response.text)
-        raw_token = parse_qs(urlsplit(verification).query)["token"][0]
+        raw_token = parse_qs(urlsplit(verification).query)["verify_token"][0]
         confirmed = client.post("/api/auth/verify-email/confirm", json={"token": raw_token},
             headers={"X-CSRF-Token": self.csrf(client)})
         self.assertEqual(confirmed.status_code, 200, confirmed.text)
