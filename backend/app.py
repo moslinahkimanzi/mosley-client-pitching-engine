@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import html
 import hmac
 import http.client
 import ipaddress
@@ -668,8 +669,14 @@ class ImprovementRollbackIn(BaseModel):
     verification_notes: str = Field(default="", max_length=2000)
 
 @app.get("/")
-def home():
-    return FileResponse(BASE / "index.html")
+def home(request: Request):
+    response = FileResponse(BASE / "index.html")
+    if request.query_params.get("verify_token"):
+        # Verification tokens arrive in the browser URL. Do not cache this
+        # response or allow the token-bearing URL to be sent as a referrer.
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 @app.get("/api/health")
 def health():
@@ -759,7 +766,7 @@ def email_verification_url(token: str, request: Request) -> str:
             parsed.username or parsed.password or parsed.query or parsed.fragment or
             parsed.path not in {"", "/"} or (IS_PROD and parsed.scheme != "https")):
         raise HTTPException(503, "MCAS_PUBLIC_BASE_URL must be an application origin; production must use HTTPS.")
-    return base.rstrip("/") + "/api/auth/verify-email?" + urllib.parse.urlencode({"token": token})
+    return base.rstrip("/") + "/?" + urllib.parse.urlencode({"verify_token": token})
 
 
 def send_email_verification_message(recipient: str, verification_url: str) -> bool:
@@ -771,12 +778,33 @@ def send_email_verification_message(recipient: str, verification_url: str) -> bo
     message["From"] = f"{from_name} <{sender}>"
     message["To"] = recipient
     message["Subject"] = "Verify your MCAS email address"
-    message.set_content(
+    plain_body = (
         "Welcome to Mosley Client Acquisition System (MCAS).\n\n"
         "Confirm that this is your email address by opening the link below. "
+        "On the page that opens, click 'Confirm email address' to activate your account. "
         "The link expires in 24 hours and can only be used once.\n\n"
         + verification_url + "\n\n"
         "If you did not create an MCAS account, you can ignore this message."
+    )
+    message.set_content(plain_body)
+    safe_url = html.escape(verification_url, quote=True)
+    safe_name = html.escape(from_name)
+    message.add_alternative(
+        "<!doctype html><html><body style=\"font-family:Arial,sans-serif;line-height:1.6;color:#172033\">"
+        "<h2>Verify your MCAS email address</h2>"
+        "<p>Welcome to " + safe_name + ".</p>"
+        "<p>Confirm that this is your email address. The link expires in 24 hours "
+        "and can only be used once.</p>"
+        "<p><a href=\"" + safe_url + "\" "
+        "style=\"display:inline-block;padding:12px 18px;background:#172033;color:#fff;"
+        "text-decoration:none;border-radius:8px\">Verify email address</a></p>"
+        "<p>When the MCAS page opens, click <strong>Confirm email address</strong> "
+        "to activate your account.</p>"
+        "<p>If the button does not work, copy this link into your browser:<br>"
+        "<a href=\"" + safe_url + "\">" + safe_url + "</a></p>"
+        "<p>If you did not create an MCAS account, you can ignore this message.</p>"
+        "</body></html>",
+        subtype="html",
     )
     host = os.getenv("MCAS_EMAIL_SMTP_HOST", "").strip()
     port = int(os.getenv("MCAS_EMAIL_SMTP_PORT", "587"))
