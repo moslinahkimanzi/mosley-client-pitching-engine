@@ -338,7 +338,7 @@ def init_db():
         add_column(c, "improvement_decisions", "test_environment_status", "TEXT NOT NULL DEFAULT 'not_started'")
         add_column(c, "improvement_decisions", "test_environment_notes", "TEXT NOT NULL DEFAULT ''")
         add_column(c, "improvement_decisions", "rollback_note", "TEXT NOT NULL DEFAULT ''")
-        add_column(c, "improvement_decisions", "rollback_reference", "TEXT NOT NULL DEFAULT '')
+        add_column(c, "improvement_decisions", "rollback_reference", "TEXT NOT NULL DEFAULT ''")
 
 init_db()
 
