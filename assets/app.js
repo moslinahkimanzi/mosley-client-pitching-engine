@@ -27,8 +27,9 @@ $('authForm').addEventListener('submit',async e=>{
   const data=await api(endpoint,{method:'POST',body:JSON.stringify(payload)});
   if(data.email_verification_required){
    $('authPassword').value='';
-   if(data.development_verification_url){const url=new URL(data.development_verification_url,location.origin);showEmailVerification(url.searchParams.get('token'),data.email,'Development mode: SMTP is not configured. Use the local verification button below to activate this test account.');}
-   else showEmailVerification('',data.email,data.message||'A verification link has been sent to your email.');
+   if(data.development_verification_url){const url=new URL(data.development_verification_url,location.origin);showEmailVerification(url.searchParams.get('token'),data.email,'Development mode: MCAS could not confirm email delivery. Use the local verification button below to activate this test account. Check the server terminal for SMTP diagnostics.');}
+   else if(data.email_sent===true){showEmailVerification('',data.email,'The SMTP server accepted the verification message. This confirms handoff to the mail provider, not final inbox delivery. Check Inbox, Spam and Promotions; delivery can be delayed.');}
+    else showEmailVerification('',data.email,data.message||'MCAS could not confirm that the verification email was accepted by the SMTP server. Check the server configuration and logs, then request another link.');
    return;
   }
   if(data.mfa_required){
