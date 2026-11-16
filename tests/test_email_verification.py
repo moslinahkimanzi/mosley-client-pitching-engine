@@ -5,7 +5,7 @@ from urllib.parse import urlsplit, parse_qs
 from unittest.mock import patch
 from fastapi.testclient import TestClient
 
-from backend.app import app, db, token_hash
+from backend.app import app, db, token_hash, send_email_verification_message
 
 
 class AccountEmailVerificationTests(unittest.TestCase):
@@ -37,6 +37,47 @@ class AccountEmailVerificationTests(unittest.TestCase):
             "/api/auth/verify-email/confirm",
             json={"token": token},
             headers={"X-CSRF-Token": self.csrf(client)},
+        )
+
+
+    def smtp_environment(self):
+        return {
+            "MCAS_EMAIL_SMTP_HOST": "smtp.gmail.com",
+            "MCAS_EMAIL_SMTP_PORT": "587",
+            "MCAS_EMAIL_SMTP_USERNAME": "mcas.sender@gmail.com",
+            "MCAS_EMAIL_SMTP_PASSWORD": "abcd efgh ijkl mnop",
+            "MCAS_EMAIL_SMTP_USE_SSL": "false",
+            "MCAS_EMAIL_SMTP_STARTTLS": "true",
+            "MCAS_EMAIL_FROM": "mcas.sender@gmail.com",
+            "MCAS_EMAIL_FROM_NAME": "MCAS Test",
+            "MCAS_PUBLIC_BASE_URL": "http://localhost:8000",
+        }
+
+    def test_smtp_refused_recipient_is_not_reported_as_sent(self):
+        with patch.dict(os.environ, self.smtp_environment()):
+            with patch("backend.app.smtplib.SMTP") as smtp:
+                server = smtp.return_value.__enter__.return_value
+                server.send_message.return_value = {
+                    "customer@example.test": (550, b"Mailbox rejected")
+                }
+                sent = send_email_verification_message(
+                    "customer@example.test",
+                    "http://localhost:8000/api/auth/verify-email?token=sample-token",
+                )
+        self.assertFalse(sent)
+
+    def test_gmail_app_password_spaces_are_removed_before_login(self):
+        with patch.dict(os.environ, self.smtp_environment()):
+            with patch("backend.app.smtplib.SMTP") as smtp:
+                server = smtp.return_value.__enter__.return_value
+                server.send_message.return_value = {}
+                sent = send_email_verification_message(
+                    "customer@example.test",
+                    "http://localhost:8000/api/auth/verify-email?token=sample-token",
+                )
+        self.assertTrue(sent)
+        server.login.assert_called_once_with(
+            "mcas.sender@gmail.com", "abcdefghijklmnop"
         )
 
     def test_registration_requires_email_verification_before_login(self):
