@@ -698,6 +698,11 @@ def email_delivery_configured() -> bool:
     password = os.getenv("MCAS_EMAIL_SMTP_PASSWORD", "").strip()
     if not host or not sender or bool(username) != bool(password):
         return False
+    host_lower = host.lower()
+    is_gmail_smtp = host_lower in {"smtp.gmail.com", "smtp.googlemail.com"}
+    # Gmail SMTP requires an authenticated account.
+    if is_gmail_smtp and (not username or not password):
+        return False
     if IS_PROD and not public_base:
         return False
     if public_base:
@@ -712,12 +717,21 @@ def email_delivery_configured() -> bool:
         return False
     use_ssl = os.getenv("MCAS_EMAIL_SMTP_USE_SSL", "false").strip().lower() == "true"
     use_starttls = os.getenv("MCAS_EMAIL_SMTP_STARTTLS", "true").strip().lower() == "true"
+    if use_ssl and use_starttls:
+        return False
     if IS_PROD and not (use_ssl or use_starttls):
         return False
     try:
         port = int(os.getenv("MCAS_EMAIL_SMTP_PORT", "587"))
         if port < 1 or port > 65535:
             return False
+        if is_gmail_smtp:
+            if port == 587 and (use_ssl or not use_starttls):
+                return False
+            if port == 465 and (not use_ssl or use_starttls):
+                return False
+            if port not in {465, 587}:
+                return False
     except ValueError:
         return False
     return True
@@ -768,6 +782,10 @@ def send_email_verification_message(recipient: str, verification_url: str) -> bo
     port = int(os.getenv("MCAS_EMAIL_SMTP_PORT", "587"))
     username = os.getenv("MCAS_EMAIL_SMTP_USERNAME", "").strip()
     password = os.getenv("MCAS_EMAIL_SMTP_PASSWORD", "").strip()
+    # Google displays App Passwords in four-character groups. Spaces are visual
+    # separators; remove them before SMTP authentication.
+    if host.lower() in {"smtp.gmail.com", "smtp.googlemail.com"}:
+        password = "".join(password.split())
     use_ssl = os.getenv("MCAS_EMAIL_SMTP_USE_SSL", "false").strip().lower() == "true"
     use_starttls = os.getenv("MCAS_EMAIL_SMTP_STARTTLS", "true").strip().lower() == "true"
     timeout = 15
@@ -782,10 +800,27 @@ def send_email_verification_message(recipient: str, verification_url: str) -> bo
                 server.ehlo()
             if username:
                 server.login(username, password)
-            server.send_message(message)
+            refused = server.send_message(message)
+        if refused:
+            # SMTP can refuse a recipient via the return value instead of an exception.
+            smtp_codes = sorted({
+                int(response[0])
+                for response in refused.values()
+                if isinstance(response, tuple) and response
+            })
+            SECURITY_LOGGER.error(
+                "MCAS account-verification email refused by SMTP; smtp_codes=%s",
+                ",".join(str(code) for code in smtp_codes) or "unknown",
+            )
+            return False
+        SECURITY_LOGGER.info("MCAS account-verification message accepted by SMTP.")
         return True
-    except (OSError, smtplib.SMTPException):
-        SECURITY_LOGGER.exception("MCAS account-verification email delivery failed")
+    except (OSError, smtplib.SMTPException, ValueError) as exc:
+        SECURITY_LOGGER.error(
+            "MCAS account-verification email delivery failed; exception=%s smtp_code=%s",
+            type(exc).__name__,
+            getattr(exc, "smtp_code", None),
+        )
         return False
 
 
