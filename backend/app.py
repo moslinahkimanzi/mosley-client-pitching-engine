@@ -558,7 +558,10 @@ async def security_middleware(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-Permitted-Cross-Domain-Policies"] = "none"
     response.headers["X-DNS-Prefetch-Control"] = "off"
-    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Referrer-Policy"] = (
+        "no-referrer" if request.query_params.get("verify_token")
+        else "strict-origin-when-cross-origin"
+    )
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
     response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
