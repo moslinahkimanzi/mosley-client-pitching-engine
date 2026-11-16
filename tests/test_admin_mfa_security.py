@@ -55,7 +55,7 @@ class AdminSecurityTest(unittest.TestCase):
         if response.status_code == 201:
             verification_url = response.json().get("development_verification_url")
             if verification_url:
-                raw_token = parse_qs(urlsplit(verification_url).query)["token"][0]
+                raw_token = parse_qs(urlsplit(verification_url).query)["verify_token"][0]
                 verified = client.post("/api/auth/verify-email/confirm", json={"token": raw_token},
                     headers={"X-CSRF-Token": self.csrf(client)})
                 if verified.status_code != 200:
