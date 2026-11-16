@@ -31,6 +31,10 @@ class ResearchWorkflowTest(unittest.TestCase):
         confirmed = client.post("/api/auth/verify-email/confirm", json={"token": raw_token},
             headers={"X-CSRF-Token": client.get("/api/auth/csrf").json()["csrf_token"]})
         self.assertEqual(confirmed.status_code, 200, confirmed.text)
+        login = client.post("/api/auth/login",
+            json={"email": email, "password": "UniqueStrongPassphrase!2026"},
+            headers={"X-CSRF-Token": client.get("/api/auth/csrf").json()["csrf_token"]})
+        self.assertEqual(login.status_code, 200, login.text)
         csrf = client.get("/api/auth/csrf").json()["csrf_token"]
         return client, csrf
 
