@@ -73,12 +73,19 @@ class ApiSecurityTest(unittest.TestCase):
         return response.json()["csrf_token"]
 
     def register(self, client):
+        from urllib.parse import urlsplit, parse_qs
         token = self.csrf(client)
         email = "mcas-test-" + uuid.uuid4().hex + "@example.test"
         response = client.post("/api/auth/register",
             json={"email": email, "password": "UniqueStrongPassphrase!2026"},
             headers={"X-CSRF-Token": token})
         self.assertEqual(response.status_code, 201, response.text)
+        verification = response.json().get("development_verification_url")
+        self.assertTrue(verification, response.text)
+        raw_token = parse_qs(urlsplit(verification).query)["token"][0]
+        confirmed = client.post("/api/auth/verify-email/confirm", json={"token": raw_token},
+            headers={"X-CSRF-Token": self.csrf(client)})
+        self.assertEqual(confirmed.status_code, 200, confirmed.text)
         return email
 
     def test_authentication_required_for_private_leads(self):
