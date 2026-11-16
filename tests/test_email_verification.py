@@ -29,7 +29,7 @@ class AccountEmailVerificationTests(unittest.TestCase):
         self.assertTrue(response.json()["email_verification_required"])
         url = response.json().get("development_verification_url")
         self.assertTrue(url, "Tests expect SMTP disabled and local verification URL enabled")
-        token = parse_qs(urlsplit(url).query)["token"][0]
+        token = parse_qs(urlsplit(url).query)["verify_token"][0]
         return email, token
 
     def confirm(self, client, token):
@@ -154,7 +154,7 @@ class AccountEmailVerificationTests(unittest.TestCase):
                 headers={"X-CSRF-Token": self.csrf(client)},
             )
             self.assertEqual(response.status_code, 200, response.text)
-            new_token = parse_qs(urlsplit(response.json()["development_verification_url"]).query)["token"][0]
+            new_token = parse_qs(urlsplit(response.json()["development_verification_url"]).query)["verify_token"][0]
             self.assertNotEqual(old_token, new_token)
             self.assertEqual(self.confirm(client, old_token).status_code, 400)
             self.assertEqual(self.confirm(client, new_token).status_code, 200)
@@ -182,6 +182,57 @@ class AccountEmailVerificationTests(unittest.TestCase):
             self.assertEqual(row_a["email_verified"], 1)
             self.assertEqual(row_b["email_verified"], 0)
 
+
+    def test_registration_email_link_opens_confirmation_screen_and_activates_account(self):
+        email = "end-to-end-" + uuid.uuid4().hex + "@example.test"
+        environment = self.smtp_environment()
+        environment["MCAS_PUBLIC_BASE_URL"] = "https://mcas.example.test"
+        with patch.dict(os.environ, environment):
+            with patch("backend.app.smtplib.SMTP") as smtp:
+                server = smtp.return_value.__enter__.return_value
+                server.send_message.return_value = {}
+                with TestClient(app) as client:
+                    response = client.post(
+                        "/api/auth/register",
+                        json={"email": email, "password": "UniqueStrongPassphrase!2026"},
+                        headers={"X-CSRF-Token": self.csrf(client)},
+                    )
+                    self.assertEqual(response.status_code, 201, response.text)
+                    self.assertTrue(response.json()["email_sent"])
+                    self.assertNotIn("development_verification_url", response.json())
+
+                    sent_message = server.send_message.call_args.args[0]
+                    plain_part = sent_message.get_body(preferencelist=("plain",))
+                    html_part = sent_message.get_body(preferencelist=("html",))
+                    self.assertIsNotNone(plain_part)
+                    self.assertIsNotNone(html_part)
+                    body = plain_part.get_content()
+                    import re
+                    match = re.search(r"https://mcas\.example\.test/\?verify_token=([A-Za-z0-9_-]{40,128})", body)
+                    self.assertIsNotNone(match, body)
+                    token = match.group(1)
+                    self.assertIn("Confirm email address", html_part.get_content())
+
+                    # Simulate the browser opening the exact frontend route from the email.
+                    landing = client.get("/?verify_token=" + token)
+                    self.assertEqual(landing.status_code, 200)
+                    self.assertIn("emailVerificationPanel", landing.text)
+                    self.assertEqual(landing.headers.get("cache-control"), "no-store")
+                    self.assertEqual(landing.headers.get("referrer-policy"), "no-referrer")
+                    with db() as connection:
+                        pending = connection.execute(
+                            "SELECT email_verified FROM users WHERE email=?", (email,)
+                        ).fetchone()
+                    self.assertEqual(pending["email_verified"], 0)
+
+                    confirmed = self.confirm(client, token)
+                    self.assertEqual(confirmed.status_code, 200, confirmed.text)
+                    self.assertTrue(confirmed.json()["verified"])
+                    with db() as connection:
+                        active = connection.execute(
+                            "SELECT email_verified FROM users WHERE email=?", (email,)
+                        ).fetchone()
+                    self.assertEqual(active["email_verified"], 1)
 
 if __name__ == "__main__":
     unittest.main()
