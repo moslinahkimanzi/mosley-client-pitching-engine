@@ -46,11 +46,21 @@ class AdminSecurityTest(unittest.TestCase):
         return client.get("/api/auth/csrf").json()["csrf_token"]
 
     def register(self, client, email, token=""):
-        return client.post(
+        from urllib.parse import urlsplit, parse_qs
+        response = client.post(
             "/api/auth/register",
             json={"email": email, "password": PASSWORD, "admin_bootstrap_token": token},
             headers={"X-CSRF-Token": self.csrf(client)},
         )
+        if response.status_code == 201:
+            verification_url = response.json().get("development_verification_url")
+            if verification_url:
+                raw_token = parse_qs(urlsplit(verification_url).query)["token"][0]
+                verified = client.post("/api/auth/verify-email/confirm", json={"token": raw_token},
+                    headers={"X-CSRF-Token": self.csrf(client)})
+                if verified.status_code != 200:
+                    raise AssertionError(verified.text)
+        return response
 
     def enable_test_mfa(self, email):
         with db() as c:
