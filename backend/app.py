@@ -326,6 +326,7 @@ def init_db():
         add_column(c, "leads", "do_not_contact", "INTEGER NOT NULL DEFAULT 0")
         add_column(c, "drafts", "to_email", "TEXT")
         add_column(c, "drafts", "gmail_draft_id", "TEXT")
+        add_column(c, "integrations", "account_email", "TEXT")
         add_column(c, "customer_feedback", "ai_analysis_consent", "INTEGER NOT NULL DEFAULT 0")
         add_column(c, "users", "admin_totp_secret", "TEXT")
         add_column(c, "users", "admin_totp_pending_secret", "TEXT")
@@ -1876,8 +1877,16 @@ def integration_status(user=Depends(current_user)):
 @app.get("/api/integrations/gmail/status")
 def gmail_status(user=Depends(current_user)):
     with db() as c:
-        ok = c.execute("SELECT 1 FROM integrations WHERE user_id=? AND provider='gmail'", (user["id"],)).fetchone()
-    return {"configured": gmail_ready(), "connected": bool(ok), "capability": "MCAS creates Gmail drafts only. It does not read, search, list or monitor incoming emails, and exposes no send endpoint. Google’s gmail.compose scope technically permits sending at API level, but MCAS does not implement or invoke any send operation."}
+        row = c.execute(
+            "SELECT account_email FROM integrations WHERE user_id=? AND provider='gmail'",
+            (user["id"],)
+        ).fetchone()
+    return {
+        "configured": gmail_ready(),
+        "connected": bool(row),
+        "connected_email": row["account_email"] if row else None,
+        "capability": "MCAS creates Gmail drafts only. It does not read, search, list or monitor incoming emails, and exposes no send endpoint. Google's gmail.compose scope technically permits sending at API level, but MCAS does not implement or invoke any send operation."
+    }
 
 @app.get("/api/integrations/gmail/start")
 def gmail_start(user=Depends(current_user)):
@@ -1889,8 +1898,10 @@ def gmail_start(user=Depends(current_user)):
         c.execute("INSERT INTO oauth_states VALUES(?,?,?)", (token_hash(state), user["id"], int(time.time()) + 600))
     params = urllib.parse.urlencode({
         "client_id": os.getenv("GMAIL_CLIENT_ID"), "redirect_uri": os.getenv("GMAIL_REDIRECT_URI"),
-        "response_type": "code", "scope": "https://www.googleapis.com/auth/gmail.compose",
-        "access_type": "offline", "prompt": "consent", "state": state
+        "response_type": "code",
+        "scope": "openid email https://www.googleapis.com/auth/gmail.compose",
+        "access_type": "offline", "prompt": "select_account consent",
+        "login_hint": user["email"], "state": state
     })
     return RedirectResponse("https://accounts.google.com/o/oauth2/v2/auth?" + params, status_code=302)
 
@@ -1916,18 +1927,45 @@ def gmail_callback(code: str = "", state: str = "", error: str = ""):
     try:
         with urllib.request.urlopen(req, timeout=15) as r:
             token_data = json.loads(r.read(100000))
+        access_token = token_data.get("access_token")
         refresh = token_data.get("refresh_token")
-        if not refresh:
-            raise ValueError("Google did not return a refresh token; reconnect with consent.")
+        if not access_token or not refresh:
+            raise ValueError("Google did not return the required access and refresh tokens.")
+
+        identity_req = urllib.request.Request(
+            "https://openidconnect.googleapis.com/v1/userinfo",
+            headers={"Authorization": "Bearer " + access_token},
+            method="GET",
+        )
+        with urllib.request.urlopen(identity_req, timeout=15) as identity_response:
+            identity = json.loads(identity_response.read(100000))
+
+        google_email = str(identity.get("email") or "").strip()
+        if not google_email or identity.get("email_verified") is not True:
+            return RedirectResponse("/?gmail=email_unverified", status_code=303)
+
+        with db() as c:
+            account = c.execute("SELECT email FROM users WHERE id=?", (row["user_id"],)).fetchone()
+        if not account:
+            raise ValueError("MCAS account no longer exists.")
+        mcas_email = str(account["email"] or "").strip()
+        if google_email.casefold() != mcas_email.casefold():
+            with db() as c:
+                audit(c, row["user_id"], "gmail.identity_mismatch")
+            return RedirectResponse("/?gmail=email_mismatch", status_code=303)
+
         encrypted = fernet().encrypt(refresh.encode()).decode()
+    except HTTPException:
+        raise
     except Exception:
-        raise HTTPException(502, "Could not complete Google OAuth. Check the OAuth client and redirect URI.")
+        raise HTTPException(502, "Could not verify the Google account. Check the OAuth setup and try again.")
     with db() as c:
-        c.execute("""INSERT INTO integrations(user_id,provider,encrypted_refresh_token,connected_at)
-            VALUES(?,'gmail',?,?) ON CONFLICT(user_id,provider) DO UPDATE SET
-            encrypted_refresh_token=excluded.encrypted_refresh_token,connected_at=excluded.connected_at""",
-            (row["user_id"], encrypted, now()))
-        audit(c, row["user_id"], "gmail.connected")
+        c.execute("""INSERT INTO integrations(user_id,provider,encrypted_refresh_token,connected_at,account_email)
+            VALUES(?,'gmail',?,?,?) ON CONFLICT(user_id,provider) DO UPDATE SET
+            encrypted_refresh_token=excluded.encrypted_refresh_token,
+            connected_at=excluded.connected_at,account_email=excluded.account_email""",
+            (row["user_id"], encrypted, now(), google_email))
+        audit(c, row["user_id"], "gmail.connected", {"account_email": google_email})
     return RedirectResponse("/?gmail=connected", status_code=303)
 
 @app.delete("/api/integrations/gmail")
