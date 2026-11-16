@@ -10,7 +10,7 @@ async function api(path,opts={}){const method=(opts.method||'GET').toUpperCase()
 function showAuth(){ $('app').classList.add('hide');$('auth').classList.remove('hide');$('mfaChallengeForm').classList.add('hide');$('authForm').classList.remove('hide');}
 function updateAdminNavigation(){const allowed=state.user?.is_admin===true;$('settingsNavGroup').classList.toggle('hide',!allowed);$('settingsNav').classList.toggle('hide',!allowed);}
 function showApp(){ $('auth').classList.add('hide');$('app').classList.remove('hide');$('signedEmail').textContent=state.user.email||'';updateAdminNavigation();}
-function page(name){if(['integrations','security','admin-maintenance'].includes(name)&&!state.user?.is_admin){toast('Settings are private and available only to the configured administrator.',true);name='overview';}document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id===name));document.querySelectorAll('[data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===name));if(name==='prospects')renderLeads();if(name==='studio')renderDrafts();if(name==='followups')renderFollowups();if(name==='proposals')renderProposals();if(name==='updates'){loadUpdates();loadMyFeedback();}if(name==='admin-maintenance')loadAdminMaintenance();}
+function page(name){if(['integrations','security','admin-maintenance','ai-improvement-centre'].includes(name)&&!state.user?.is_admin){toast('Settings are private and available only to the configured administrator.',true);name='overview';}document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id===name));document.querySelectorAll('[data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===name));if(name==='prospects')renderLeads();if(name==='studio')renderDrafts();if(name==='followups')renderFollowups();if(name==='proposals')renderProposals();if(name==='updates'){loadUpdates();loadMyFeedback();}if(name==='admin-maintenance')loadAdminMaintenance();if(name==='ai-improvement-centre')loadImprovementReviews();}
 document.querySelectorAll('[data-page]').forEach(b=>b.addEventListener('click',()=>page(b.dataset.page)));
 document.querySelectorAll('[data-go]').forEach(b=>b.addEventListener('click',()=>page(b.dataset.go)));
 function setAuthMode(mode){state.authMode=mode;$('loginTab').classList.toggle('active',mode==='login');$('registerTab').classList.toggle('active',mode==='register');$('authSubmit').textContent=mode==='login'?'Sign in securely':'Create secure account';$('authPassword').autocomplete=mode==='login'?'current-password':'new-password';$('authPassword').minLength=mode==='login'?1:12;$('authAdminBootstrapWrap').classList.toggle('hide',mode!=='register');$('authForm').classList.remove('hide');$('mfaChallengeForm').classList.add('hide');note('authNotice','');}
@@ -93,7 +93,7 @@ async function loadAdminMaintenance(){
   $('adminMfaSetupCard').classList.add('hide');$('adminMaintenanceContent').classList.remove('hide');
   if(!mfa.required)note('adminMfaNotice','Authenticator app is not required on this development server. Password-only access is active; do not expose this server publicly.');
   state.maintenance=await api('/api/admin/maintenance');renderAdminMaintenance();
-  await loadImprovementReviews();await loadSecurityGuardian();
+  await loadSecurityGuardian();
  }catch(e){note('adminFeedbackNotice','Administrator maintenance could not be loaded: '+e.message,true);}
 }
 async function loadSecurityGuardian(){
@@ -147,13 +147,21 @@ function renderImprovementReviews(){
     '<p><b>Area:</b> '+esc(item.area)+'</p><p><b>Problem:</b> '+esc(item.problem)+'</p>'+
     '<p><b>Suggested change:</b> '+esc(item.suggested_change)+'</p>'+
     '<p><b>Test ideas:</b> '+(item.test_ideas||[]).map(esc).join(' · ')+'</p>'+
+    '<div class="item"><h3>Evidence & justification</h3><p>'+esc(d.evidence_justification||item.evidence_justification||'Evidence justification not yet recorded.')+'</p></div>'+
+    '<div class="item"><h3>Risk assessment</h3><p>'+esc(d.risk_assessment||item.risk_assessment||'Risk assessment requires administrator review.')+'</p></div>'+
+    '<div class="field"><label>Evidence / justification (editable)</label><textarea data-improvement-justification maxlength="3000">'+esc(d.evidence_justification||item.evidence_justification||'')+'</textarea></div>'+
+    '<div class="field"><label>Risk assessment (editable)</label><textarea data-improvement-risk maxlength="4000">'+esc(d.risk_assessment||item.risk_assessment||'')+'</textarea></div>'+
     '<div class="field"><label>Review stage</label><select data-improvement-status>'+stages.map(s=>'<option value="'+s[0]+'" '+(current===s[0]?'selected':'')+'>'+s[1]+'</option>').join('')+'</select></div>'+
-    '<div class="field"><label>Development branch (required before testing)</label><input data-improvement-branch maxlength="200" value="'+esc(d.code_branch||'')+'" placeholder="feature/short-description"></div>'+
+    '<div class="field"><label>Isolated development branch (required before testing)</label><input data-improvement-branch maxlength="200" value="'+esc(d.code_branch||'')+'" placeholder="feature/short-description"></div>'+
+    '<div class="field"><label>Test environment URL (optional)</label><input data-improvement-env-url type="url" maxlength="500" value="'+esc(d.test_environment_url||'')+'" placeholder="http://127.0.0.1:8000 or https://staging.example.com"></div>'+
+    '<div class="field"><label>Test environment status</label><select data-improvement-env-status>'+[['not_started','Not started'],['prepared','Prepared'],['running','Running'],['passed','Passed'],['failed','Failed']].map(x=>'<option value="'+x[0]+'" '+((d.test_environment_status||'not_started')===x[0]?'selected':'')+'>'+x[1]+'</option>').join('')+'</select></div>'+
+    '<div class="field"><label>Test environment notes</label><textarea data-improvement-env-notes maxlength="4000">'+esc(d.test_environment_notes||'')+'</textarea></div>'+
     '<div class="field"><label>GitHub pull request URL (required before release review)</label><input data-improvement-pr type="url" maxlength="500" value="'+esc(d.pull_request_url||'')+'" placeholder="https://github.com/owner/repo/pull/123"></div>'+
-    '<div class="field"><label>Test evidence / CI results (required before release review)</label><textarea data-improvement-evidence maxlength="5000" placeholder="Record test commands, results, CI/CodeQL status, manual checks and any limitations.">'+esc(d.test_evidence||'')+'</textarea></div>'+
-    '<div class="field"><label>Administrator decision notes</label><textarea data-improvement-note maxlength="2000" placeholder="Why you approved, rejected, requested changes or rolled back this proposal.">'+esc(d.admin_note||'')+'</textarea></div>'+
-    '<div class="actions"><button class="primary" data-improvement-save>Save review stage</button></div>'+
-    '<p class="tiny">Last updated: '+esc(d.updated_at||'Not reviewed yet')+'. Saving records your decision only; it does not change source code.</p></div>';
+    '<div class="field"><label>Test evidence / CI results (required before release review)</label><textarea data-improvement-evidence maxlength="5000" placeholder="Record exact test commands, results, CI/CodeQL runs, manual checks and limitations.">'+esc(d.test_evidence||'')+'</textarea></div>'+
+    '<div class="field"><label>Administrator decision notes</label><textarea data-improvement-note maxlength="2000">'+esc(d.admin_note||'')+'</textarea></div>'+
+    '<div class="actions"><button class="primary" data-improvement-approve>Approve development</button><button class="quiet" data-improvement-reject>Reject</button><button data-improvement-save>Save review / test details</button>'+(current==='implemented'?'<button class="danger" data-improvement-rollback>Record rollback</button>':'')+'</div>'+
+    '<h4>Implementation history</h4><div class="list">'+(d.history||[]).map(h=>'<div class="item"><b>'+esc(h.event_type.replaceAll('_',' '))+'</b> · '+esc(h.from_status)+' → '+esc(h.to_status)+'<p>'+esc(h.created_at)+'</p><p>'+esc(JSON.stringify(h.details||{}))+'</p></div>').join('')+'</div>'+
+    '<p class="tiny">Last updated: '+esc(d.updated_at||'Not reviewed yet')+'. MCAS records approvals and evidence; it does not run code or perform deployments/rollbacks.</p></div>';
   }).join('')+'</div>'
  ).join('')||'<div class="empty">No AI improvement reviews have been created yet.</div>';
 }
@@ -175,8 +183,27 @@ function renderAdminMaintenance(){
 }
 $('refreshMaintenanceBtn').addEventListener('click',loadAdminMaintenance);
 $('improvementReviewList').addEventListener('click',async e=>{
- const button=e.target.closest('[data-improvement-save]');if(!button)return;
- const card=button.closest('[data-improvement-card]');if(!card)return;
+ const rollbackButton=e.target.closest('[data-improvement-rollback]');
+ if(rollbackButton){
+  const rollbackCard=rollbackButton.closest('[data-improvement-card]');
+  const reason=prompt('Explain why this implemented change was rolled back (at least 10 characters):');
+  if(!reason||reason.trim().length<10)return;
+  const reference=prompt('Optional recovery commit, release or deployment reference:')||'';
+  const verification=prompt('How was the restored version verified?')||'';
+  rollbackButton.disabled=true;
+  try{
+   const url='/api/admin/improvements/'+encodeURIComponent(rollbackCard.dataset.improvementCard)+'/'+Number(rollbackCard.dataset.recommendationIndex)+'/rollback';
+   const result=await api(url,{method:'POST',body:JSON.stringify({reason:reason.trim(),recovery_reference:reference.trim(),verification_notes:verification.trim()})});
+   note('improvementAnalysisNotice',result.message);await loadImprovementReviews();
+  }catch(err){note('improvementAnalysisNotice',err.message,true);}
+  finally{rollbackButton.disabled=false;}
+  return;
+ }
+ const actionButton=e.target.closest('[data-improvement-approve],[data-improvement-reject]');
+ const card=(actionButton||e.target.closest('[data-improvement-save]'))?.closest('[data-improvement-card]');
+ if(!card)return;
+ if(actionButton)card.querySelector('[data-improvement-status]').value=actionButton.hasAttribute('data-improvement-approve')?'approved_for_development':'rejected';
+ const button=card.querySelector('[data-improvement-save]');if(!button)return;
  const reviewId=card.dataset.improvementCard,index=Number(card.dataset.recommendationIndex);
  button.disabled=true;
  try{
@@ -185,6 +212,11 @@ $('improvementReviewList').addEventListener('click',async e=>{
    code_branch:card.querySelector('[data-improvement-branch]').value.trim(),
    pull_request_url:card.querySelector('[data-improvement-pr]').value.trim(),
    test_evidence:card.querySelector('[data-improvement-evidence]').value.trim(),
+   evidence_justification:card.querySelector('[data-improvement-justification]').value.trim(),
+   risk_assessment:card.querySelector('[data-improvement-risk]').value.trim(),
+   test_environment_url:card.querySelector('[data-improvement-env-url]').value.trim(),
+   test_environment_status:card.querySelector('[data-improvement-env-status]').value,
+   test_environment_notes:card.querySelector('[data-improvement-env-notes]').value.trim(),
    admin_note:card.querySelector('[data-improvement-note]').value.trim()
   };
   const result=await api('/api/admin/improvements/'+encodeURIComponent(reviewId)+'/'+index,{method:'PATCH',body:JSON.stringify(payload)});

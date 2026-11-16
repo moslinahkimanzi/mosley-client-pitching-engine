@@ -354,23 +354,31 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
                 self.assertEqual(save("approved_for_release").status_code, 409)
                 self.assertEqual(save("approved_for_development").status_code, 200)
                 self.assertEqual(save("in_development", code_branch="feature/dashboard-status").status_code, 200)
-                self.assertEqual(save("testing", code_branch="feature/dashboard-status").status_code, 200)
-                self.assertEqual(save("ready_for_release",
-                    code_branch="feature/dashboard-status",
-                    pull_request_url="https://github.com/example/mcas/pull/12",
-                    test_evidence="Unit tests passed; JavaScript syntax passed; CodeQL passed.").status_code, 200)
-                self.assertEqual(save("approved_for_release",
-                    code_branch="feature/dashboard-status",
-                    pull_request_url="https://github.com/example/mcas/pull/12",
-                    test_evidence="Unit tests passed; JavaScript syntax passed; CodeQL passed.").status_code, 200)
-                self.assertEqual(save("implemented",
-                    code_branch="feature/dashboard-status",
-                    pull_request_url="https://github.com/example/mcas/pull/12",
-                    test_evidence="Unit tests passed; JavaScript syntax passed; CodeQL passed.").status_code, 200)
-                self.assertEqual(save("rolled_back",
-                    code_branch="feature/dashboard-status",
-                    pull_request_url="https://github.com/example/mcas/pull/12",
-                    test_evidence="Unit tests passed; rollback recorded after release review.").status_code, 200)
+                base = {
+                    "code_branch": "feature/dashboard-status",
+                    "pull_request_url": "https://github.com/example/mcas/pull/12",
+                    "test_evidence": "Unit tests passed; JavaScript syntax passed; CodeQL passed.",
+                    "evidence_justification": "Three opted-in reports describe the same dashboard progress confusion.",
+                    "risk_assessment": "Low risk UI-only change; verify privacy, accessibility and regression behavior.",
+                }
+                self.assertEqual(save("testing", **base,
+                    test_environment_url="http://127.0.0.1:8000",
+                    test_environment_status="prepared").status_code, 200)
+                release = {**base, "test_environment_url": "https://staging.example.test",
+                           "test_environment_status": "passed"}
+                self.assertEqual(save("ready_for_release", **release).status_code, 200)
+                self.assertEqual(save("approved_for_release", **release).status_code, 200)
+                self.assertEqual(save("implemented", **release).status_code, 200)
+                rollback = admin.post(endpoint + "/rollback", json={
+                    "reason": "The new dashboard progress panel caused a confirmed regression.",
+                    "recovery_reference": "release-1.4.0-revert",
+                    "verification_notes": "Restored version passed smoke tests."
+                }, headers={"X-CSRF-Token": self._csrf(admin)})
+                self.assertEqual(rollback.status_code, 200, rollback.text)
+                self.assertEqual(rollback.json()["status"], "rolled_back")
+                final = admin.get("/api/admin/improvements").json()[0]["recommendations"][0]["decision"]
+                self.assertEqual(final["status"], "rolled_back")
+                self.assertGreaterEqual(len(final["history"]), 6)
 
 
 if __name__ == "__main__":

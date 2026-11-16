@@ -299,6 +299,19 @@ def init_db():
             updated_at TEXT NOT NULL,
             PRIMARY KEY(review_id,recommendation_index)
         );
+        CREATE TABLE IF NOT EXISTS improvement_decision_history(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            review_id TEXT NOT NULL,
+            recommendation_index INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            from_status TEXT NOT NULL,
+            to_status TEXT NOT NULL,
+            details_json TEXT NOT NULL DEFAULT '{}',
+            created_by TEXT NOT NULL REFERENCES users(id),
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(review_id,recommendation_index)
+                REFERENCES improvement_decisions(review_id,recommendation_index) ON DELETE CASCADE
+        );
         CREATE INDEX IF NOT EXISTS idx_feedback_user_created ON customer_feedback(user_id,created_at);
         CREATE INDEX IF NOT EXISTS idx_feedback_status_created ON customer_feedback(status,created_at);
         CREATE INDEX IF NOT EXISTS idx_leads_user_updated ON leads(user_id,updated_at);
@@ -319,6 +332,13 @@ def init_db():
         add_column(c, "users", "admin_totp_pending_expires", "INTEGER")
         add_column(c, "users", "admin_totp_pending_attempts", "INTEGER NOT NULL DEFAULT 0")
         add_column(c, "mfa_login_challenges", "attempts", "INTEGER NOT NULL DEFAULT 0")
+        add_column(c, "improvement_decisions", "evidence_justification", "TEXT NOT NULL DEFAULT ''")
+        add_column(c, "improvement_decisions", "risk_assessment", "TEXT NOT NULL DEFAULT ''")
+        add_column(c, "improvement_decisions", "test_environment_url", "TEXT NOT NULL DEFAULT ''")
+        add_column(c, "improvement_decisions", "test_environment_status", "TEXT NOT NULL DEFAULT 'not_started'")
+        add_column(c, "improvement_decisions", "test_environment_notes", "TEXT NOT NULL DEFAULT ''")
+        add_column(c, "improvement_decisions", "rollback_note", "TEXT NOT NULL DEFAULT ''")
+        add_column(c, "improvement_decisions", "rollback_reference", "TEXT NOT NULL DEFAULT ''")
 
 init_db()
 
@@ -623,6 +643,16 @@ class ImprovementDecisionIn(BaseModel):
     test_evidence: str = Field(default="", max_length=5000)
     code_branch: str = Field(default="", max_length=200)
     pull_request_url: str = Field(default="", max_length=500)
+    evidence_justification: str = Field(default="", max_length=3000)
+    risk_assessment: str = Field(default="", max_length=4000)
+    test_environment_url: str = Field(default="", max_length=500)
+    test_environment_status: Literal["not_started", "prepared", "running", "passed", "failed"] = "not_started"
+    test_environment_notes: str = Field(default="", max_length=4000)
+
+class ImprovementRollbackIn(BaseModel):
+    reason: str = Field(min_length=10, max_length=2000)
+    recovery_reference: str = Field(default="", max_length=500)
+    verification_notes: str = Field(default="", max_length=2000)
 
 @app.get("/")
 def home():
@@ -2379,14 +2409,23 @@ def list_improvement_reviews(user=Depends(current_user)):
         ).fetchall()
         decisions = c.execute(
             """SELECT review_id,recommendation_index,status,admin_note,test_evidence,
-                      code_branch,pull_request_url,updated_at
+                      code_branch,pull_request_url,evidence_justification,risk_assessment,
+                      test_environment_url,test_environment_status,test_environment_notes,
+                      rollback_note,rollback_reference,updated_at
                FROM improvement_decisions"""
         ).fetchall()
     decision_map = {
         (row["review_id"], int(row["recommendation_index"])): {
             "status": row["status"], "admin_note": row["admin_note"],
             "test_evidence": row["test_evidence"], "code_branch": row["code_branch"],
-            "pull_request_url": row["pull_request_url"], "updated_at": row["updated_at"]
+            "pull_request_url": row["pull_request_url"],
+            "evidence_justification": row["evidence_justification"],
+            "risk_assessment": row["risk_assessment"],
+            "test_environment_url": row["test_environment_url"],
+            "test_environment_status": row["test_environment_status"],
+            "test_environment_notes": row["test_environment_notes"],
+            "rollback_note": row["rollback_note"], "rollback_reference": row["rollback_reference"],
+            "updated_at": row["updated_at"]
         } for row in decisions
     }
     output = []
@@ -2394,11 +2433,27 @@ def list_improvement_reviews(user=Depends(current_user)):
         item = dict(row)
         recommendations = json.loads(item.pop("recommendations_json"))
         for index, recommendation in enumerate(recommendations):
-            recommendation["decision"] = decision_map.get(
+            decision = decision_map.get(
                 (item["id"], index),
                 {"status": "pending_review", "admin_note": "", "test_evidence": "",
-                 "code_branch": "", "pull_request_url": "", "updated_at": ""}
+                 "code_branch": "", "pull_request_url": "", "evidence_justification": "",
+                 "risk_assessment": "", "test_environment_url": "",
+                 "test_environment_status": "not_started", "test_environment_notes": "",
+                 "rollback_note": "", "rollback_reference": "", "updated_at": ""}
             )
+            with db() as history_db:
+                history_rows = history_db.execute(
+                    """SELECT event_type,from_status,to_status,details_json,created_at
+                       FROM improvement_decision_history
+                       WHERE review_id=? AND recommendation_index=?
+                       ORDER BY id DESC LIMIT 30""", (item["id"], index)
+                ).fetchall()
+            decision["history"] = [
+                {"event_type": h["event_type"], "from_status": h["from_status"],
+                 "to_status": h["to_status"], "details": json.loads(h["details_json"]),
+                 "created_at": h["created_at"]} for h in history_rows
+            ]
+            recommendation["decision"] = decision
         item["recommendations"] = recommendations
         output.append(item)
     return output
@@ -2442,8 +2497,23 @@ def update_improvement_decision(
         branch_name = payload.code_branch.strip()
         pr_url = payload.pull_request_url.strip()
         evidence = payload.test_evidence.strip()
+        env_url = payload.test_environment_url.strip()
+        if env_url:
+            parsed_env = urllib.parse.urlparse(env_url)
+            if parsed_env.scheme not in {"https", "http"} or not parsed_env.netloc:
+                raise HTTPException(422, "Test environment URL must be a valid HTTP or HTTPS URL.")
+            if parsed_env.scheme == "http" and parsed_env.hostname not in {"localhost", "127.0.0.1"}:
+                raise HTTPException(422, "Non-local test environment URLs must use HTTPS.")
         if target in {"testing", "ready_for_release", "approved_for_release", "implemented"} and not branch_name:
             raise HTTPException(422, "Record the isolated development branch before entering testing or release stages.")
+        if target in {"testing", "ready_for_release", "approved_for_release", "implemented"} and payload.test_environment_status == "not_started":
+            raise HTTPException(422, "Prepare and record a test environment before entering testing or release stages.")
+        if target in {"ready_for_release", "approved_for_release", "implemented"} and payload.test_environment_status != "passed":
+            raise HTTPException(422, "The recorded test environment must pass before release review.")
+        if target in {"ready_for_release", "approved_for_release", "implemented"} and len(payload.evidence_justification.strip()) < 20:
+            raise HTTPException(422, "Add evidence and justification (at least 20 characters) before release review.")
+        if target in {"ready_for_release", "approved_for_release", "implemented"} and len(payload.risk_assessment.strip()) < 20:
+            raise HTTPException(422, "Add a risk assessment (at least 20 characters) before release review.")
         if target in {"ready_for_release", "approved_for_release", "implemented"}:
             parsed = urllib.parse.urlparse(pr_url)
             if parsed.scheme != "https" or parsed.netloc.lower() not in {"github.com", "www.github.com"} or not re.fullmatch(r"/[^/]+/[^/]+/pull/\d+/?", parsed.path):
@@ -2460,21 +2530,80 @@ def update_improvement_decision(
         c.execute(
             """INSERT INTO improvement_decisions
                (review_id,recommendation_index,status,admin_note,test_evidence,code_branch,
-                pull_request_url,updated_by,updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?)
+                pull_request_url,updated_by,updated_at,evidence_justification,risk_assessment,
+                test_environment_url,test_environment_status,test_environment_notes)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(review_id,recommendation_index) DO UPDATE SET
                  status=excluded.status,admin_note=excluded.admin_note,
                  test_evidence=excluded.test_evidence,code_branch=excluded.code_branch,
                  pull_request_url=excluded.pull_request_url,updated_by=excluded.updated_by,
-                 updated_at=excluded.updated_at""",
+                 updated_at=excluded.updated_at,evidence_justification=excluded.evidence_justification,
+                 risk_assessment=excluded.risk_assessment,test_environment_url=excluded.test_environment_url,
+                 test_environment_status=excluded.test_environment_status,
+                 test_environment_notes=excluded.test_environment_notes""",
             (review_id, recommendation_index, target, payload.admin_note.strip(),
-             evidence, branch_name, pr_url, user["id"], stamp)
+             evidence, branch_name, pr_url, user["id"], stamp,
+             payload.evidence_justification.strip(), payload.risk_assessment.strip(),
+             env_url, payload.test_environment_status, payload.test_environment_notes.strip())
+        )
+        c.execute(
+            """INSERT INTO improvement_decision_history
+               (review_id,recommendation_index,event_type,from_status,to_status,details_json,created_by,created_at)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (review_id, recommendation_index, "stage_changed", previous, target,
+             json.dumps({"branch": branch_name, "pull_request_url": pr_url,
+                         "test_environment_status": payload.test_environment_status,
+                         "test_evidence": evidence[:1000],
+                         "evidence_justification": payload.evidence_justification[:1000],
+                         "risk_assessment": payload.risk_assessment[:1000]}),
+             user["id"], stamp)
         )
         audit(c, user["id"], "improvements.decision_updated",
               {"review_id": review_id, "recommendation_index": recommendation_index,
                "from": previous, "to": target})
     return {"ok": True, "status": target, "updated_at": stamp,
             "message": "Review stage saved. MCAS has not modified, merged or deployed code."}
+
+
+@app.post("/api/admin/improvements/{review_id}/{recommendation_index}/rollback")
+def record_improvement_rollback(
+    review_id: str, recommendation_index: int, payload: ImprovementRollbackIn,
+    user=Depends(current_user)
+):
+    """Record a human-executed rollback. This endpoint does not alter code or deployments."""
+    require_admin(user)
+    with db() as c:
+        row = c.execute(
+            "SELECT status FROM improvement_decisions WHERE review_id=? AND recommendation_index=?",
+            (review_id, recommendation_index)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Improvement decision not found.")
+        if row["status"] != "implemented":
+            raise HTTPException(409, "Rollback can only be recorded for an implemented improvement.")
+        stamp = now()
+        c.execute(
+            """UPDATE improvement_decisions SET status='rolled_back',rollback_note=?,
+               rollback_reference=?,updated_by=?,updated_at=?
+               WHERE review_id=? AND recommendation_index=?""",
+            (payload.reason.strip(), payload.recovery_reference.strip(), user["id"], stamp,
+             review_id, recommendation_index)
+        )
+        c.execute(
+            """INSERT INTO improvement_decision_history
+               (review_id,recommendation_index,event_type,from_status,to_status,details_json,created_by,created_at)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (review_id, recommendation_index, "rollback_recorded", "implemented", "rolled_back",
+             json.dumps({"reason": payload.reason.strip(),
+                         "recovery_reference": payload.recovery_reference.strip(),
+                         "verification_notes": payload.verification_notes.strip(),
+                         "execution_boundary": "This records a human-executed rollback; MCAS did not restore code or deployment."}),
+             user["id"], stamp)
+        )
+        audit(c, user["id"], "improvements.rollback_recorded",
+              {"review_id": review_id, "recommendation_index": recommendation_index})
+    return {"ok": True, "status": "rolled_back",
+            "message": "Rollback recorded. MCAS does not execute deployment or source-code restoration; verify the recovery action outside MCAS."}
 
 
 @app.post("/api/admin/improvements/analyze", status_code=201)
@@ -2509,7 +2638,9 @@ def analyze_opted_in_feedback(user=Depends(current_user)):
                 "propose practical product changes. Do not claim a bug is confirmed unless the feedback proves it. "
                 "Return ONLY valid JSON with a summary string and a recommendations array of 1 to 5 objects. "
                 "Each recommendation must contain title, area, problem, suggested_change, priority (high, medium or low), "
-                "and test_ideas (an array of strings). No code, secrets, personal data or Markdown."
+                "test_ideas (an array of strings), evidence_justification (specific anonymised feedback evidence and reasoning), "
+                "and risk_assessment (security, privacy, reliability, cost and operational risks; state unknowns). "
+                "Do not invent evidence or claim tests have been run. No code, secrets, personal data or Markdown."
             ),
         },
         {
@@ -2552,6 +2683,15 @@ def analyze_opted_in_feedback(user=Depends(current_user)):
             raise HTTPException(502, "The AI response contained invalid test ideas. No improvement plan was saved.")
         values["priority"] = priority
         values["test_ideas"] = [test.strip() for test in tests]
+        for field, maximum in (("evidence_justification", 1800), ("risk_assessment", 2400)):
+            value = item.get(field, "")
+            if not isinstance(value, str) or len(value.strip()) > maximum:
+                raise HTTPException(502, "The AI response contained invalid evidence or risk-assessment text. No improvement plan was saved.")
+            values[field] = value.strip() or (
+                "Not supplied by the AI analysis. Administrator must add evidence before release review."
+                if field == "evidence_justification" else
+                "Not supplied by the AI analysis. Administrator must complete a manual risk assessment before release review."
+            )
         clean_recommendations.append(values)
     review_id = secrets.token_urlsafe(18)
     stamp = now()
