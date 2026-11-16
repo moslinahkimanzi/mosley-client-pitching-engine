@@ -1,8 +1,9 @@
 import unittest
 import uuid
+from unittest.mock import patch
 from fastapi.testclient import TestClient
 from fastapi import HTTPException
-from backend.app import app, password_hash, verify_password, csrf_signature, valid_csrf, resolve_public, consume_rate_limits, assistant_system_prompt
+from backend.app import app, password_hash, verify_password, token_hash, mfa_challenge_hash, csrf_signature, valid_csrf, resolve_public, consume_rate_limits, assistant_system_prompt, SECRET
 
 class SecurityHelpersTest(unittest.TestCase):
     def test_password_hash_is_salted_and_verifies(self):
@@ -12,6 +13,30 @@ class SecurityHelpersTest(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertTrue(verify_password(password, first))
         self.assertFalse(verify_password("wrong-password", first))
+
+    def test_opaque_token_digest_uses_keyed_sha256(self):
+        import hmac
+        value = "random-high-entropy-cookie-token"
+        expected = hmac.digest(
+            SECRET.encode("utf-8"),
+            b"MCAS opaque-token v1:" + value.encode("utf-8"),
+            "sha256",
+        ).hex()
+        self.assertEqual(token_hash(value), expected)
+        self.assertNotEqual(token_hash(value), value)
+        self.assertNotEqual(token_hash(value), token_hash(value + "-different"))
+
+    def test_mfa_challenge_digest_uses_pbkdf2(self):
+        import hashlib
+        value = "random-high-entropy-mfa-challenge"
+        expected = hashlib.pbkdf2_hmac(
+            "sha256",
+            value.encode("utf-8"),
+            b"MCAS MFA challenge v1:" + SECRET.encode("utf-8"),
+            100_000,
+        ).hex()
+        self.assertEqual(mfa_challenge_hash(value), expected)
+        self.assertNotEqual(mfa_challenge_hash(value), value)
 
     def test_csrf_signature(self):
         token = "nonce-value." + csrf_signature("nonce-value")
@@ -114,10 +139,22 @@ class ApiSecurityTest(unittest.TestCase):
             self.assertEqual(draft.status_code, 403, draft.text)
 
     def test_expensive_ai_endpoint_is_rate_limited(self):
-        with TestClient(app) as client:
+        # The endpoint requires a saved, account-owned prospect before it reaches
+        # AI configuration. Clear local .env credentials so each permitted request
+        # returns the expected 503 without making an external provider call.
+        with patch.dict("os.environ", {
+            "AI_API_BASE_URL": "", "AI_API_KEY": "", "AI_MODEL": ""
+        }), TestClient(app) as client:
             self.register(client)
             token = self.csrf(client)
-            payload = {"task": "email", "prospect_name": "Test business"}
+            lead = client.post("/api/leads", json={
+                "name": "Rate-limit test business",
+                "market": "Kenya",
+                "evidence": "Created by the automated rate-limit test."
+            }, headers={"X-CSRF-Token": token})
+            self.assertEqual(lead.status_code, 201, lead.text)
+            payload = {"task": "email", "lead_id": lead.json()["id"],
+                       "prospect_name": "Rate-limit test business"}
             statuses = [client.post("/api/assistant/draft", json=payload,
                 headers={"X-CSRF-Token": token}).status_code for _ in range(6)]
             self.assertTrue(all(code == 503 for code in statuses), statuses)

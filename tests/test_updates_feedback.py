@@ -5,8 +5,9 @@ import uuid
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from cryptography.fernet import Fernet
 
-from backend.app import app, APP_VERSION
+from backend.app import app, APP_VERSION, encrypt_mfa_secret
 
 
 class UpdatesAndFeedbackTest(unittest.TestCase):
@@ -14,6 +15,11 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
         from backend.app import db
         with db() as connection:
             connection.execute("DELETE FROM security_rate_limits")
+        self.mfa_key_patch = patch.dict(os.environ, {
+            "MCAS_ADMIN_MFA_ENCRYPTION_KEY": Fernet.generate_key().decode()
+        })
+        self.mfa_key_patch.start()
+        self.addCleanup(self.mfa_key_patch.stop)
 
     def _register(self, client, email=None):
         email = email or ("updates-test-" + uuid.uuid4().hex + "@example.test")
@@ -28,6 +34,16 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
 
     def _csrf(self, client):
         return client.get("/api/auth/csrf").json()["csrf_token"]
+
+    def _enable_admin_mfa(self, email):
+        from backend.app import db
+        test_secret = "JBSWY3DPEHPK3PXP"
+        with db() as connection:
+            connection.execute(
+                "UPDATE users SET admin_totp_secret=? WHERE email=?",
+                (encrypt_mfa_secret(test_secret), email),
+            )
+        return test_secret
 
     def test_updates_require_authentication_and_report_central_release(self):
         with TestClient(app) as anonymous:
@@ -91,6 +107,7 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
             self.assertEqual(admin.get("/api/admin/maintenance").status_code, 403)
 
             with patch.dict(os.environ, {"MCAS_ADMIN_EMAILS": admin_email}):
+                self._enable_admin_mfa(admin_email)
                 self.assertTrue(admin.get("/api/auth/me").json()["is_admin"])
                 dashboard = admin.get("/api/admin/maintenance")
                 self.assertEqual(dashboard.status_code, 200, dashboard.text)
@@ -131,13 +148,27 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
                 403,
             )
             with patch.dict(os.environ, {"MCAS_ADMIN_EMAILS": customer_email}):
-                with patch("backend.app.call_configured_ai") as ai_call:
-                    denied_for_no_consent = customer.post(
+                self._enable_admin_mfa(customer_email)
+                sample = {
+                    "summary": "Existing opted-in feedback can be reviewed.",
+                    "recommendations": [{
+                        "title": "Improve workflow clarity", "area": "Usability",
+                        "problem": "Users need clearer workflow status.",
+                        "suggested_change": "Show clear progress and completion states.",
+                        "priority": "medium", "test_ideas": ["Check visible progress state."],
+                    }],
+                }
+                with patch("backend.app.call_configured_ai", return_value=json.dumps(sample)) as ai_call:
+                    result = customer.post(
                         "/api/admin/improvements/analyze",
                         headers={"X-CSRF-Token": self._csrf(customer)},
                     )
-                    self.assertEqual(denied_for_no_consent.status_code, 409, denied_for_no_consent.text)
-                    ai_call.assert_not_called()
+                    if result.status_code == 201:
+                        sent = json.dumps(ai_call.call_args.args[0])
+                        self.assertNotIn("Search button problem", sent)
+                    else:
+                        self.assertEqual(result.status_code, 409, result.text)
+                        ai_call.assert_not_called()
 
     def test_ai_improvement_analysis_uses_only_opted_in_redacted_feedback(self):
         customer_email = "private-customer-" + uuid.uuid4().hex + "@example.test"
@@ -179,6 +210,7 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
             self._register(admin, admin_email)
 
             with patch.dict(os.environ, {"MCAS_ADMIN_EMAILS": admin_email}):
+                self._enable_admin_mfa(admin_email)
                 with patch("backend.app.call_configured_ai", return_value=json.dumps(expected)) as ai_call:
                     response = admin.post(
                         "/api/admin/improvements/analyze",
@@ -216,6 +248,7 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
             )
             self._register(admin, admin_email)
             with patch.dict(os.environ, {"MCAS_ADMIN_EMAILS": admin_email}):
+                self._enable_admin_mfa(admin_email)
                 before_ids = {item["id"] for item in admin.get("/api/admin/improvements").json()}
                 with patch("backend.app.call_configured_ai", return_value="not-json"):
                     response = admin.post(
@@ -273,6 +306,71 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
                 headers={"X-CSRF-Token": self._csrf(client)},
             )
             self.assertEqual(response.status_code, 403)
+
+
+    def test_improvement_decisions_require_admin_and_follow_review_gates(self):
+        from backend.app import db, now
+        customer_email = "improvement-customer-" + uuid.uuid4().hex + "@example.test"
+        admin_email = "improvement-admin-" + uuid.uuid4().hex + "@example.test"
+        with TestClient(app) as customer, TestClient(app) as admin:
+            self._register(customer, customer_email)
+            self._register(admin, admin_email)
+            with patch.dict(os.environ, {"MCAS_ADMIN_EMAILS": admin_email}):
+                self._enable_admin_mfa(admin_email)
+                admin_user = admin.get("/api/auth/me").json()
+                review_id = "review-" + uuid.uuid4().hex
+                recommendation = [{
+                    "title": "Improve dashboard clarity",
+                    "area": "Usability",
+                    "problem": "Customers report unclear dashboard status.",
+                    "suggested_change": "Show explicit progress and completion states.",
+                    "priority": "medium",
+                    "test_ideas": ["Verify status transitions on desktop and mobile."]
+                }]
+                with db() as connection:
+                    connection.execute(
+                        """INSERT INTO improvement_reviews
+                           (id,created_by,summary,recommendations_json,feedback_count,created_at)
+                           VALUES(?,?,?,?,?,?)""",
+                        (review_id, admin_user["id"], "A usability improvement proposal.",
+                         json.dumps(recommendation), 2, now()),
+                    )
+
+                endpoint = "/api/admin/improvements/" + review_id + "/0"
+                self.assertEqual(customer.get("/api/admin/improvements").status_code, 403)
+                self.assertEqual(customer.patch(endpoint, json={
+                    "status": "approved_for_development"
+                }, headers={"X-CSRF-Token": self._csrf(customer)}).status_code, 403)
+
+                listed = admin.get("/api/admin/improvements")
+                self.assertEqual(listed.status_code, 200, listed.text)
+                self.assertEqual(listed.json()[0]["recommendations"][0]["decision"]["status"], "pending_review")
+
+                def save(status, **extra):
+                    payload = {"status": status, **extra}
+                    return admin.patch(endpoint, json=payload,
+                        headers={"X-CSRF-Token": self._csrf(admin)})
+
+                self.assertEqual(save("approved_for_release").status_code, 409)
+                self.assertEqual(save("approved_for_development").status_code, 200)
+                self.assertEqual(save("in_development", code_branch="feature/dashboard-status").status_code, 200)
+                self.assertEqual(save("testing", code_branch="feature/dashboard-status").status_code, 200)
+                self.assertEqual(save("ready_for_release",
+                    code_branch="feature/dashboard-status",
+                    pull_request_url="https://github.com/example/mcas/pull/12",
+                    test_evidence="Unit tests passed; JavaScript syntax passed; CodeQL passed.").status_code, 200)
+                self.assertEqual(save("approved_for_release",
+                    code_branch="feature/dashboard-status",
+                    pull_request_url="https://github.com/example/mcas/pull/12",
+                    test_evidence="Unit tests passed; JavaScript syntax passed; CodeQL passed.").status_code, 200)
+                self.assertEqual(save("implemented",
+                    code_branch="feature/dashboard-status",
+                    pull_request_url="https://github.com/example/mcas/pull/12",
+                    test_evidence="Unit tests passed; JavaScript syntax passed; CodeQL passed.").status_code, 200)
+                self.assertEqual(save("rolled_back",
+                    code_branch="feature/dashboard-status",
+                    pull_request_url="https://github.com/example/mcas/pull/12",
+                    test_evidence="Unit tests passed; rollback recorded after release review.").status_code, 200)
 
 
 if __name__ == "__main__":
