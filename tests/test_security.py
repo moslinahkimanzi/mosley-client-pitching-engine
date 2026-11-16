@@ -1,5 +1,6 @@
 import unittest
 import uuid
+from unittest.mock import patch
 from fastapi.testclient import TestClient
 from fastapi import HTTPException
 from backend.app import app, password_hash, verify_password, token_hash, mfa_challenge_hash, csrf_signature, valid_csrf, resolve_public, consume_rate_limits, assistant_system_prompt, SECRET
@@ -138,10 +139,22 @@ class ApiSecurityTest(unittest.TestCase):
             self.assertEqual(draft.status_code, 403, draft.text)
 
     def test_expensive_ai_endpoint_is_rate_limited(self):
-        with TestClient(app) as client:
+        # The endpoint requires a saved, account-owned prospect before it reaches
+        # AI configuration. Clear local .env credentials so each permitted request
+        # returns the expected 503 without making an external provider call.
+        with patch.dict("os.environ", {
+            "AI_API_BASE_URL": "", "AI_API_KEY": "", "AI_MODEL": ""
+        }), TestClient(app) as client:
             self.register(client)
             token = self.csrf(client)
-            payload = {"task": "email", "prospect_name": "Test business"}
+            lead = client.post("/api/leads", json={
+                "name": "Rate-limit test business",
+                "market": "Kenya",
+                "evidence": "Created by the automated rate-limit test."
+            }, headers={"X-CSRF-Token": token})
+            self.assertEqual(lead.status_code, 201, lead.text)
+            payload = {"task": "email", "lead_id": lead.json()["id"],
+                       "prospect_name": "Rate-limit test business"}
             statuses = [client.post("/api/assistant/draft", json=payload,
                 headers={"X-CSRF-Token": token}).status_code for _ in range(6)]
             self.assertTrue(all(code == 503 for code in statuses), statuses)
