@@ -93,3 +93,15 @@ Manual website-check tests: try localhost, a private LAN address, a non-standard
 - Backups, restore procedure, environment secrets or HTTPS settings have not been verified.
 
 This checklist is not a penetration test and cannot prove the system is immune to attacks. A qualified security review is still required before a public multi-customer launch.
+
+
+## H. Account email verification
+
+- New registrations create inactive accounts and do not issue an authenticated session.
+- In production, configure `MCAS_PUBLIC_BASE_URL` with the canonical HTTPS origin and configure SMTP sender credentials before allowing signups.
+- Verification links contain random one-time tokens; only token hashes are stored. Tokens expire after 24 hours and are consumed only by the explicit confirmation POST (not by GET link previews).
+- Login and authenticated workspace routes reject unverified accounts. Existing accounts are preserved as verified by the database migration.
+- Resend endpoint returns a generic response for unknown, verified and unverified addresses and applies IP/account rate limits.
+- Verify a correct token, then confirm reuse and expired tokens are rejected. Confirm a different user's token cannot activate another account.
+- Verify the SMTP email reaches the registered address and the link uses the configured HTTPS public origin.
+- Development only: if SMTP is not configured, registration returns a local-only verification URL for test convenience. Never expose this behaviour in production.

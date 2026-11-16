@@ -30,6 +30,17 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
             headers={"X-CSRF-Token": csrf},
         )
         self.assertEqual(response.status_code, 201, response.text)
+        from urllib.parse import urlsplit, parse_qs
+        verification_url = response.json().get("development_verification_url")
+        self.assertTrue(verification_url, response.text)
+        raw_token = parse_qs(urlsplit(verification_url).query)["verify_token"][0]
+        confirmed = client.post("/api/auth/verify-email/confirm", json={"token": raw_token},
+            headers={"X-CSRF-Token": self._csrf(client)})
+        self.assertEqual(confirmed.status_code, 200, confirmed.text)
+        login = client.post("/api/auth/login",
+            json={"email": email, "password": "UniqueStrongPassphrase!2026"},
+            headers={"X-CSRF-Token": self._csrf(client)})
+        self.assertEqual(login.status_code, 200, login.text)
         return email
 
     def _csrf(self, client):
