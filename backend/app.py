@@ -1890,7 +1890,7 @@ def gmail_start(user=Depends(current_user)):
     params = urllib.parse.urlencode({
         "client_id": os.getenv("GMAIL_CLIENT_ID"), "redirect_uri": os.getenv("GMAIL_REDIRECT_URI"),
         "response_type": "code", "scope": "https://www.googleapis.com/auth/gmail.compose",
-        "access_type": "offline", "prompt": "consent", "state": state
+        "access_type": "offline", "prompt": "select_account consent", "state": state
     })
     return RedirectResponse("https://accounts.google.com/o/oauth2/v2/auth?" + params, status_code=302)
 
