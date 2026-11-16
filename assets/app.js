@@ -9,7 +9,7 @@ async function refreshCsrf(){const r=await fetch('/api/auth/csrf',{credentials:'
 async function api(path,opts={}){const method=(opts.method||'GET').toUpperCase();const headers={'Accept':'application/json',...(opts.headers||{})};if(opts.body!==undefined)headers['Content-Type']='application/json';if(['POST','PATCH','DELETE','PUT'].includes(method)){state.csrf=cookie('mcas_csrf')||state.csrf;headers['X-CSRF-Token']=state.csrf;}const r=await fetch(path,{...opts,method,headers,credentials:'same-origin'});const type=r.headers.get('content-type')||'';const data=type.includes('application/json')?await r.json():await r.text();if(!r.ok)throw new Error(data.detail||data.message||data||('Request failed ('+r.status+')'));return data;}
 function showAuth(){ $('app').classList.add('hide');$('auth').classList.remove('hide');$('mfaChallengeForm').classList.add('hide');$('authForm').classList.remove('hide');}
 function showApp(){ $('auth').classList.add('hide');$('app').classList.remove('hide');$('signedEmail').textContent=state.user.email||'';}
-function page(name){document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id===name));document.querySelectorAll('[data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===name));if(name==='prospects')renderLeads();if(name==='studio')renderDrafts();if(name==='followups')renderFollowups();if(name==='proposals')renderProposals();if(name==='updates'){loadUpdates();loadMyFeedback();}if(name==='admin-maintenance')loadAdminMaintenance();}
+function page(name){if(name==='admin-maintenance'&&!state.user?.is_admin){toast('Administrator access is restricted to the configured owner account.',true);name='overview';}document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id===name));document.querySelectorAll('[data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===name));if(name==='prospects')renderLeads();if(name==='studio')renderDrafts();if(name==='followups')renderFollowups();if(name==='proposals')renderProposals();if(name==='updates'){loadUpdates();loadMyFeedback();}if(name==='admin-maintenance')loadAdminMaintenance();}
 document.querySelectorAll('[data-page]').forEach(b=>b.addEventListener('click',()=>page(b.dataset.page)));
 document.querySelectorAll('[data-go]').forEach(b=>b.addEventListener('click',()=>page(b.dataset.go)));
 function setAuthMode(mode){state.authMode=mode;$('loginTab').classList.toggle('active',mode==='login');$('registerTab').classList.toggle('active',mode==='register');$('authSubmit').textContent=mode==='login'?'Sign in securely':'Create secure account';$('authPassword').autocomplete=mode==='login'?'current-password':'new-password';$('authPassword').minLength=mode==='login'?1:12;$('authAdminBootstrapWrap').classList.toggle('hide',mode!=='register');$('authForm').classList.remove('hide');$('mfaChallengeForm').classList.add('hide');note('authNotice','');}
@@ -42,7 +42,7 @@ $('mfaChallengeForm').addEventListener('submit',async e=>{
 $('mfaLoginCancel').addEventListener('click',()=>{location.reload();});
 $('logoutBtn').addEventListener('click',async()=>{try{await api('/api/auth/logout',{method:'POST'});state.user=null;showAuth();}catch(e){toast(e.message,true);}});
 async function boot(){try{await refreshCsrf();state.user=await api('/api/auth/me');showApp();await loadAll();}catch(e){showAuth();}}
-async function loadAll(){try{const values=await Promise.all([api('/api/leads'),api('/api/drafts'),api('/api/followups'),api('/api/proposals'),api('/api/metrics'),api('/api/integrations/gmail/status'),api('/api/billing/status'),api('/api/integrations/status'),api('/api/auth/me'),api('/api/updates'),api('/api/feedback'),api('/api/onboarding')]);[state.leads,state.drafts,state.followups,state.proposals,state.metrics,state.gmail,state.billing,state.config,state.user,state.updates,state.feedback,state.onboarding]=values;$('adminMaintenanceNav').classList.toggle('hide',!state.user.is_admin);renderAll();renderUpdates();renderMyFeedback();$('searchBadge').textContent=state.config.web_search_configured?'Connected':'Needs API key';$('searchBadge').className='badge '+(state.config.web_search_configured?'green':'amber');$('aiBadge').textContent=state.config.ai_configured?'Connected':'Optional';$('aiBadge').className='badge '+(state.config.ai_configured?'green':'amber');$('researchConfig').textContent=state.config.web_search_configured?'Configured':'Set SERPER_API_KEY in .env and restart MCAS';$('aiConfig').textContent=state.config.ai_configured?'Configured':'Set AI_API_KEY in .env and restart MCAS';$('gmailBadge').textContent=state.gmail.connected?'Connected':state.gmail.configured?'Ready to connect':'Not configured';$('gmailDetails').textContent=state.gmail.capability||'Gmail drafts only.';$('gmailConnect').disabled=!state.gmail.configured||state.gmail.connected;$('gmailDisconnect').disabled=!state.gmail.connected;$('billingStatus').textContent=state.billing.message;}catch(e){toast(e.message,true);}}
+async function loadAll(){try{const values=await Promise.all([api('/api/leads'),api('/api/drafts'),api('/api/followups'),api('/api/proposals'),api('/api/metrics'),api('/api/integrations/gmail/status'),api('/api/billing/status'),api('/api/integrations/status'),api('/api/auth/me'),api('/api/updates'),api('/api/feedback'),api('/api/onboarding')]);[state.leads,state.drafts,state.followups,state.proposals,state.metrics,state.gmail,state.billing,state.config,state.user,state.updates,state.feedback,state.onboarding]=values;$('adminMaintenanceNav').classList.toggle('hide',!state.user.is_admin);$('adminNavGroup').classList.toggle('hide',!state.user.is_admin);renderAll();renderUpdates();renderMyFeedback();$('searchBadge').textContent=state.config.web_search_configured?'Connected':'Needs API key';$('searchBadge').className='badge '+(state.config.web_search_configured?'green':'amber');$('aiBadge').textContent=state.config.ai_configured?'Connected':'Optional';$('aiBadge').className='badge '+(state.config.ai_configured?'green':'amber');$('researchConfig').textContent=state.config.web_search_configured?'Configured':'Set SERPER_API_KEY in .env and restart MCAS';$('aiConfig').textContent=state.config.ai_configured?'Configured':'Set AI_API_KEY in .env and restart MCAS';$('gmailBadge').textContent=state.gmail.connected?'Connected':state.gmail.configured?'Ready to connect':'Not configured';$('gmailDetails').textContent=state.gmail.capability||'Gmail drafts only.';$('gmailConnect').disabled=!state.gmail.configured||state.gmail.connected;$('gmailDisconnect').disabled=!state.gmail.connected;$('billingStatus').textContent=state.billing.message;}catch(e){toast(e.message,true);}}
 function renderAll(){renderMetrics();renderLeads();renderDrafts();renderFollowups();renderProposals();renderSelects();renderUpdates();renderMyFeedback();renderOnboarding();}
 
 function feedbackStatusLabel(value){return ({received:'Received',reviewing:'Under review',planned:'Planned',in_progress:'In progress',completed:'Completed',declined:'Not planned'})[value]||value;}
@@ -130,15 +130,30 @@ async function loadImprovementReviews(){
 }
 function renderImprovementReviews(){
  const items=state.improvements||[];
+ const stages=[
+  ['pending_review','Pending your review'],['approved_for_development','Approved for development'],
+  ['in_development','In development'],['testing','Testing'],
+  ['ready_for_release','Ready for release review'],['approved_for_release','Approved for release'],
+  ['implemented','Implemented'],['rejected','Rejected'],['rolled_back','Rolled back']
+ ];
  $('improvementReviewList').innerHTML=items.map(review=>
   '<div class="item"><div class="itemtop"><strong>AI review · '+esc(review.feedback_count)+' feedback item(s)</strong><span class="badge">Human review required</span></div>'+
   '<p>'+esc(review.created_at)+'</p><p>'+esc(review.summary)+'</p>'+
-  (review.recommendations||[]).map(item=>
-   '<div class="item"><div class="itemtop"><strong>'+esc(item.title)+'</strong><span class="badge">'+esc(item.priority)+' priority</span></div>'+
-   '<p><b>Area:</b> '+esc(item.area)+'</p><p><b>Problem:</b> '+esc(item.problem)+'</p>'+
-   '<p><b>Suggested change:</b> '+esc(item.suggested_change)+'</p>'+
-   '<p><b>Test ideas:</b> '+(item.test_ideas||[]).map(esc).join(' · ')+'</p></div>'
-  ).join('')+'</div>'
+  (review.recommendations||[]).map((item,index)=>{
+   const d=item.decision||{}, current=d.status||'pending_review';
+   return '<div class="item" data-improvement-card="'+esc(review.id)+'" data-recommendation-index="'+index+'">'+
+    '<div class="itemtop"><strong>'+esc(item.title)+'</strong><span class="badge">'+esc(item.priority)+' priority · '+esc(current.replaceAll('_',' '))+'</span></div>'+
+    '<p><b>Area:</b> '+esc(item.area)+'</p><p><b>Problem:</b> '+esc(item.problem)+'</p>'+
+    '<p><b>Suggested change:</b> '+esc(item.suggested_change)+'</p>'+
+    '<p><b>Test ideas:</b> '+(item.test_ideas||[]).map(esc).join(' · ')+'</p>'+
+    '<div class="field"><label>Review stage</label><select data-improvement-status>'+stages.map(s=>'<option value="'+s[0]+'" '+(current===s[0]?'selected':'')+'>'+s[1]+'</option>').join('')+'</select></div>'+
+    '<div class="field"><label>Development branch (required before testing)</label><input data-improvement-branch maxlength="200" value="'+esc(d.code_branch||'')+'" placeholder="feature/short-description"></div>'+
+    '<div class="field"><label>GitHub pull request URL (required before release review)</label><input data-improvement-pr type="url" maxlength="500" value="'+esc(d.pull_request_url||'')+'" placeholder="https://github.com/owner/repo/pull/123"></div>'+
+    '<div class="field"><label>Test evidence / CI results (required before release review)</label><textarea data-improvement-evidence maxlength="5000" placeholder="Record test commands, results, CI/CodeQL status, manual checks and any limitations.">'+esc(d.test_evidence||'')+'</textarea></div>'+
+    '<div class="field"><label>Administrator decision notes</label><textarea data-improvement-note maxlength="2000" placeholder="Why you approved, rejected, requested changes or rolled back this proposal.">'+esc(d.admin_note||'')+'</textarea></div>'+
+    '<div class="actions"><button class="primary" data-improvement-save>Save review stage</button></div>'+
+    '<p class="tiny">Last updated: '+esc(d.updated_at||'Not reviewed yet')+'. Saving records your decision only; it does not change source code.</p></div>';
+  }).join('')+'</div>'
  ).join('')||'<div class="empty">No AI improvement reviews have been created yet.</div>';
 }
 function renderAdminMaintenance(){
@@ -158,6 +173,25 @@ function renderAdminMaintenance(){
  $('adminFeedbackList').innerHTML=(data.feedback||[]).map(item=>'<div class="item" data-feedback-card="'+esc(item.id)+'"><div class="itemtop"><strong>'+esc(item.title)+'</strong><span class="badge">'+esc(feedbackStatusLabel(item.status))+'</span></div><p>'+esc(item.category)+' · '+esc(item.customer_email)+' · '+esc(item.created_at)+'</p><p>'+esc(item.message)+'</p><div class="field"><label>Review status</label><select data-feedback-status><option value="received" '+(item.status==='received'?'selected':'')+'>Received</option><option value="reviewing" '+(item.status==='reviewing'?'selected':'')+'>Under review</option><option value="planned" '+(item.status==='planned'?'selected':'')+'>Planned</option><option value="in_progress" '+(item.status==='in_progress'?'selected':'')+'>In progress</option><option value="completed" '+(item.status==='completed'?'selected':'')+'>Completed</option><option value="declined" '+(item.status==='declined'?'selected':'')+'>Not planned</option></select></div><div class="field"><label>Reply / internal note (visible to this customer)</label><textarea data-feedback-note maxlength="1000">'+esc(item.admin_note||'')+'</textarea></div><button data-feedback-save="'+esc(item.id)+'" class="primary">Save review</button></div>').join('')||'<div class="empty">No customer feedback has been submitted.</div>';
 }
 $('refreshMaintenanceBtn').addEventListener('click',loadAdminMaintenance);
+$('improvementReviewList').addEventListener('click',async e=>{
+ const button=e.target.closest('[data-improvement-save]');if(!button)return;
+ const card=button.closest('[data-improvement-card]');if(!card)return;
+ const reviewId=card.dataset.improvementCard,index=Number(card.dataset.recommendationIndex);
+ button.disabled=true;
+ try{
+  const payload={
+   status:card.querySelector('[data-improvement-status]').value,
+   code_branch:card.querySelector('[data-improvement-branch]').value.trim(),
+   pull_request_url:card.querySelector('[data-improvement-pr]').value.trim(),
+   test_evidence:card.querySelector('[data-improvement-evidence]').value.trim(),
+   admin_note:card.querySelector('[data-improvement-note]').value.trim()
+  };
+  const result=await api('/api/admin/improvements/'+encodeURIComponent(reviewId)+'/'+index,{method:'PATCH',body:JSON.stringify(payload)});
+  note('improvementAnalysisNotice',result.message);
+  await loadImprovementReviews();
+ }catch(err){note('improvementAnalysisNotice',err.message,true);}
+ finally{button.disabled=false;}
+});
 $('runImprovementAnalysisBtn').addEventListener('click',async()=>{
  const button=$('runImprovementAnalysisBtn');button.disabled=true;button.textContent='Analysing feedback…';
  try{
