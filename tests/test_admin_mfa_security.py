@@ -36,6 +36,11 @@ class AdminSecurityTest(unittest.TestCase):
         })
         self.mfa_key_patch.start()
         self.addCleanup(self.mfa_key_patch.stop)
+        # Tests in this class exercise the secure default even when a developer's
+        # local .env explicitly enables the password-only development bypass.
+        self.mfa_required_patch = patch("backend.app.ADMIN_MFA_REQUIRED", True)
+        self.mfa_required_patch.start()
+        self.addCleanup(self.mfa_required_patch.stop)
 
     def csrf(self, client):
         return client.get("/api/auth/csrf").json()["csrf_token"]
