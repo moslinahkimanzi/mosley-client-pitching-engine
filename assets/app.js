@@ -10,7 +10,7 @@ async function api(path,opts={}){const method=(opts.method||'GET').toUpperCase()
 function showAuth(){ $('app').classList.add('hide');$('auth').classList.remove('hide');$('mfaChallengeForm').classList.add('hide');$('authForm').classList.remove('hide');}
 function updateAdminNavigation(){const allowed=state.user?.is_admin===true;$('settingsNavGroup').classList.toggle('hide',!allowed);$('settingsNav').classList.toggle('hide',!allowed);}
 function showApp(){ $('auth').classList.add('hide');$('app').classList.remove('hide');$('signedEmail').textContent=state.user.email||'';updateAdminNavigation();}
-function page(name){if(['integrations','security','admin-maintenance'].includes(name)&&!state.user?.is_admin){toast('Settings are private and available only to the configured administrator.',true);name='overview';}document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id===name));document.querySelectorAll('[data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===name));if(name==='prospects')renderLeads();if(name==='studio')renderDrafts();if(name==='followups')renderFollowups();if(name==='proposals')renderProposals();if(name==='updates'){loadUpdates();loadMyFeedback();}if(name==='admin-maintenance')loadAdminMaintenance();}
+function page(name){if(['integrations','security','admin-maintenance','ai-improvement-centre'].includes(name)&&!state.user?.is_admin){toast('Settings are private and available only to the configured administrator.',true);name='overview';}document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id===name));document.querySelectorAll('[data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===name));if(name==='prospects')renderLeads();if(name==='studio')renderDrafts();if(name==='followups')renderFollowups();if(name==='proposals')renderProposals();if(name==='updates'){loadUpdates();loadMyFeedback();}if(name==='admin-maintenance')loadAdminMaintenance();if(name==='ai-improvement-centre')loadImprovementReviews();}
 document.querySelectorAll('[data-page]').forEach(b=>b.addEventListener('click',()=>page(b.dataset.page)));
 document.querySelectorAll('[data-go]').forEach(b=>b.addEventListener('click',()=>page(b.dataset.go)));
 function setAuthMode(mode){state.authMode=mode;$('loginTab').classList.toggle('active',mode==='login');$('registerTab').classList.toggle('active',mode==='register');$('authSubmit').textContent=mode==='login'?'Sign in securely':'Create secure account';$('authPassword').autocomplete=mode==='login'?'current-password':'new-password';$('authPassword').minLength=mode==='login'?1:12;$('authAdminBootstrapWrap').classList.toggle('hide',mode!=='register');$('authForm').classList.remove('hide');$('mfaChallengeForm').classList.add('hide');note('authNotice','');}
@@ -93,7 +93,7 @@ async function loadAdminMaintenance(){
   $('adminMfaSetupCard').classList.add('hide');$('adminMaintenanceContent').classList.remove('hide');
   if(!mfa.required)note('adminMfaNotice','Authenticator app is not required on this development server. Password-only access is active; do not expose this server publicly.');
   state.maintenance=await api('/api/admin/maintenance');renderAdminMaintenance();
-  await loadImprovementReviews();await loadSecurityGuardian();
+  await loadSecurityGuardian();
  }catch(e){note('adminFeedbackNotice','Administrator maintenance could not be loaded: '+e.message,true);}
 }
 async function loadSecurityGuardian(){
