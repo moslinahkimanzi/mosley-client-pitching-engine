@@ -12,6 +12,7 @@ import os
 import re
 import secrets
 import socket
+import smtplib
 import sqlite3
 import ssl
 import struct
@@ -253,6 +254,12 @@ def init_db():
             provider TEXT NOT NULL,encrypted_refresh_token TEXT NOT NULL,connected_at TEXT NOT NULL,
             PRIMARY KEY(user_id,provider)
         );
+        CREATE TABLE IF NOT EXISTS email_verification_tokens(
+            token_hash TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+            expires_at INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS customer_feedback(
             id TEXT PRIMARY KEY,
             user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -317,6 +324,7 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_leads_user_updated ON leads(user_id,updated_at);
         CREATE INDEX IF NOT EXISTS idx_drafts_user_created ON drafts(user_id,created_at);
         CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at);
+        CREATE INDEX IF NOT EXISTS idx_email_verification_expiry ON email_verification_tokens(expires_at);
         CREATE INDEX IF NOT EXISTS idx_followups_user_due ON followups(user_id,due_at,state);
         CREATE INDEX IF NOT EXISTS idx_proposals_user ON proposals(user_id,updated_at);
         """)
@@ -328,6 +336,8 @@ def init_db():
         add_column(c, "drafts", "gmail_draft_id", "TEXT")
         add_column(c, "integrations", "account_email", "TEXT")
         add_column(c, "customer_feedback", "ai_analysis_consent", "INTEGER NOT NULL DEFAULT 0")
+        add_column(c, "users", "email_verified", "INTEGER NOT NULL DEFAULT 1")
+        add_column(c, "users", "email_verified_at", "TEXT")
         add_column(c, "users", "admin_totp_secret", "TEXT")
         add_column(c, "users", "admin_totp_pending_secret", "TEXT")
         add_column(c, "users", "admin_totp_pending_expires", "INTEGER")
@@ -448,13 +458,15 @@ def current_user(request: Request):
     if not token:
         raise HTTPException(401, "Sign in required")
     with db() as c:
-        row = c.execute("""SELECT users.id,users.email,
+        row = c.execute("""SELECT users.id,users.email,users.email_verified,
             CASE WHEN users.admin_totp_secret IS NULL THEN 0 ELSE 1 END AS admin_mfa_enabled
             FROM sessions JOIN users ON users.id=sessions.user_id
             WHERE token_hash=? AND expires_at>?""",
             (token_hash(token), int(time.time()))).fetchone()
     if not row:
         raise HTTPException(401, "Session expired; sign in again")
+    if not row["email_verified"]:
+        raise HTTPException(403, "Verify your email address before using MCAS. Check your inbox or request a new verification link.")
     return dict(row)
 
 def user_is_admin(user: dict) -> bool:
@@ -674,12 +686,113 @@ def validate_email(email: Optional[str]):
     if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
         raise HTTPException(422, "Enter a valid email address")
 
+
+EMAIL_VERIFICATION_TTL_SECONDS = 24 * 60 * 60
+
+
+def email_delivery_configured() -> bool:
+    host = os.getenv("MCAS_EMAIL_SMTP_HOST", "").strip()
+    sender = os.getenv("MCAS_EMAIL_FROM", "").strip()
+    public_base = os.getenv("MCAS_PUBLIC_BASE_URL", "").strip()
+    username = os.getenv("MCAS_EMAIL_SMTP_USERNAME", "").strip()
+    password = os.getenv("MCAS_EMAIL_SMTP_PASSWORD", "").strip()
+    if not host or not sender or bool(username) != bool(password):
+        return False
+    if IS_PROD and not public_base:
+        return False
+    if public_base:
+        parsed = urllib.parse.urlsplit(public_base)
+        if (parsed.scheme not in {"http", "https"} or not parsed.netloc or
+                parsed.username or parsed.password or parsed.query or parsed.fragment or
+                parsed.path not in {"", "/"}):
+            return False
+        if IS_PROD and parsed.scheme != "https":
+            return False
+    if IS_PROD and not public_base:
+        return False
+    try:
+        port = int(os.getenv("MCAS_EMAIL_SMTP_PORT", "587"))
+        if port < 1 or port > 65535:
+            return False
+    except ValueError:
+        return False
+    return True
+
+
+def create_email_verification_token(c, user_id: str) -> str:
+    token = secrets.token_urlsafe(32)
+    c.execute("DELETE FROM email_verification_tokens WHERE expires_at<=?", (int(time.time()),))
+    c.execute("DELETE FROM email_verification_tokens WHERE user_id=?", (user_id,))
+    c.execute(
+        "INSERT INTO email_verification_tokens(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)",
+        (token_hash(token), user_id, int(time.time()) + EMAIL_VERIFICATION_TTL_SECONDS, now()),
+    )
+    return token
+
+
+def email_verification_url(token: str, request: Request) -> str:
+    base = os.getenv("MCAS_PUBLIC_BASE_URL", "").strip()
+    if not base:
+        if IS_PROD:
+            raise HTTPException(503, "Set MCAS_PUBLIC_BASE_URL to the public HTTPS address before sending verification emails.")
+        base = str(request.base_url).rstrip("/")
+    parsed = urllib.parse.urlsplit(base)
+    if (parsed.scheme not in {"http", "https"} or not parsed.netloc or
+            parsed.username or parsed.password or parsed.query or parsed.fragment or
+            parsed.path not in {"", "/"} or (IS_PROD and parsed.scheme != "https")):
+        raise HTTPException(503, "MCAS_PUBLIC_BASE_URL must be an application origin; production must use HTTPS.")
+    return base.rstrip("/") + "/api/auth/verify-email?" + urllib.parse.urlencode({"token": token})
+
+
+def send_email_verification_message(recipient: str, verification_url: str) -> bool:
+    if not email_delivery_configured():
+        return False
+    message = EmailMessage()
+    from_name = os.getenv("MCAS_EMAIL_FROM_NAME", "MCAS").strip() or "MCAS"
+    sender = os.getenv("MCAS_EMAIL_FROM", "").strip()
+    message["From"] = f"{from_name} <{sender}>"
+    message["To"] = recipient
+    message["Subject"] = "Verify your MCAS email address"
+    message.set_content(
+        "Welcome to Mosley Client Acquisition System (MCAS).\n\n"
+        "Confirm that this is your email address by opening the link below. "
+        "The link expires in 24 hours and can only be used once.\n\n"
+        + verification_url + "\n\n"
+        "If you did not create an MCAS account, you can ignore this message."
+    )
+    host = os.getenv("MCAS_EMAIL_SMTP_HOST", "").strip()
+    port = int(os.getenv("MCAS_EMAIL_SMTP_PORT", "587"))
+    username = os.getenv("MCAS_EMAIL_SMTP_USERNAME", "").strip()
+    password = os.getenv("MCAS_EMAIL_SMTP_PASSWORD", "").strip()
+    use_ssl = os.getenv("MCAS_EMAIL_SMTP_USE_SSL", "false").strip().lower() == "true"
+    use_starttls = os.getenv("MCAS_EMAIL_SMTP_STARTTLS", "true").strip().lower() == "true"
+    timeout = 15
+    try:
+        smtp_class = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP
+        smtp_kwargs = {"host": host, "port": port, "timeout": timeout}
+        if use_ssl:
+            smtp_kwargs["context"] = ssl.create_default_context()
+        with smtp_class(**smtp_kwargs) as server:
+            if not use_ssl and use_starttls:
+                server.starttls(context=ssl.create_default_context())
+                server.ehlo()
+            if username:
+                server.login(username, password)
+            server.send_message(message)
+        return True
+    except (OSError, smtplib.SMTPException):
+        SECURITY_LOGGER.exception("MCAS account-verification email delivery failed")
+        return False
+
+
 @app.post("/api/auth/register", status_code=201)
-def register(payload: RegisterIn, response: Response):
+def register(payload: RegisterIn, request: Request):
     email = payload.email.strip().lower()
     validate_email(email)
     if len(set(payload.password)) < 5:
         raise HTTPException(422, "Choose a stronger password with more varied characters")
+    if IS_PROD and not email_delivery_configured():
+        raise HTTPException(503, "Account email verification is not configured. The operator must configure the MCAS SMTP sender and public HTTPS URL.")
     if is_configured_admin_email(email):
         bootstrap = os.getenv("MCAS_ADMIN_BOOTSTRAP_TOKEN", "")
         if not bootstrap or len(bootstrap) < 32:
@@ -687,19 +800,104 @@ def register(payload: RegisterIn, response: Response):
         if not hmac.compare_digest(bootstrap, payload.admin_bootstrap_token):
             raise HTTPException(403, "A valid administrator bootstrap code is required to create this account.")
     uid = secrets.token_urlsafe(18)
-    session = secrets.token_urlsafe(36)
     try:
         with db() as c:
-            c.execute("INSERT INTO users(id,email,password_hash,created_at) VALUES(?,?,?,?)",
-                      (uid, email, password_hash(payload.password), now()))
-            c.execute("INSERT INTO sessions VALUES(?,?,?)", (token_hash(session), uid, int(time.time()) + SESSION_SECONDS))
-            audit(c, uid, "account.created")
+            c.execute(
+                "INSERT INTO users(id,email,password_hash,created_at,email_verified) VALUES(?,?,?,?,0)",
+                (uid, email, password_hash(payload.password), now()),
+            )
+            verification_token = create_email_verification_token(c, uid)
+            audit(c, uid, "account.created_unverified")
     except sqlite3.IntegrityError:
         raise HTTPException(409, "An account with this email already exists")
-    response.set_cookie(COOKIE, session, max_age=SESSION_SECONDS, httponly=True,
-                        secure=IS_PROD, samesite="lax", path="/")
-    set_csrf(response)
-    return {"id": uid, "email": email}
+    link = email_verification_url(verification_token, request)
+    sent = send_email_verification_message(email, link)
+    result = {
+        "id": uid,
+        "email": email,
+        "email_verification_required": True,
+        "email_sent": sent,
+        "message": "Account created. Verify your email address before signing in. The verification link expires in 24 hours.",
+    }
+    if not sent and not IS_PROD:
+        # A local-only convenience so developers can test without a configured SMTP service.
+        result["development_verification_url"] = link
+    if not sent and IS_PROD:
+        result["message"] = "Account created, but the verification email could not be delivered. Use Resend verification email or contact support."
+    return result
+
+@app.get("/api/auth/verify-email")
+def email_verification_landing(token: str = Query(min_length=40, max_length=128)):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{40,128}", token):
+        raise HTTPException(400, "The verification link is invalid or expired.")
+    # GET only opens the confirmation screen. A deliberate POST confirms the address,
+    # so link-preview scanners do not consume the one-time token automatically.
+    return RedirectResponse("/?verify_token=" + urllib.parse.quote(token, safe=""), status_code=303)
+
+
+class EmailAddressIn(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+
+
+class EmailVerificationConfirmIn(BaseModel):
+    token: str = Field(min_length=40, max_length=128)
+
+
+@app.post("/api/auth/verify-email/confirm")
+def confirm_email_verification(payload: EmailVerificationConfirmIn, request: Request):
+    ip = request.client.host if request.client else "unknown"
+    ip_tag = hashlib.sha256(ip.encode()).hexdigest()[:24]
+    if consume_rate_limits(["email-verify-confirm:" + ip_tag], 12, 900):
+        raise HTTPException(429, "Too many verification attempts. Try again later.")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{40,128}", payload.token):
+        raise HTTPException(400, "The verification link is invalid or expired.")
+    with db() as c:
+        row = c.execute(
+            """SELECT t.user_id,u.email,u.email_verified FROM email_verification_tokens t
+               JOIN users u ON u.id=t.user_id WHERE t.token_hash=? AND t.expires_at>?""",
+            (token_hash(payload.token), int(time.time())),
+        ).fetchone()
+        if not row:
+            raise HTTPException(400, "The verification link is invalid, expired or already used. Request a new link.")
+        c.execute(
+            "UPDATE users SET email_verified=1,email_verified_at=? WHERE id=?",
+            (now(), row["user_id"]),
+        )
+        c.execute("DELETE FROM email_verification_tokens WHERE user_id=?", (row["user_id"],))
+        audit(c, row["user_id"], "account.email_verified")
+    return {"verified": True, "email": row["email"], "message": "Email address verified. You can now sign in to MCAS."}
+
+
+@app.post("/api/auth/resend-verification")
+def resend_email_verification(payload: EmailAddressIn, request: Request):
+    email = payload.email.strip().lower()
+    validate_email(email)
+    if IS_PROD and not email_delivery_configured():
+        raise HTTPException(503, "Email delivery is temporarily unavailable. Please contact support.")
+    ip = request.client.host if request.client else "unknown"
+    ip_tag = hashlib.sha256(ip.encode()).hexdigest()[:24]
+    email_tag = hashlib.sha256(email.encode()).hexdigest()
+    limited_ip = consume_rate_limits(["email-verify-resend-ip:" + ip_tag], 8, 3600)
+    limited_email = consume_rate_limits(["email-verify-resend-email:" + email_tag], 3, 3600)
+    if limited_ip or limited_email:
+        raise HTTPException(429, "Too many verification emails requested. Try again later.")
+    result = {"message": "If an unverified account exists for that address, a new verification email has been sent."}
+    with db() as c:
+        user = c.execute("SELECT id,email,email_verified FROM users WHERE email=?", (email,)).fetchone()
+        if user and not user["email_verified"]:
+            token = create_email_verification_token(c, user["id"])
+            audit(c, user["id"], "account.email_verification_resent")
+        else:
+            token = None
+    if token:
+        link = email_verification_url(token, request)
+        sent = send_email_verification_message(email, link)
+        if not sent and not IS_PROD:
+            result["development_verification_url"] = link
+        elif not sent:
+            SECURITY_LOGGER.warning("MCAS account-verification resend delivery failed")
+    return result
+
 
 @app.post("/api/auth/login")
 def login(payload: LoginIn, response: Response, request: Request):
@@ -715,6 +913,8 @@ def login(payload: LoginIn, response: Response, request: Request):
         if not row or not verify_password(payload.password, row["password_hash"]):
             log_security_event("auth.login_failed", request)
             raise HTTPException(401, "Email or password is incorrect")
+        if not row["email_verified"]:
+            raise HTTPException(403, "Verify your email address before signing in. Check your inbox or request a new verification link.")
         if ADMIN_MFA_REQUIRED and is_configured_admin_email(row["email"]) and row["admin_totp_secret"]:
             challenge = secrets.token_urlsafe(32)
             c.execute("DELETE FROM mfa_login_challenges WHERE expires_at<?", (int(time.time()),))
@@ -815,7 +1015,7 @@ def logout(request: Request, response: Response):
 
 @app.get("/api/auth/me")
 def me(user=Depends(current_user)):
-    return {**user, "is_admin": user_is_admin(user)}
+    return {**user, "email_verified": bool(user.get("email_verified")), "is_admin": user_is_admin(user)}
 
 @app.get("/api/leads")
 def list_leads(user=Depends(current_user)):
