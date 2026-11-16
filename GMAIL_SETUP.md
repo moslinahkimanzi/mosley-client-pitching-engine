@@ -4,7 +4,8 @@ MCAS uses one Google OAuth web application owned by the MCAS operator. Each MCAS
 
 ## What MCAS does
 
-- Requests only the Gmail `gmail.compose` OAuth scope.
+- Requests OpenID Connect `openid email` so MCAS can verify the Google account's email, plus Gmail `gmail.compose` to create drafts.
+- Requires the verified Google email to match the email used to sign in to MCAS (case-insensitive comparison). The MCAS email is also sent as Google's `login_hint` to preselect the matching account.
 - Creates a Gmail draft from an email draft that the customer has reviewed and saved.
 - Does not list, search, read, monitor or delete incoming mail.
 - Has no Gmail send endpoint and does not send messages.
@@ -20,9 +21,10 @@ Important Google permission note: Google classifies `gmail.compose` as a **restr
 3. Configure the Google Auth Platform consent screen. Use External for testing with personal Google accounts, add the required app name, support email, developer contact and privacy-policy details.
 4. While the app is in Testing, add each tester's Google account to the Test users list. Google currently limits test users and test-mode refresh-token lifetimes; do not treat this as a public production setup.
 5. Create an OAuth client ID of type **Web application**.
-6. For local development, add this exact authorised redirect URI:
+6. In **Data Access**, ensure the consent configuration includes `openid`, `email`, and `https://www.googleapis.com/auth/gmail.compose`.
+7. For local development, add this exact authorised redirect URI:
    `http://localhost:8000/api/integrations/gmail/callback`
-7. Copy the OAuth Client ID and Client Secret into your local `.env` file only. Do not commit or paste them into chat.
+8. Copy the OAuth Client ID and Client Secret into your local `.env` file only. Do not commit or paste them into chat.
 
 Set these server-side variables:
 
