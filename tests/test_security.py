@@ -86,6 +86,10 @@ class ApiSecurityTest(unittest.TestCase):
         confirmed = client.post("/api/auth/verify-email/confirm", json={"token": raw_token},
             headers={"X-CSRF-Token": self.csrf(client)})
         self.assertEqual(confirmed.status_code, 200, confirmed.text)
+        login = client.post("/api/auth/login",
+            json={"email": email, "password": "UniqueStrongPassphrase!2026"},
+            headers={"X-CSRF-Token": self.csrf(client)})
+        self.assertEqual(login.status_code, 200, login.text)
         return email
 
     def test_authentication_required_for_private_leads(self):
