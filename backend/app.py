@@ -287,6 +287,18 @@ def init_db():
             feedback_id TEXT NOT NULL REFERENCES customer_feedback(id) ON DELETE CASCADE,
             PRIMARY KEY(review_id,feedback_id)
         );
+        CREATE TABLE IF NOT EXISTS improvement_decisions(
+            review_id TEXT NOT NULL REFERENCES improvement_reviews(id) ON DELETE CASCADE,
+            recommendation_index INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending_review',
+            admin_note TEXT NOT NULL DEFAULT '',
+            test_evidence TEXT NOT NULL DEFAULT '',
+            code_branch TEXT NOT NULL DEFAULT '',
+            pull_request_url TEXT NOT NULL DEFAULT '',
+            updated_by TEXT NOT NULL REFERENCES users(id),
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(review_id,recommendation_index)
+        );
         CREATE INDEX IF NOT EXISTS idx_feedback_user_created ON customer_feedback(user_id,created_at);
         CREATE INDEX IF NOT EXISTS idx_feedback_status_created ON customer_feedback(status,created_at);
         CREATE INDEX IF NOT EXISTS idx_leads_user_updated ON leads(user_id,updated_at);
@@ -600,6 +612,17 @@ class FeedbackIn(BaseModel):
 class FeedbackReviewIn(BaseModel):
     status: Literal["received", "reviewing", "planned", "in_progress", "completed", "declined"]
     admin_note: str = Field(default="", max_length=1000)
+
+class ImprovementDecisionIn(BaseModel):
+    status: Literal[
+        "pending_review", "approved_for_development", "in_development",
+        "testing", "ready_for_release", "approved_for_release",
+        "implemented", "rejected", "rolled_back"
+    ]
+    admin_note: str = Field(default="", max_length=2000)
+    test_evidence: str = Field(default="", max_length=5000)
+    code_branch: str = Field(default="", max_length=200)
+    pull_request_url: str = Field(default="", max_length=500)
 
 @app.get("/")
 def home():
@@ -2354,12 +2377,104 @@ def list_improvement_reviews(user=Depends(current_user)):
             """SELECT id,summary,recommendations_json,feedback_count,created_at
                FROM improvement_reviews ORDER BY created_at DESC LIMIT 20"""
         ).fetchall()
+        decisions = c.execute(
+            """SELECT review_id,recommendation_index,status,admin_note,test_evidence,
+                      code_branch,pull_request_url,updated_at
+               FROM improvement_decisions"""
+        ).fetchall()
+    decision_map = {
+        (row["review_id"], int(row["recommendation_index"])): {
+            "status": row["status"], "admin_note": row["admin_note"],
+            "test_evidence": row["test_evidence"], "code_branch": row["code_branch"],
+            "pull_request_url": row["pull_request_url"], "updated_at": row["updated_at"]
+        } for row in decisions
+    }
     output = []
     for row in rows:
         item = dict(row)
-        item["recommendations"] = json.loads(item.pop("recommendations_json"))
+        recommendations = json.loads(item.pop("recommendations_json"))
+        for index, recommendation in enumerate(recommendations):
+            recommendation["decision"] = decision_map.get(
+                (item["id"], index),
+                {"status": "pending_review", "admin_note": "", "test_evidence": "",
+                 "code_branch": "", "pull_request_url": "", "updated_at": ""}
+            )
+        item["recommendations"] = recommendations
         output.append(item)
     return output
+
+
+@app.patch("/api/admin/improvements/{review_id}/{recommendation_index}")
+def update_improvement_decision(
+    review_id: str, recommendation_index: int, payload: ImprovementDecisionIn,
+    user=Depends(current_user)
+):
+    """Record an administrator's staged review; never edits or deploys application code."""
+    require_admin(user)
+    with db() as c:
+        review = c.execute(
+            "SELECT recommendations_json FROM improvement_reviews WHERE id=?", (review_id,)
+        ).fetchone()
+        if not review:
+            raise HTTPException(404, "Improvement review not found.")
+        recommendations = json.loads(review["recommendations_json"])
+        if recommendation_index < 0 or recommendation_index >= len(recommendations):
+            raise HTTPException(404, "Improvement recommendation not found.")
+        existing = c.execute(
+            "SELECT status FROM improvement_decisions WHERE review_id=? AND recommendation_index=?",
+            (review_id, recommendation_index)
+        ).fetchone()
+        previous = existing["status"] if existing else "pending_review"
+        target = payload.status
+        allowed = {
+            "pending_review": {"approved_for_development", "rejected"},
+            "approved_for_development": {"in_development", "rejected"},
+            "in_development": {"in_development", "testing", "rejected"},
+            "testing": {"testing", "in_development", "ready_for_release", "rejected"},
+            "ready_for_release": {"testing", "approved_for_release", "rejected"},
+            "approved_for_release": {"implemented", "rolled_back"},
+            "implemented": {"rolled_back"},
+            "rejected": set(),
+            "rolled_back": set(),
+        }
+        if target != previous and target not in allowed.get(previous, set()):
+            raise HTTPException(409, "Invalid improvement-review transition: " + previous + " → " + target + ".")
+        branch_name = payload.code_branch.strip()
+        pr_url = payload.pull_request_url.strip()
+        evidence = payload.test_evidence.strip()
+        if target in {"testing", "ready_for_release", "approved_for_release", "implemented"} and not branch_name:
+            raise HTTPException(422, "Record the isolated development branch before entering testing or release stages.")
+        if target in {"ready_for_release", "approved_for_release", "implemented"}:
+            parsed = urllib.parse.urlparse(pr_url)
+            if parsed.scheme != "https" or parsed.netloc.lower() not in {"github.com", "www.github.com"} or not re.fullmatch(r"/[^/]+/[^/]+/pull/\d+/?", parsed.path):
+                raise HTTPException(422, "A valid HTTPS GitHub pull-request URL is required before release approval.")
+            if len(evidence) < 30:
+                raise HTTPException(422, "Add at least 30 characters of test evidence before release approval.")
+        if target == "approved_for_release" and previous != "ready_for_release":
+            raise HTTPException(409, "The recommendation must be marked ready_for_release before final release approval.")
+        if target == "implemented" and previous != "approved_for_release":
+            raise HTTPException(409, "Only a separately approved release can be marked implemented.")
+        if target == "rolled_back" and previous not in {"approved_for_release", "implemented"}:
+            raise HTTPException(409, "Only an approved or implemented change can be marked rolled back.")
+        stamp = now()
+        c.execute(
+            """INSERT INTO improvement_decisions
+               (review_id,recommendation_index,status,admin_note,test_evidence,code_branch,
+                pull_request_url,updated_by,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(review_id,recommendation_index) DO UPDATE SET
+                 status=excluded.status,admin_note=excluded.admin_note,
+                 test_evidence=excluded.test_evidence,code_branch=excluded.code_branch,
+                 pull_request_url=excluded.pull_request_url,updated_by=excluded.updated_by,
+                 updated_at=excluded.updated_at""",
+            (review_id, recommendation_index, target, payload.admin_note.strip(),
+             evidence, branch_name, pr_url, user["id"], stamp)
+        )
+        audit(c, user["id"], "improvements.decision_updated",
+              {"review_id": review_id, "recommendation_index": recommendation_index,
+               "from": previous, "to": target})
+    return {"ok": True, "status": target, "updated_at": stamp,
+            "message": "Review stage saved. MCAS has not modified, merged or deployed code."}
 
 
 @app.post("/api/admin/improvements/analyze", status_code=201)
