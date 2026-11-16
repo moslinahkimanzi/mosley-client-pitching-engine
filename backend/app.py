@@ -710,6 +710,10 @@ def email_delivery_configured() -> bool:
             return False
     if IS_PROD and not public_base:
         return False
+    use_ssl = os.getenv("MCAS_EMAIL_SMTP_USE_SSL", "false").strip().lower() == "true"
+    use_starttls = os.getenv("MCAS_EMAIL_SMTP_STARTTLS", "true").strip().lower() == "true"
+    if IS_PROD and not (use_ssl or use_starttls):
+        return False
     try:
         port = int(os.getenv("MCAS_EMAIL_SMTP_PORT", "587"))
         if port < 1 or port > 65535:
@@ -832,7 +836,10 @@ def email_verification_landing(token: str = Query(min_length=40, max_length=128)
         raise HTTPException(400, "The verification link is invalid or expired.")
     # GET only opens the confirmation screen. A deliberate POST confirms the address,
     # so link-preview scanners do not consume the one-time token automatically.
-    return RedirectResponse("/?verify_token=" + urllib.parse.quote(token, safe=""), status_code=303)
+    response = RedirectResponse("/?verify_token=" + urllib.parse.quote(token, safe=""), status_code=303)
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 class EmailAddressIn(BaseModel):
