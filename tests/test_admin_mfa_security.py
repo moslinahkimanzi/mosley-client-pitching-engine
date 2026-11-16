@@ -60,6 +60,11 @@ class AdminSecurityTest(unittest.TestCase):
                     headers={"X-CSRF-Token": self.csrf(client)})
                 if verified.status_code != 200:
                     raise AssertionError(verified.text)
+                login = client.post("/api/auth/login",
+                    json={"email": email, "password": PASSWORD},
+                    headers={"X-CSRF-Token": self.csrf(client)})
+                if login.status_code != 200:
+                    raise AssertionError(login.text)
         return response
 
     def enable_test_mfa(self, email):
