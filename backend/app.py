@@ -34,6 +34,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
 
+from backend.advanced_audit import analyze_document
+
 try:
     from cryptography.fernet import Fernet, InvalidToken
 except Exception:
@@ -539,6 +541,8 @@ async def security_middleware(request: Request, call_next):
         category, cap = "search", 5
     elif path == "/api/audit-website":
         category, cap = "website", 10
+    elif path == "/api/competitor-intelligence":
+        category, cap = "competitor", 5
     elif path.endswith("/gmail") and request.method == "POST":
         category, cap = "gmail", 8
     else:
@@ -630,6 +634,12 @@ class ResearchRunIn(BaseModel):
     industry: Literal["any", "restaurant", "salon", "retail", "professional", "hotel", "healthcare", "education"] = "any"
     keywords: str = Field(default="", max_length=120)
     max_results: int = Field(default=6, ge=1, le=12)
+
+class CompetitorIn(BaseModel):
+    lead_id: str = Field(min_length=1, max_length=100)
+    industry: Literal["restaurant", "salon", "retail", "professional", "hotel", "healthcare", "education"] = "restaurant"
+    max_results: int = Field(default=5, ge=2, le=8)
+
 
 class AIIn(BaseModel):
     lead_id: Optional[str] = None
@@ -1309,10 +1319,12 @@ def safe_site_fetch(initial_url):
             has_h1 = bool(re.search(r"<h1\b", html, re.I))
             has_form = bool(re.search(r"<form\b", html, re.I))
             title = re.sub(r"\s+", " ", match.group(1)).strip()[:180] if match else None
+            advanced = analyze_document(html, headers, url)
             return {"url": url, "http_status": status, "content_type": ctype, "title": title,
                     "has_viewport_meta": viewport, "has_meta_description": description,
                     "has_h1": has_h1, "has_form": has_form,
-                    "note": "Lightweight public-page check only; not a full SEO, accessibility, security or conversion audit."}
+                    "advanced_audit": advanced,
+                    "note": "Bounded static HTML and response-header audit. Not a browser performance test or penetration test."}
         except HTTPException:
             conn.close()
             raise
@@ -1877,10 +1889,97 @@ def create_builder_prompt(lead_id: str, user=Depends(current_user)):
 @app.post("/api/audit-website")
 def audit_website(payload: dict, user=Depends(current_user)):
     raw = str(payload.get("url", ""))[:2048].strip()
+    if not raw:
+        raise HTTPException(422, "Provide a public website URL.")
     result = safe_site_fetch(raw)
     result["checked_at"] = now()
     with db() as c:
-        audit(c, user["id"], "website.audit", {"url": result.get("url"), "status": result.get("http_status")})
+        audit(c, user["id"], "website.audit", {
+            "url": result.get("url"), "status": result.get("http_status"),
+            "overall_score": (result.get("advanced_audit") or {}).get("overall_score"),
+        })
+    return result
+
+
+@app.post("/api/competitor-intelligence")
+def competitor_intelligence(payload: CompetitorIn, user=Depends(current_user)):
+    with db() as c:
+        lead = owned_lead(c, payload.lead_id, user["id"])
+    market = str(lead["market"] or "").strip()
+    if not market:
+        raise HTTPException(422, "The selected prospect needs a market/location before competitor research.")
+    category = payload.industry.replace("_", " ")
+    query = category + " businesses in " + market
+    data = serper_request("places", {"q": query, "gl": os.getenv("SERPER_GL", "ke"), "hl": os.getenv("SERPER_HL", "en")})
+    places = data.get("places") or []
+    target_url = str(lead["website"] or "").strip()
+    if target_url and not re.match(r"^https?://", target_url, re.I):
+        target_url = "https://" + target_url
+    target_host = (urllib.parse.urlparse(target_url).hostname or "").lower().removeprefix("www.")
+    target_audit = {}
+    target_website_state = "not_listed"
+    if target_url:
+        try:
+            target_audit = safe_site_fetch(target_url)
+            target_code = int(target_audit.get("http_status") or 0)
+            target_website_state = "responding" if 200 <= target_code < 400 else ("restricted" if target_code in {401,403,429} else "needs_review")
+        except HTTPException:
+            target_website_state = "needs_review"
+    competitors = []
+    seen = set()
+    for place in places:
+        if not isinstance(place, dict) or len(competitors) >= payload.max_results:
+            continue
+        name = str(place.get("title") or place.get("name") or "").strip()
+        if not name or name.casefold() == str(lead["name"]).casefold() or name.casefold() in seen:
+            continue
+        seen.add(name.casefold())
+        raw_website = place.get("website") or place.get("websiteUrl")
+        website = str(raw_website).strip() if raw_website else ""
+        if website and not re.match(r"^https?://", website, re.I):
+            website = "https://" + website
+        audit_result = {}
+        website_state = "not_listed"
+        if website:
+            try:
+                audit_result = safe_site_fetch(website)
+                code = int(audit_result.get("http_status") or 0)
+                website_state = "responding" if 200 <= code < 400 else ("restricted" if code in {401,403,429} else "needs_review")
+            except HTTPException:
+                website_state = "needs_review"
+        competitor_host = (urllib.parse.urlparse(website).hostname or "").lower().removeprefix("www.")
+        competitors.append({
+            "name": name, "category": place.get("category") or place.get("type"),
+            "address": place.get("address"), "website": website or None,
+            "website_state": website_state,
+            "same_domain_as_target": bool(target_host and competitor_host and target_host == competitor_host),
+            "rating": place.get("rating"), "rating_count": place.get("ratingCount"),
+            "source": "Serper Places", "website_audit": audit_result.get("advanced_audit"),
+            "source_url": serper_source_url(place, name, str(place.get("address") or "")),
+        })
+    result = {
+        "target": {"lead_id": payload.lead_id, "name": lead["name"], "market": market, "website": lead["website"],
+                   "website_state": target_website_state,
+                   "website_audit": target_audit.get("advanced_audit")},
+        "query": query, "competitors": competitors,
+        "comparison": {
+            "competitors_found": len(competitors),
+            "with_listed_websites": sum(1 for x in competitors if x["website"]),
+            "without_listed_websites": sum(1 for x in competitors if not x["website"]),
+            "responding_websites": sum(1 for x in competitors if x["website_state"] == "responding"),
+        },
+        "limitations": [
+            "Search-provider place listings are candidate competitors, not proof of direct commercial competition.",
+            "Ratings and business details may be incomplete or stale; verify them independently.",
+            "Website audits are bounded static-page observations, not full browser, SEO-ranking, malware or penetration tests.",
+            "No prospect was contacted and no email was sent.",
+        ],
+        "checked_at": now(),
+    }
+    with db() as c:
+        audit(c, user["id"], "competitor.intelligence", {
+            "lead_id": payload.lead_id, "industry": payload.industry, "count": len(competitors),
+        })
     return result
 
 def assistant_system_prompt(task: str) -> str:
@@ -2671,8 +2770,16 @@ def admin_security_status(user=Depends(current_user)):
          "detail": "MCAS does not encrypt its SQLite database file. Configure encrypted storage or a managed database with encryption at rest."},
         {"name": "Encrypted backups and restore test", "status": "external_action",
          "detail": "Configure encrypted off-site backups and regularly verify a restore with the hosting provider."},
-        {"name": "Customer email verification", "status": "not_implemented",
-         "detail": "Customer registration does not verify email ownership in this release."},
+        {"name": "Customer email verification", "status": "configured",
+         "detail": "New registrations require a single-use, expiring email verification token; legacy accounts were migrated as verified."},
+        {"name": "Customer MFA", "status": "not_implemented",
+         "detail": "Authenticator MFA is enforced for configured administrators only; customer accounts do not yet have MFA."},
+        {"name": "Account recovery", "status": "not_implemented",
+         "detail": "A secure self-service password reset and recovery workflow is not implemented yet."},
+        {"name": "Website audit scope", "status": "limited",
+         "detail": "Static HTML and response-header observations only. No browser performance, malware, vulnerability exploitation or penetration testing."},
+        {"name": "Competitor intelligence", "status": "limited",
+         "detail": "Candidate local businesses are sourced from Serper Places; direct competitor status is not independently verified."},
         {"name": "GitHub branch protection", "status": "external_action",
          "detail": "Enable required CI and CodeQL checks and restrict direct pushes to main in GitHub repository settings."},
     ]
