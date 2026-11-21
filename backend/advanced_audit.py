@@ -76,7 +76,7 @@ class _PageParser(HTMLParser):
 
 
 def _score(checks):
-    passed = sum(1 for item in checks if item["status"] == "pass")
+    passed = sum(1 for item in checks if item["passed"])
     applicable = len(checks)
     return round((passed / applicable) * 100) if applicable else 0
 
@@ -157,17 +157,23 @@ def analyze_document(document, response_headers, page_url):
         "trust": trust_checks,
         "transport_security_headers": security_checks,
     }
+    categories = {
+        name: [{"name": item[0], "passed": bool(item[1]), "evidence": item[2]} for item in checks]
+        for name, checks in categories.items()
+    }
     scores = {name: _score(checks) for name, checks in categories.items()}
     findings = []
     for category, checks in categories.items():
         for item in checks:
-            if item["status"] == "fail":
+            if not item["passed"]:
                 findings.append({"category": category, "title": item["name"], "evidence": item["evidence"],
-                                 "priority": "high" if category == "transport_security_headers" and item["name"] in {"HTTPS transport", "Content Security Policy"} else "medium"})
-    # Avoid declaring absent headers or HTML markers to be exploitable vulnerabilities.
+                                 "priority": "high" if category == "transport_security_headers" and item["name"] in {"HTTPS transport", "Content Security Policy"} else "medium",
+                                 "status": "review"})
+    # Absence of a header or HTML marker is a review item, not proof of exploitability.
     for group in categories.values():
         for item in group:
-            item["status"] = "pass" if item["status"] == "pass" else "review"
+            item["status"] = "pass" if item["passed"] else "review"
+            del item["passed"]
     return {
         "scores": scores,
         "overall_score": round(sum(scores.values()) / len(scores)),
