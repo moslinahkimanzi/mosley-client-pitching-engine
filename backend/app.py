@@ -1912,12 +1912,15 @@ def competitor_intelligence(payload: CompetitorIn, user=Depends(current_user)):
     query = category + " businesses in " + market
     data = serper_request("places", {"q": query, "gl": os.getenv("SERPER_GL", "ke"), "hl": os.getenv("SERPER_HL", "en")})
     places = data.get("places") or []
-    target_host = (urllib.parse.urlparse(lead["website"] or "").hostname or "").lower().removeprefix("www.")
+    target_url = str(lead["website"] or "").strip()
+    if target_url and not re.match(r"^https?://", target_url, re.I):
+        target_url = "https://" + target_url
+    target_host = (urllib.parse.urlparse(target_url).hostname or "").lower().removeprefix("www.")
     target_audit = {}
     target_website_state = "not_listed"
-    if lead["website"]:
+    if target_url:
         try:
-            target_audit = safe_site_fetch(str(lead["website"]))
+            target_audit = safe_site_fetch(target_url)
             target_code = int(target_audit.get("http_status") or 0)
             target_website_state = "responding" if 200 <= target_code < 400 else ("restricted" if target_code in {401,403,429} else "needs_review")
         except HTTPException:
