@@ -1913,6 +1913,15 @@ def competitor_intelligence(payload: CompetitorIn, user=Depends(current_user)):
     data = serper_request("places", {"q": query, "gl": os.getenv("SERPER_GL", "ke"), "hl": os.getenv("SERPER_HL", "en")})
     places = data.get("places") or []
     target_host = (urllib.parse.urlparse(lead["website"] or "").hostname or "").lower().removeprefix("www.")
+    target_audit = {}
+    target_website_state = "not_listed"
+    if lead["website"]:
+        try:
+            target_audit = safe_site_fetch(str(lead["website"]))
+            target_code = int(target_audit.get("http_status") or 0)
+            target_website_state = "responding" if 200 <= target_code < 400 else ("restricted" if target_code in {401,403,429} else "needs_review")
+        except HTTPException:
+            target_website_state = "needs_review"
     competitors = []
     seen = set()
     for place in places:
@@ -1946,7 +1955,9 @@ def competitor_intelligence(payload: CompetitorIn, user=Depends(current_user)):
             "source_url": serper_source_url(place, name, str(place.get("address") or "")),
         })
     result = {
-        "target": {"lead_id": payload.lead_id, "name": lead["name"], "market": market, "website": lead["website"]},
+        "target": {"lead_id": payload.lead_id, "name": lead["name"], "market": market, "website": lead["website"],
+                   "website_state": target_website_state,
+                   "website_audit": target_audit.get("advanced_audit")},
         "query": query, "competitors": competitors,
         "comparison": {
             "competitors_found": len(competitors),
