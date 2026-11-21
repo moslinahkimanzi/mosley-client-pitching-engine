@@ -288,7 +288,7 @@ function renderMetrics(){const m=state.metrics;$('mLeads').textContent=m.leads||
 $('recentLeads').innerHTML=state.leads.slice(0,5).map(l=>'<div class="row"><span><b>'+esc(l.name)+'</b><br><span class="tiny">'+esc(l.market||'')+'</span></span><span class="badge">'+esc(l.status)+'</span></div>').join('')||'<div class="empty">No prospects yet. Add your first lead.</div>';}
 function renderSelects(){
  const options=state.leads.map(l=>'<option value="'+esc(l.id)+'">'+esc(l.name)+'</option>').join('');
- ['emailLead','replyLead','proposalLead','followLead','advisorLead'].forEach(id=>{
+ ['emailLead','replyLead','proposalLead','followLead','advisorLead','competitorLead'].forEach(id=>{
   const el=$(id);if(!el)return;
   const old=el.value;
   el.innerHTML='<option value="">'+(state.leads.length?'Select a saved prospect…':'No saved prospects — add one in Prospects')+'</option>'+options;
@@ -676,3 +676,30 @@ $('advisorCopyPrompt').addEventListener('click',async()=>{
 
 queryFlags();boot();
 })();
+
+function renderAuditResult(data){
+ const root=$('advancedAuditResult');if(!root)return;
+ const audit=data.advanced_audit||{};
+ const scores=audit.scores||{};
+ const scoreRows=Object.entries(scores).map(([k,v])=>'<div class="row"><span>'+esc(k.replaceAll('_',' '))+'</span><b>'+esc(v)+'/100</b></div>').join('');
+ const findings=(audit.findings||[]).map(x=>'<div class="item"><div class="itemtop"><strong>'+esc(x.title)+'</strong><span class="badge">'+esc(x.priority)+'</span></div><p>'+esc(x.category.replaceAll('_',' '))+' · '+esc(x.evidence)+'</p></div>').join('');
+ root.innerHTML='<div class="good"><b>Overall static audit score: '+esc(audit.overall_score??'N/A')+'/100</b><p>HTTP '+esc(data.http_status)+' · '+esc(data.url)+'</p></div>'+scoreRows+'<h3>Findings for manual review</h3>'+(findings||'<div class="empty">No review findings were detected by this limited check.</div>')+'<h3>Important limitations</h3><ul>'+((audit.limitations||[]).map(x=>'<li>'+esc(x)+'</li>').join(''))+'</ul>';
+}
+$('runAdvancedAudit')?.addEventListener('click',async()=>{
+ const url=$('advancedAuditUrl').value.trim();if(!url)return note('advancedAuditNotice','Enter a public website URL.',true);
+ $('runAdvancedAudit').disabled=true;note('advancedAuditNotice','Checking public page safely…');
+ try{const result=await api('/api/audit-website',{method:'POST',body:JSON.stringify({url})});renderAuditResult(result);note('advancedAuditNotice','Audit completed. Findings are observations for manual verification, not confirmed vulnerabilities.');}
+ catch(e){note('advancedAuditNotice',e.message,true);}
+ finally{$('runAdvancedAudit').disabled=false;}
+});
+$('runCompetitorIntel')?.addEventListener('click',async()=>{
+ const leadId=$('competitorLead').value;if(!leadId)return note('competitorNotice','Select a saved prospect first.',true);
+ $('runCompetitorIntel').disabled=true;note('competitorNotice','Searching public business listings and checking candidate websites…');
+ try{
+  const data=await api('/api/competitor-intelligence',{method:'POST',body:JSON.stringify({lead_id:leadId,industry:$('competitorIndustry').value,max_results:Number($('competitorLimit').value)})});
+  const summary=data.comparison||{},items=data.competitors||[];
+  $('competitorResult').innerHTML='<div class="good"><b>'+esc(summary.competitors_found||0)+' candidate competitors found</b><p>Websites listed: '+esc(summary.with_listed_websites||0)+' · No website listed: '+esc(summary.without_listed_websites||0)+' · Responding: '+esc(summary.responding_websites||0)+'</p></div>'+items.map(x=>'<div class="item"><div class="itemtop"><strong>'+esc(x.name)+'</strong><span class="badge">'+esc(x.website_state)+'</span></div><p>'+esc(x.category||'Category unconfirmed')+' · '+esc(x.address||'Address unavailable')+'</p><p>'+esc(x.website||'No website URL returned by provider')+'</p><p>Rating: '+esc(x.rating??'Not listed')+' ('+esc(x.rating_count??0)+' reviews shown by provider)</p><p><a href="'+esc(x.source_url||'#')+'" target="_blank" rel="noopener noreferrer">View discovery source</a></p></div>').join('')||'<div class="empty">No candidate competitors were returned for this query.</div>'+'<p class="tiny">'+(data.limitations||[]).map(esc).join('<br>')+'</p>';
+  note('competitorNotice','Research complete. Treat matches and provider data as unverified candidates.');
+ }catch(e){note('competitorNotice',e.message,true);}
+ finally{$('runCompetitorIntel').disabled=false;}
+});
