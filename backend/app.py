@@ -1166,7 +1166,7 @@ def save_draft(payload: DraftIn, user=Depends(current_user)):
             lead = owned_lead(c, payload.lead_id, user["id"])
             if int(lead["do_not_contact"] or 0) and payload.kind.lower() in {"cold email", "follow-up", "outreach"}:
                 raise HTTPException(403, "This prospect is marked do-not-contact; outreach drafts are blocked.")
-            if lead["research_origin"] == "serper_places" and not int(lead["pitch_eligible"] or 0) and payload.kind.lower() in {"cold email", "follow-up", "outreach"}:
+            if lead["research_origin"] == "serper_places" and not int(lead["pitch_eligible"] or 0):
                 raise HTTPException(409, "This research prospect is verified but not pitch-ready. MCAS has not confirmed a concrete website issue.")
         c.execute("""INSERT INTO drafts(id,user_id,lead_id,kind,subject,body,state,created_at,to_email)
             VALUES(?,?,?,?,?,?,?,?,?)""",
