@@ -13,6 +13,13 @@ class ResearchWorkflowTest(unittest.TestCase):
         with mcas.db() as connection:
             connection.execute("DELETE FROM security_rate_limits")
         mcas._SERPER_CACHE.clear()
+        # Research tests exercise the local verification-link flow, not real SMTP.
+        self.email_sender_patch = patch.object(mcas, "send_email_verification_message", return_value=False)
+        self.email_sender_patch.start()
+        self.addCleanup(self.email_sender_patch.stop)
+        self.production_mode_patch = patch.object(mcas, "IS_PROD", False)
+        self.production_mode_patch.start()
+        self.addCleanup(self.production_mode_patch.stop)
 
     def _registered_client(self):
         client = TestClient(mcas.app)
