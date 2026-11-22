@@ -674,35 +674,135 @@ $('advisorCopyPrompt').addEventListener('click',async()=>{
 });
 
 
-function safePublicHttpUrl(value){try{const u=new URL(String(value));return ['http:','https:'].includes(u.protocol)?u.href:'#';}catch(_){return '#';}}
-function renderAuditResult(data){
- const root=$('advancedAuditResult');if(!root)return;
- const audit=data.advanced_audit||{};
- const scores=audit.scores||{};
- const scoreRows=Object.entries(scores).map(([k,v])=>'<div class="row"><span>'+esc(k.replaceAll('_',' '))+'</span><b>'+esc(v)+'/100</b></div>').join('');
- const findings=(audit.findings||[]).map(x=>'<div class="item"><div class="itemtop"><strong>'+esc(x.title)+'</strong><span class="badge">'+esc(x.priority)+'</span></div><p>'+esc(x.category.replaceAll('_',' '))+' · '+esc(x.evidence)+'</p></div>').join('');
- root.innerHTML='<div class="good"><b>Overall static audit score: '+esc(audit.overall_score??'N/A')+'/100</b><p>HTTP '+esc(data.http_status)+' · '+esc(data.url)+'</p></div>'+scoreRows+'<h3>Findings for manual review</h3>'+(findings||'<div class="empty">No review findings were detected by this limited check.</div>')+'<h3>Important limitations</h3><ul>'+((audit.limitations||[]).map(x=>'<li>'+esc(x)+'</li>').join(''))+'</ul>';
-}
-$('runAdvancedAudit')?.addEventListener('click',async()=>{
- const url=$('advancedAuditUrl').value.trim();if(!url)return note('advancedAuditNotice','Enter a public website URL.',true);
- $('runAdvancedAudit').disabled=true;note('advancedAuditNotice','Checking public page safely…');
- try{const result=await api('/api/audit-website',{method:'POST',body:JSON.stringify({url})});renderAuditResult(result);note('advancedAuditNotice','Audit completed. Findings are observations for manual verification, not confirmed vulnerabilities.');}
- catch(e){note('advancedAuditNotice',e.message,true);}
- finally{$('runAdvancedAudit').disabled=false;}
-});
-$('runCompetitorIntel')?.addEventListener('click',async()=>{
- const leadId=$('competitorLead').value;if(!leadId)return note('competitorNotice','Select a saved prospect first.',true);
- $('runCompetitorIntel').disabled=true;note('competitorNotice','Searching public business listings and checking candidate websites…');
- try{
-  const data=await api('/api/competitor-intelligence',{method:'POST',body:JSON.stringify({lead_id:leadId,industry:$('competitorIndustry').value,max_results:Number($('competitorLimit').value)})});
-  const summary=data.comparison||{},items=data.competitors||[],target=data.target||{},targetScore=target.website_audit?.overall_score;
-  const competitorCards=items.map(x=>'<div class="item"><div class="itemtop"><strong>'+esc(x.name)+'</strong><span class="badge">'+esc(x.website_state)+'</span></div><p>'+esc(x.category||'Category unconfirmed')+' · '+esc(x.address||'Address unavailable')+'</p><p>'+esc(x.website||'No website URL returned by provider')+'</p><p>Rating: '+esc(x.rating??'Not listed')+' ('+esc(x.rating_count??0)+' reviews shown by provider)</p><p><a href="'+esc(safePublicHttpUrl(x.source_url||''))+'" target="_blank" rel="noopener noreferrer">View discovery source</a></p></div>').join('');
-  const limitationText=(data.limitations||[]).map(esc).join('<br>');
-  $('competitorResult').innerHTML='<div class="good"><b>'+esc(summary.competitors_found||0)+' candidate competitors found</b><p>Target website: '+esc(target.website_state||'not listed')+(targetScore!==undefined?' · static audit '+esc(targetScore)+'/100':'')+'</p><p>Websites listed: '+esc(summary.with_listed_websites||0)+' · No website listed: '+esc(summary.without_listed_websites||0)+' · Responding: '+esc(summary.responding_websites||0)+'</p></div>'+(competitorCards||'<div class="empty">No candidate competitors were returned for this query.</div>')+(limitationText?'<p class="tiny">'+limitationText+'</p>':'')
-  note('competitorNotice','Research complete. Treat matches and provider data as unverified candidates.');
- }catch(e){note('competitorNotice',e.message,true);}
- finally{$('runCompetitorIntel').disabled=false;}
-});
+
 
 queryFlags();boot();
+})();
+
+
+// Standalone audit/competitor controls. These deliberately do not depend on
+// the main app closure's private $, api, note or esc bindings.
+(()=>{
+ 'use strict';
+ const byId=id=>document.getElementById(id);
+ const htmlEscape=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+ const showNotice=(id,message,isError=false)=>{
+  const element=byId(id);
+  if(!element)return;
+  element.textContent=message;
+  element.className='notice'+(isError?' error':'');
+ };
+ const readCookie=name=>{
+  const part=document.cookie.split('; ').find(item=>item.startsWith(name+'='));
+  if(!part)return '';
+  try{return decodeURIComponent(part.slice(name.length+1));}catch(_){return part.slice(name.length+1);}
+ };
+ const parseResponse=async response=>{
+  const type=response.headers.get('content-type')||'';
+  if(type.includes('application/json'))return await response.json();
+  return await response.text();
+ };
+ const postJson=async(path,payload)=>{
+  const csrfResponse=await fetch('/api/auth/csrf',{credentials:'same-origin',cache:'no-store'});
+  const csrfData=await parseResponse(csrfResponse);
+  if(!csrfResponse.ok)throw new Error('Could not initialise the MCAS security token. Refresh the page and sign in again.');
+  const csrf=readCookie('mcas_csrf')||(csrfData&&csrfData.csrf_token)||'';
+  if(!csrf)throw new Error('MCAS security token is missing. Refresh the page and sign in again.');
+  const response=await fetch(path,{
+   method:'POST',
+   credentials:'same-origin',
+   headers:{'Accept':'application/json','Content-Type':'application/json','X-CSRF-Token':csrf},
+   body:JSON.stringify(payload)
+  });
+  const data=await parseResponse(response);
+  if(!response.ok){
+   const message=(data&&typeof data==='object'&&(data.detail||data.message))||data;
+   throw new Error(typeof message==='string'?message:'Request failed ('+response.status+').');
+  }
+  if(!data||typeof data!=='object')throw new Error('MCAS returned an unexpected response.');
+  return data;
+ };
+ const safePublicHttpUrl=value=>{
+  try{
+   const url=new URL(String(value));
+   return ['http:','https:'].includes(url.protocol)?url.href:'#';
+  }catch(_){return '#';}
+ };
+ const renderAuditResult=data=>{
+  const root=byId('advancedAuditResult');
+  if(!root)return;
+  const audit=data.advanced_audit||{};
+  const scores=audit.scores||{};
+  const scoreRows=Object.entries(scores).map(([key,value])=>
+   '<div class="row"><span>'+htmlEscape(String(key).replace(/_/g,' '))+'</span><b>'+htmlEscape(value)+'/100</b></div>'
+  ).join('');
+  const findings=(audit.findings||[]).map(item=>
+   '<div class="item"><div class="itemtop"><strong>'+htmlEscape(item.title)+'</strong><span class="badge">'+htmlEscape(item.priority)+'</span></div><p>'+htmlEscape(String(item.category||'').replace(/_/g,' '))+' · '+htmlEscape(item.evidence)+'</p></div>'
+  ).join('');
+  const limitations=(audit.limitations||[]).map(item=>'<li>'+htmlEscape(item)+'</li>').join('');
+  root.innerHTML='<div class="good"><b>Overall static audit score: '+htmlEscape(audit.overall_score??'N/A')+'/100</b><p>HTTP '+htmlEscape(data.http_status)+' · '+htmlEscape(data.url)+'</p></div>'+
+   scoreRows+'<h3>Findings for manual review</h3>'+
+   (findings||'<div class="empty">No review findings were detected by this limited check.</div>')+
+   '<h3>Important limitations</h3><ul>'+limitations+'</ul>';
+ };
+ byId('runAdvancedAudit')?.addEventListener('click',async()=>{
+  const button=byId('runAdvancedAudit');
+  const input=byId('advancedAuditUrl');
+  const url=input?.value.trim()||'';
+  if(!url)return showNotice('advancedAuditNotice','Enter a public website URL.',true);
+  button.disabled=true;
+  showNotice('advancedAuditNotice','Checking public page safely…');
+  try{
+   const result=await postJson('/api/audit-website',{url});
+   renderAuditResult(result);
+   showNotice('advancedAuditNotice','Audit completed. Findings are observations for manual verification, not confirmed vulnerabilities.');
+  }catch(error){
+   showNotice('advancedAuditNotice',error.message||'The audit request failed.',true);
+  }finally{
+   button.disabled=false;
+  }
+ });
+ byId('runCompetitorIntel')?.addEventListener('click',async()=>{
+  const button=byId('runCompetitorIntel');
+  const leadId=byId('competitorLead')?.value||'';
+  if(!leadId)return showNotice('competitorNotice','Select a saved prospect first.',true);
+  button.disabled=true;
+  showNotice('competitorNotice','Searching public business listings and checking candidate websites…');
+  try{
+   const data=await postJson('/api/competitor-intelligence',{
+    lead_id:leadId,
+    industry:byId('competitorIndustry')?.value||'restaurant',
+    max_results:Number(byId('competitorLimit')?.value||5)
+   });
+   const summary=data.comparison||{};
+   const items=data.competitors||[];
+   const target=data.target||{};
+   const targetScore=target.website_audit?.overall_score;
+   const cards=items.map(item=>
+    '<div class="item"><div class="itemtop"><strong>'+htmlEscape(item.name)+'</strong><span class="badge">'+htmlEscape(item.website_state)+'</span></div>'+
+    '<p>'+htmlEscape(item.category||'Category unconfirmed')+' · '+htmlEscape(item.address||'Address unavailable')+'</p>'+
+    '<p>'+htmlEscape(item.website||'No website URL returned by provider')+'</p>'+
+    '<p>Rating: '+htmlEscape(item.rating??'Not listed')+' ('+htmlEscape(item.rating_count??0)+' reviews shown by provider)</p>'+
+    '<p><a href="'+htmlEscape(safePublicHttpUrl(item.source_url||''))+'" target="_blank" rel="noopener noreferrer">View discovery source</a></p></div>'
+   ).join('');
+   const limitations=(data.limitations||[]).map(htmlEscape).join('<br>');
+   const root=byId('competitorResult');
+   if(root){
+    root.innerHTML='<div class="good"><b>'+htmlEscape(summary.competitors_found||0)+' candidate competitors found</b>'+
+     '<p>Target website: '+htmlEscape(target.website_state||'not listed')+
+     (targetScore!==undefined?' · static audit '+htmlEscape(targetScore)+'/100':'')+'</p>'+
+     '<p>Websites listed: '+htmlEscape(summary.with_listed_websites||0)+
+     ' · No website listed: '+htmlEscape(summary.without_listed_websites||0)+
+     ' · Responding: '+htmlEscape(summary.responding_websites||0)+'</p></div>'+
+     (cards||'<div class="empty">No candidate competitors were returned for this query.</div>')+
+     (limitations?'<p class="tiny">'+limitations+'</p>':'');
+   }
+   showNotice('competitorNotice','Research complete. Treat matches and provider data as unverified candidates.');
+  }catch(error){
+   showNotice('competitorNotice',error.message||'Competitor research failed.',true);
+  }finally{
+   button.disabled=false;
+  }
+ });
+ console.info('[MCAS] Standalone audit and competitor controls initialised.');
 })();
