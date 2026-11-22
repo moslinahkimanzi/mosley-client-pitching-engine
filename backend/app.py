@@ -1225,7 +1225,9 @@ def save_proposal(payload: ProposalIn, user=Depends(current_user)):
     pid = secrets.token_urlsafe(15)
     with db() as c:
         if payload.lead_id:
-            owned_lead(c, payload.lead_id, user["id"])
+            lead = owned_lead(c, payload.lead_id, user["id"])
+            if lead["research_origin"] == "serper_places" and not int(lead["pitch_eligible"] or 0):
+                raise HTTPException(409, "This research prospect is verified but not pitch-ready. A concrete website issue has not been confirmed.")
         stamp = now()
         c.execute("INSERT INTO proposals VALUES(?,?,?,?,?,?,?,?)",
                   (pid, user["id"], payload.lead_id, payload.title, payload.content, payload.state, stamp, stamp))
@@ -1918,6 +1920,8 @@ def create_builder_prompt(lead_id: str, user=Depends(current_user)):
         lead = owned_lead(c, lead_id, user["id"])
         if lead["status"] != "Won":
             raise HTTPException(409, "Mark the prospect as accepted before generating a website-builder prompt.")
+        if lead["research_origin"] == "serper_places" and not int(lead["pitch_eligible"] or 0):
+            raise HTTPException(409, "This research prospect has no verified website opportunity. Confirm scope with the business before preparing a build prompt.")
     tags = {}
     notes = (lead["evidence"] or "").lower()
     market = lead["market"] or "the target location"
