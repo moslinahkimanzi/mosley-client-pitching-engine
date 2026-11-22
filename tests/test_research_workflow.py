@@ -38,9 +38,9 @@ class ResearchWorkflowTest(unittest.TestCase):
         csrf = client.get("/api/auth/csrf").json()["csrf_token"]
         return client, csrf
 
-    def test_serper_places_research_saves_prospect_proposal_and_pending_email(self):
+    def test_serper_places_research_saves_verified_business_but_not_unproven_opportunity(self):
         client, csrf = self._registered_client()
-        serper_response = {
+        places_response = {
             "places": [{
                 "title": "Research Test Italian Restaurant",
                 "address": "1 Test Road, Nairobi, Kenya",
@@ -51,8 +51,16 @@ class ResearchWorkflowTest(unittest.TestCase):
                 "cid": "123456789",
             }]
         }
+        corroboration_response = {
+            "organic": [{
+                "title": "Research Test Italian Restaurant - Nairobi",
+                "link": "https://research-test-restaurant.example/about",
+                "snippet": "Research Test Italian Restaurant located at 1 Test Road, Nairobi, Kenya.",
+            }]
+        }
         with patch.dict(os.environ, {"SERPER_API_KEY": "test-serper-key"}), patch.object(
-            mcas, "serper_request", return_value=serper_response
+            mcas, "serper_request",
+            side_effect=[places_response, corroboration_response],
         ) as mocked:
             response = client.post(
                 "/api/research/run",
@@ -67,29 +75,62 @@ class ResearchWorkflowTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         result = response.json()
         self.assertEqual(result["saved"], 1)
-        self.assertEqual(result["provider"], "Serper Places")
+        self.assertIn("independent Serper web corroboration", result["provider"])
         self.assertEqual(result["resolved_location"], "Nairobi")
         self.assertEqual(len(result["results"]), 1)
-        self.assertEqual(result["results"][0]["website_state"], "not_listed")
-        self.assertGreaterEqual(result["results"][0]["opportunity_score"], 0)
-        self.assertIn("highest_opportunity_score", result["summary"])
-        self.assertTrue(result["results"][0]["proposal_created"])
-        self.assertTrue(result["results"][0]["draft_created"])
-        self.assertFalse(result["results"][0]["gmail_draft_created"])
-        self.assertIn("Serper", result["results"][0]["evidence"])
-        self.assertIn("does not prove", result["results"][0]["evidence"])
-        self.assertIn("google.com/maps", result["results"][0]["source_url"])
-        mocked.assert_called_once()
-        self.assertEqual(mocked.call_args.args[0], "places")
-        self.assertIn("Italian", mocked.call_args.args[1]["q"])
-        self.assertIn("Nairobi", mocked.call_args.args[1]["q"])
+        prospect = result["results"][0]
+        self.assertTrue(prospect["verified"])
+        self.assertEqual(prospect["verification_status"], "verified")
+        self.assertGreaterEqual(prospect["verification_score"], 80)
+        self.assertEqual(prospect["website_state"], "not_listed")
+        self.assertFalse(prospect["pitch_eligible"])
+        self.assertFalse(prospect["proposal_created"])
+        self.assertFalse(prospect["draft_created"])
+        self.assertFalse(prospect["gmail_draft_created"])
+        self.assertIn("Serper", prospect["evidence"])
+        self.assertIn("does not prove", result["warning"])
+        self.assertIn("google.com/maps", prospect["source_url"])
+        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual(mocked.call_args_list[0].args[0], "places")
+        self.assertEqual(mocked.call_args_list[1].args[0], "search")
+        self.assertIn("Research Test Italian Restaurant", mocked.call_args_list[1].args[1]["q"])
 
-        self.assertEqual(len(client.get("/api/leads").json()), 1)
-        self.assertEqual(len(client.get("/api/proposals").json()), 1)
-        drafts = client.get("/api/drafts").json()
-        self.assertEqual(len(drafts), 1)
-        self.assertEqual(drafts[0]["state"], "pending_approval")
-        self.assertIn("does not necessarily mean", drafts[0]["body"].lower())
+        leads = client.get("/api/leads").json()
+        self.assertEqual(len(leads), 1)
+        self.assertEqual(leads[0]["status"], "Verified")
+        self.assertEqual(leads[0]["verification_status"], "verified")
+        self.assertEqual(leads[0]["research_origin"], "serper_places")
+        self.assertEqual(leads[0]["pitch_eligible"], 0)
+        self.assertEqual(client.get("/api/proposals").json(), [])
+        self.assertEqual(client.get("/api/drafts").json(), [])
+
+    def test_unverified_places_candidate_is_not_saved_or_pitched(self):
+        client, csrf = self._registered_client()
+        places_response = {
+            "places": [{
+                "title": "Uncorroborated Business",
+                "address": "1 Unknown Road, Nairobi, Kenya",
+                "category": "Restaurant",
+            }]
+        }
+        with patch.dict(os.environ, {"SERPER_API_KEY": "test-serper-key"}), patch.object(
+            mcas, "serper_request",
+            side_effect=[places_response, {"organic": []}],
+        ):
+            response = client.post(
+                "/api/research/run",
+                json={"location": "Nairobi", "industry": "restaurant", "max_results": 3},
+                headers={"X-CSRF-Token": csrf},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual(result["saved"], 0)
+        self.assertEqual(result["summary"]["rejected_unverified_candidates"], 1)
+        self.assertFalse(result["results"][0]["verified"])
+        self.assertFalse(result["results"][0]["saved"])
+        self.assertEqual(client.get("/api/leads").json(), [])
+        self.assertEqual(client.get("/api/proposals").json(), [])
+        self.assertEqual(client.get("/api/drafts").json(), [])
 
     def test_serper_web_search_returns_organic_results(self):
         client, _ = self._registered_client()
