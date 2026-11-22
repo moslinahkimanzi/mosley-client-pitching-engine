@@ -125,7 +125,7 @@ $('refreshSecurityGuardianBtn').addEventListener('click',loadSecurityGuardian);
 $('adminMfaSetupForm').addEventListener('submit',async e=>{
  e.preventDefault();const button=$('adminMfaStartBtn');button.disabled=true;
  try{
-  const data=await api('/api/admin/mfa/setup',{method:'POST',body:JSON.stringify({password:$('adminMfaPassword').value,bootstrap_token:$('adminMfaBootstrap').value})});
+  const data=await api('/api/admin/mfa/setup',{method:'POST',body:JSON.stringify({bootstrap_token:$('adminMfaBootstrap').value})});
   $('adminMfaSecret').textContent=data.secret;$('adminMfaSetupResult').classList.remove('hide');
   note('adminMfaNotice',data.message);
  }catch(err){note('adminMfaNotice',err.message,true);}
