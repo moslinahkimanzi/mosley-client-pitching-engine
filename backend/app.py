@@ -1643,6 +1643,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
     discovered = []
     saved_count = verified_count = rejected_count = pitch_ready_count = 0
     seen_names = set()
+    corroboration_service_error = None
 
     for place in places:
         if len(discovered) >= payload.max_results:
@@ -1699,19 +1700,34 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
 
         # A candidate-specific public search is independent corroboration.
         # Provider failure never becomes a positive verification result.
-        try:
-            web_data = serper_request(
-                "search",
-                {"q": '"' + name[:100] + '" "' + (address or location)[:120] + '"', "num": 5},
-            )
-            web_results = web_data.get("organic") or []
-        except HTTPException:
+        corroboration_error = corroboration_service_error
+        if corroboration_error:
             web_results = []
+        else:
+            try:
+                web_data = serper_request(
+                    "search",
+                    {"q": '"' + name[:100] + '" "' + (address or location)[:120] + '"', "num": 5},
+                )
+                web_results = web_data.get("organic") or []
+            except HTTPException as exc:
+                # Stop further verification calls for this run after a provider
+                # failure; do not disguise a quota/network failure as a mismatch.
+                corroboration_error = str(exc.detail)
+                corroboration_service_error = corroboration_error
+                web_results = []
 
         verification = verify_candidate(
             place=place, location=location, web_results=web_results,
             website=website, website_audit=website_audit, source_url=source_url,
         )
+        if corroboration_error:
+            verification["verified"] = False
+            verification["status"] = "verification_unavailable"
+            verification["evidence_score"] = 0
+            verification["reasons"].append(
+                "Independent corroboration could not be completed: " + corroboration_error
+            )
         tags = serper_business_tags(payload.industry, category)
         if address:
             tags["addr:street"] = address
@@ -1762,6 +1778,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                 "verification": verification, "verification_status": verification["status"],
                 "verification_score": verification["evidence_score"],
                 "verification_reasons": verification["reasons"],
+                "verification_error": corroboration_error,
                 "website": website, "website_state": website_state,
                 "evidence": evidence, "source_url": source_url,
                 "opportunity_score": score, "score_reasons": score_reasons,
@@ -1915,7 +1932,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
         },
         "saved": saved_count, "source": "Serper Places + Serper web corroboration",
         "attribution": "Identity verification requires a structured Places listing plus matching public evidence.",
-        "warning": "Verified means evidence-based identity matching only. It does not prove current trading, contact details are deliverable, marketing is permitted, or the business wants a website. MCAS creates drafts only for verified businesses with a concrete website issue; drafts are never sent automatically.",
+        "warning": "Verified means evidence-based identity matching only. It does not prove current trading, contact details are deliverable, marketing is permitted, or the business wants a website. If independent search is unavailable, candidates are withheld rather than treated as verified. MCAS creates drafts only for verified businesses with a concrete website issue; drafts are never sent automatically.",
     }
 
 @app.post("/api/leads/{lead_id}/builder-prompt")
