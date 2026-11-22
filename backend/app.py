@@ -583,7 +583,7 @@ def register(payload: RegisterIn, response: Response):
     session = secrets.token_urlsafe(36)
     try:
         with db() as c:
-            c.execute("INSERT INTO users VALUES(?,?,?,?)", (uid, email, password_hash(payload.password), now()))
+            c.execute("INSERT INTO users(id,email,password_hash,created_at,google_subject) VALUES(?,?,?,?,NULL)", (uid, email, password_hash(payload.password), now()))
             c.execute("INSERT INTO sessions VALUES(?,?,?)", (token_hash(session), uid, int(time.time()) + SESSION_SECONDS))
             audit(c, uid, "account.created")
     except sqlite3.IntegrityError:
