@@ -104,7 +104,7 @@ class ProspectVerificationTests(unittest.TestCase):
         verification = {"status": "verified", "website_identity_match": False}
         eligible, reason = qualify_website_opportunity(verification, "not_listed", {})
         self.assertFalse(eligible)
-        self.assertEqual(reason, "website_not_listed_is_not_proof_of_no_website")
+        self.assertEqual(reason, "website_not_identified_in_bounded_search_not_proof_of_absence")
 
     def test_broken_website_requires_two_checks_and_domain_link(self):
         verification = {
