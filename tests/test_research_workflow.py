@@ -67,7 +67,7 @@ class ResearchWorkflowTest(unittest.TestCase):
         }
         with patch.dict(os.environ, {"SERPER_API_KEY": "test-serper-key"}), patch.object(
             mcas, "serper_request",
-            side_effect=[places_response, places_response, places_response, corroboration_response],
+            side_effect=[places_response, corroboration_response],
         ) as mocked:
             response = client.post(
                 "/api/research/run",
@@ -99,9 +99,9 @@ class ResearchWorkflowTest(unittest.TestCase):
         self.assertIn("Serper", prospect["evidence"])
         self.assertIn("does not prove", result["warning"])
         self.assertIn("google.com/maps", prospect["source_url"])
-        self.assertEqual(mocked.call_count, 4)
-        self.assertEqual([call.args[0] for call in mocked.call_args_list], ["places", "places", "places", "search"])
-        self.assertIn("Research Test Italian Restaurant", mocked.call_args_list[3].args[1]["q"])
+        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual([call.args[0] for call in mocked.call_args_list], ["places", "search"])
+        self.assertIn("Research Test Italian Restaurant", mocked.call_args_list[1].args[1]["q"])
 
         leads = client.get("/api/leads").json()
         self.assertEqual(len(leads), 1)
@@ -143,7 +143,7 @@ class ResearchWorkflowTest(unittest.TestCase):
         }
         with patch.dict(os.environ, {"SERPER_API_KEY": "test-serper-key"}), patch.object(
             mcas, "serper_request",
-            side_effect=[places_response, places_response, places_response, {"organic": []}],
+            side_effect=[places_response, {"organic": []}],
         ):
             response = client.post(
                 "/api/research/run",
@@ -171,7 +171,7 @@ class ResearchWorkflowTest(unittest.TestCase):
         }
         with patch.dict(os.environ, {"SERPER_API_KEY": "test-serper-key"}), patch.object(
             mcas, "serper_request",
-            side_effect=[places_response, places_response, places_response, mcas.HTTPException(503, "Serper verification quota unavailable")],
+            side_effect=[places_response, mcas.HTTPException(503, "Serper verification quota unavailable")],
         ) as mocked:
             response = client.post(
                 "/api/research/run",
@@ -180,7 +180,7 @@ class ResearchWorkflowTest(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 200, response.text)
         result = response.json()
-        self.assertEqual(mocked.call_count, 4)
+        self.assertEqual(mocked.call_count, 2)
         self.assertEqual(result["saved"], 0)
         self.assertEqual(result["results"][0]["verification_status"], "verification_unavailable")
         self.assertFalse(result["results"][0]["verified"])

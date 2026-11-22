@@ -1418,7 +1418,7 @@ def safe_site_fetch(initial_url):
             raise HTTPException(400, "HTTPS-to-HTTP redirects are blocked")
         ip = resolve_public(p.hostname)
         conn_cls = PinnedHTTPS if p.scheme == "https" else PinnedHTTP
-        conn = conn_cls(p.hostname, ip, port, 8)
+        conn = conn_cls(p.hostname, ip, port, 5)
         path = urllib.parse.urlunparse(("", "", p.path or "/", p.params, p.query, ""))
         try:
             conn.request("GET", path, headers={"Host": p.hostname, "User-Agent": "MCAS-SiteAudit/1.0",
@@ -1747,40 +1747,26 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
         raise HTTPException(422, "Enter a town, city or named administrative area.")
 
     query = serper_query_for(payload)
-    # Three bounded discovery variants broaden coverage without pretending that
-    # one top-ranked Places response is a complete directory of a location.
-    discovery_queries = [
-        query,
-        "independent " + query,
-        "local " + query,
-    ]
-    places = []
+    # Low-cost profile: exactly one focused Places request. Candidate budget
+    # scales with the requested per-group target but is deliberately bounded.
+    # A smaller pool is faster and cheaper; shortfalls are disclosed, never padded.
+    candidate_budget = min(30, max(12, payload.max_results * 4))
+    cache_key = query.casefold() + ":" + str(candidate_budget)
+    cached = _SERPER_CACHE.get(cache_key)
+    places = cached[1] if cached and time.time() - cached[0] < _SERPER_CACHE_TTL else None
+    if places is None:
+        request_payload = {"q": query, "num": candidate_budget}
+        gl = os.getenv("SERPER_GL", "").strip()
+        hl = os.getenv("SERPER_HL", "en").strip()
+        if gl:
+            request_payload["gl"] = gl
+        if hl:
+            request_payload["hl"] = hl
+        data = serper_request("places", request_payload)
+        places = [item for item in (data.get("places") or []) if isinstance(item, dict)]
+        _SERPER_CACHE[cache_key] = (time.time(), places)
+    places = places[:candidate_budget]
     discovery_warnings = []
-    gl = os.getenv("SERPER_GL", "").strip()
-    hl = os.getenv("SERPER_HL", "en").strip()
-    for query_index, discovery_query in enumerate(discovery_queries):
-        cache_key = discovery_query.casefold()
-        cached = _SERPER_CACHE.get(cache_key)
-        candidates = cached[1] if cached and time.time() - cached[0] < _SERPER_CACHE_TTL else None
-        if candidates is None:
-            request_payload = {"q": discovery_query, "num": 20}
-            if gl:
-                request_payload["gl"] = gl
-            if hl:
-                request_payload["hl"] = hl
-            try:
-                data = serper_request("places", request_payload)
-            except HTTPException as exc:
-                if query_index == 0:
-                    raise
-                discovery_warnings.append(str(exc.detail))
-                continue
-            candidates = [item for item in (data.get("places") or []) if isinstance(item, dict)]
-            _SERPER_CACHE[cache_key] = (time.time(), candidates)
-        places.extend(candidates)
-    # Hard cap: a maximum of 60 Places candidates per run. Each candidate can
-    # also consume one independent web corroboration query.
-    places = places[:60]
 
     discovered = []
     saved_count = verified_count = rejected_count = pitch_ready_count = 0
@@ -1852,29 +1838,41 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
         ) else None
         source_url = serper_source_url(place, name, address)
 
-        # A candidate-specific public search is independent corroboration.
-        # Provider failure never becomes a positive verification result.
-        corroboration_error = corroboration_service_error
-        if corroboration_error:
+        # Cheap verification path: a fetched first-party website whose page
+        # title matches the Places business name is sufficient identity evidence.
+        # Spend a web-search request only when the website is missing or its
+        # identity cannot be established from the fetched page.
+        verification = verify_candidate(
+            place=place, location=location, web_results=[],
+            website=website, website_audit=website_audit, source_url=source_url,
+        )
+        needs_web_corroboration = not verification["verified"]
+        corroboration_error = corroboration_service_error if needs_web_corroboration else None
+        web_results = []
+        if needs_web_corroboration and not corroboration_error:
+            web_cache_key = "web:" + re.sub(r"[^a-z0-9]+", " ", (name + " " + address).casefold()).strip()
+            cached_web = _SERPER_CACHE.get(web_cache_key)
+            web_results = cached_web[1] if cached_web and time.time() - cached_web[0] < _SERPER_CACHE_TTL else None
+            if web_results is None:
+                try:
+                    web_data = serper_request(
+                        "search",
+                        {"q": '"' + name[:100] + '" "' + (address or location)[:120] + '"', "num": 5},
+                    )
+                    web_results = web_data.get("organic") or []
+                    _SERPER_CACHE[web_cache_key] = (time.time(), web_results)
+                except HTTPException as exc:
+                    # Stop further verification calls for this run after a provider
+                    # failure; never turn a quota/network failure into a positive match.
+                    corroboration_error = str(exc.detail)
+                    corroboration_service_error = corroboration_error
+                    web_results = []
+        elif corroboration_error:
             web_results = []
-        else:
-            try:
-                web_data = serper_request(
-                    "search",
-                    {"q": '"' + name[:100] + '" "' + (address or location)[:120] + '"', "num": 5},
-                )
-                web_results = web_data.get("organic") or []
-            except HTTPException as exc:
-                # Stop further verification calls for this run after a provider
-                # failure; do not disguise a quota/network failure as a mismatch.
-                corroboration_error = str(exc.detail)
-                corroboration_service_error = corroboration_error
-                web_results = []
 
-        # Places can omit the official website even when one exists. Search
-        # corroboration results for a likely first-party domain before ever
-        # assigning the bounded "no website found" category.
-        if not website and not corroboration_error:
+        # Only uncertain cases pay for independent search. When a website is
+        # absent, inspect corroborating results for a likely first-party domain.
+        if not website and not corroboration_error and web_results:
             candidate_website = find_business_website_candidate(
                 name, location, address, web_results
             )
@@ -1913,10 +1911,12 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                     website_state = "needs_review"
                     website_audit = {"url": candidate_website, "note": "First-party website candidate could not be checked safely."}
 
-        verification = verify_candidate(
-            place=place, location=location, web_results=web_results,
-            website=website, website_audit=website_audit, source_url=source_url,
-        )
+        # Re-evaluate with independent public evidence only when that lookup ran.
+        if web_results:
+            verification = verify_candidate(
+                place=place, location=location, web_results=web_results,
+                website=website, website_audit=website_audit, source_url=source_url,
+            )
         if corroboration_error:
             verification["verified"] = False
             verification["status"] = "verification_unavailable"
@@ -2175,7 +2175,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
     return {
         "location": location, "resolved_location": location, "query": query,
         "industry": payload.industry,
-        "provider": "Serper Places + independent Serper web corroboration",
+        "provider": "Serper Places + independent Serper web corroboration (conditional)",
         "results": discovered,
         "balanced_results": balanced["balanced_results"],
         "additional_results": balanced["additional_results"],
@@ -2201,10 +2201,10 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             "additional_candidates": len(balanced["additional_results"]),
             "highest_opportunity_score": ranked[0] if ranked else 0,
         },
-        "saved": saved_count, "source": "Serper Places + Serper web corroboration",
+        "saved": saved_count, "source": "Serper Places + conditional Serper web corroboration",
         "attribution": "Identity verification requires a structured Places listing plus matching public evidence.",
         "discovery_warnings": discovery_warnings,
-        "warning": "Verified means evidence-based identity matching only. It does not prove current trading, contact details are deliverable, marketing is permitted, or the business wants a website. If independent search is unavailable, candidates are withheld rather than treated as verified. MCAS creates drafts only for verified businesses with a concrete website issue; drafts are never sent automatically. Discovery uses up to three Places searches (maximum 60 candidates) plus one independent web corroboration query per candidate, so API usage can be materially higher than a single search.",
+        "warning": "Verified means evidence-based identity matching only. It does not prove current trading, contact details are deliverable, marketing is permitted, or the business wants a website. If independent search is unavailable, candidates are withheld rather than treated as verified. MCAS creates drafts only for verified businesses with a concrete website issue; drafts are never sent automatically. Discovery uses one focused Places search per run (cached for five minutes) and only searches the web for candidates whose identity cannot be established from the Places record and checked first-party website. Candidate processing is bounded by the requested target; low-yield categories may be returned with a disclosed shortfall.",
     }
 
 @app.post("/api/leads/{lead_id}/builder-prompt")

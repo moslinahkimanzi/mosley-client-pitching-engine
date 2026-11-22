@@ -10,20 +10,19 @@ The Research command treats the selected number as a target **per category**:
 
 The dashboard displays an equal-sized sample from each category. The balanced count is the minimum of the requested target and the available verified count in the smallest category. MCAS must never invent, duplicate, or relabel prospects to fill a category. A shortfall is returned explicitly.
 
-## Discovery and verification
+## Discovery and verification (low-cost profile)
 
-- Up to three Serper Places discovery queries are made: the base query, an independent-business variant, and a local-business variant.
-- Each Places response requests up to 20 candidates; the merged candidate pool is capped at 60.
-- Candidate deduplication uses normalized business name + address, preserving separately located branches.
-- Each unique candidate receives an independent Serper web corroboration query.
-- If Places does not list a website, MCAS looks for a likely first-party domain in the corroboration results. Directory, social, review and booking platforms are excluded; the domain must contain a distinctive business-name token and the result must match the business name and locality.
-- The discovered domain is fetched using MCAS's existing SSRF-safe bounded fetcher.
+- One focused Serper Places query is made per run. The result is cached in memory for five minutes.
+- The candidate budget is bounded by `min(30, max(12, target_per_group * 4))`; deduplication removes repeated name/address pairs.
+- If a fetched first-party website title strongly matches the Places business name, MCAS can verify identity without an extra web-search request.
+- Only uncertain identities (especially candidates with no listed website) trigger an independent Serper web corroboration search. Those search results may also identify a likely first-party website.
+- Corroboration results are cached in memory for five minutes. Website checks use the existing SSRF-safe bounded fetcher.
 - Unverified identities and ambiguous website states abstain from all three balanced categories.
-- Provider errors do not turn into positive verification. Supplemental Places-query errors are surfaced as warnings; if independent corroboration fails for a candidate, that candidate is withheld.
+- A quota/provider failure never becomes a positive verification result.
 
-## Cost and limits
+## Cost and speed
 
-A run can make up to three Places requests plus one web corroboration request per candidate (up to 60). A candidate website may require one or two bounded HTTP checks. This is materially more Serper usage than the old single Places query. Keep the target conservative until actual quota consumption and real-world yield are measured.
+This profile uses one Places request per uncached research query, plus conditional web searches for uncertain candidates. It no longer runs three Places variants or automatically performs a web search for every candidate. A run is bounded by a maximum of 30 candidate records, and the requested target controls the candidate budget. The trade-off is that fewer candidates can mean a larger honest shortfall, especially for rare broken-website cases. Five-minute in-memory caching reduces repeat calls but is cleared when the server restarts.
 
 ## Important limitations
 
