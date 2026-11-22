@@ -147,6 +147,34 @@ class ResearchWorkflowTest(unittest.TestCase):
         self.assertEqual(client.get("/api/proposals").json(), [])
         self.assertEqual(client.get("/api/drafts").json(), [])
 
+    def test_verification_provider_failure_withholds_candidates_without_retrying(self):
+        client, csrf = self._registered_client()
+        places_response = {
+            "places": [{
+                "title": "Verification Service Failure Test",
+                "address": "1 Test Road, Nairobi, Kenya",
+                "category": "Restaurant",
+            }]
+        }
+        with patch.dict(os.environ, {"SERPER_API_KEY": "test-serper-key"}), patch.object(
+            mcas, "serper_request",
+            side_effect=[places_response, mcas.HTTPException(503, "Serper verification quota unavailable")],
+        ) as mocked:
+            response = client.post(
+                "/api/research/run",
+                json={"location": "Nairobi", "industry": "restaurant", "max_results": 6},
+                headers={"X-CSRF-Token": csrf},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual(result["saved"], 0)
+        self.assertEqual(result["results"][0]["verification_status"], "verification_unavailable")
+        self.assertFalse(result["results"][0]["verified"])
+        self.assertEqual(client.get("/api/leads").json(), [])
+        self.assertEqual(client.get("/api/proposals").json(), [])
+        self.assertEqual(client.get("/api/drafts").json(), [])
+
     def test_serper_web_search_returns_organic_results(self):
         client, _ = self._registered_client()
         with patch.dict(os.environ, {"SERPER_API_KEY": "test-serper-key"}), patch.object(
