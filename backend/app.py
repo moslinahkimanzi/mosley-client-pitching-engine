@@ -1603,7 +1603,21 @@ def make_outreach_copy(name: str, location: str, website_state: str, audit: dict
         )
 
     body = (
-        "Hello " + @app.post("/api/research/run")
+        "Hello " + safe_name + " team,\n\n"
+        + evidence_line + "\n\n"
+        + idea + "\n\n"
+        + "I build professional, mobile-friendly websites for businesses, with clear service pages and "
+          "straightforward contact or enquiry journeys. I would keep any recommendation aligned with what "
+          "your team actually needs.\n\n"
+        + "Would a brief 10–15 minute conversation next week be useful? If not, no problem.\n\n"
+        + "Best regards,\n"
+        + "Mosley | Web Developer\n\n"
+        + "If you would prefer not to receive another message from me, just reply and I will not contact you again."
+    )
+    return subject, body
+
+
+@app.post("/api/research/run")
 def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
     """Discover, independently corroborate, then save only verified business identities."""
     location = payload.location.strip()
@@ -1903,18 +1917,6 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
         "attribution": "Identity verification requires a structured Places listing plus matching public evidence.",
         "warning": "Verified means evidence-based identity matching only. It does not prove current trading, contact details are deliverable, marketing is permitted, or the business wants a website. MCAS creates drafts only for verified businesses with a concrete website issue; drafts are never sent automatically.",
     }
-vider": "Serper Places",
-        "results": discovered,
-        "summary": {
-            "reviewed": len(discovered), "new_prospects_saved": saved_count,
-            "website_states": state_counts,
-            "highest_opportunity_score": ranked[0] if ranked else 0,
-        },
-        "saved": saved_count, "source": "Serper Places",
-        "attribution": "Business discovery powered by Serper Places.",
-        "warning": "Serper results can be incomplete or out of date. Verify business identity, website, address and contact details before marking a prospect verified or contacting them. MCAS only creates drafts; it never sends email.",
-    }
-
 
 @app.post("/api/leads/{lead_id}/builder-prompt")
 def create_builder_prompt(lead_id: str, user=Depends(current_user)):
