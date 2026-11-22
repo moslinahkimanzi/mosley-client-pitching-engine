@@ -1747,22 +1747,33 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
         raise HTTPException(422, "Enter a town, city or named administrative area.")
 
     query = serper_query_for(payload)
-    cache_key = query.casefold()
-    cached = _SERPER_CACHE.get(cache_key)
-    places = cached[1] if cached and time.time() - cached[0] < _SERPER_CACHE_TTL else None
-    if places is None:
-        # Ask Places for a broader candidate pool. The requested max_results
-        # is a per-category target, not a cap on candidates scanned.
-        request_payload = {"q": query, "num": 20}
-        gl = os.getenv("SERPER_GL", "").strip()
-        hl = os.getenv("SERPER_HL", "en").strip()
-        if gl:
-            request_payload["gl"] = gl
-        if hl:
-            request_payload["hl"] = hl
-        data = serper_request("places", request_payload)
-        places = [item for item in (data.get("places") or []) if isinstance(item, dict)]
-        _SERPER_CACHE[cache_key] = (time.time(), places)
+    # Three bounded discovery variants broaden coverage without pretending that
+    # one top-ranked Places response is a complete directory of a location.
+    discovery_queries = [
+        query,
+        "independent " + query,
+        "local " + query,
+    ]
+    places = []
+    gl = os.getenv("SERPER_GL", "").strip()
+    hl = os.getenv("SERPER_HL", "en").strip()
+    for discovery_query in discovery_queries:
+        cache_key = discovery_query.casefold()
+        cached = _SERPER_CACHE.get(cache_key)
+        candidates = cached[1] if cached and time.time() - cached[0] < _SERPER_CACHE_TTL else None
+        if candidates is None:
+            request_payload = {"q": discovery_query, "num": 20}
+            if gl:
+                request_payload["gl"] = gl
+            if hl:
+                request_payload["hl"] = hl
+            data = serper_request("places", request_payload)
+            candidates = [item for item in (data.get("places") or []) if isinstance(item, dict)]
+            _SERPER_CACHE[cache_key] = (time.time(), candidates)
+        places.extend(candidates)
+    # Hard cap: a maximum of 60 Places candidates per run. Each candidate can
+    # also consume one independent web corroboration query.
+    places = places[:60]
 
     discovered = []
     saved_count = verified_count = rejected_count = pitch_ready_count = 0
