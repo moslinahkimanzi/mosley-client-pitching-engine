@@ -944,6 +944,24 @@ def google_oauth_config():
     return client_id, client_secret, redirect_uri
 
 
+@app.get("/api/auth/google/bootstrap-required")
+def google_bootstrap_required(email: str = Query(min_length=3, max_length=254), request: Request = None):
+    normalized = email.strip().lower()
+    try:
+        validate_email(normalized)
+    except HTTPException:
+        return {"required": False}
+    ip = request.client.host if request and request.client else "unknown"
+    ip_tag = hashlib.sha256(ip.encode()).hexdigest()[:24]
+    if consume_rate_limits(["google-bootstrap-check:" + ip_tag], 30, 900):
+        raise HTTPException(429, "Too many checks. Try again later.")
+    if not is_configured_admin_email(normalized):
+        return {"required": False}
+    with db() as c:
+        exists = c.execute("SELECT 1 FROM users WHERE email=?", (normalized,)).fetchone()
+    return {"required": not bool(exists)}
+
+
 @app.post("/api/auth/google/start")
 def google_login_start(payload: GoogleLoginStartIn, response: Response, request: Request):
     client_id, _, redirect_uri = google_oauth_config()
