@@ -1173,6 +1173,15 @@ def prospect_quality_metrics(user=Depends(current_user)):
 def review_quality_validation(sample_id: str, payload: ValidationReviewIn, user=Depends(current_user)):
     if not payload.reviewer_evidence.strip():
         raise HTTPException(422, "Provide an independent source or evidence description for this review.")
+    if payload.ground_truth_identity != "exists" and (
+        payload.ground_truth_website_presence != "unknown"
+        or payload.ground_truth_website_state != "not_assessed"
+        or payload.ground_truth_email_correct is not None
+        or payload.ground_truth_phone_correct is not None
+    ):
+        raise HTTPException(422, "Only label website and contact accuracy after independently confirming that the business exists.")
+    if payload.ground_truth_website_presence == "no_website_found" and payload.ground_truth_website_state != "not_assessed":
+        raise HTTPException(422, "A no-website-found label cannot also have a website status. Use website found or unknown.")
     stamp = now()
     with db() as c:
         row = c.execute(
@@ -1232,10 +1241,16 @@ def update_lead(lead_id: str, payload: LeadIn, user=Depends(current_user)):
     validate_email(payload.contact_email)
     with db() as c:
         cur = c.execute("""UPDATE leads SET name=?,website=?,market=?,evidence=?,status=?,contact_email=?,
-            contact_phone=?,source_url=?,do_not_contact=?,updated_at=? WHERE id=? AND user_id=?""",
+            contact_phone=?,source_url=?,do_not_contact=?,
+            website_presence=CASE
+                WHEN ? IS NOT NULL AND ? != '' THEN 'website_found'
+                WHEN research_origin='serper_places' THEN
+                    CASE WHEN website_presence='website_found' THEN 'unknown' ELSE website_presence END
+                ELSE 'unknown' END,
+            updated_at=? WHERE id=? AND user_id=?""",
             (payload.name.strip(), payload.website, payload.market, payload.evidence, payload.status,
              payload.contact_email, payload.contact_phone, payload.source_url, int(payload.do_not_contact),
-             now(), lead_id, user["id"]))
+             payload.website, payload.website, now(), lead_id, user["id"]))
         if not cur.rowcount:
             raise HTTPException(404, "Prospect not found")
         audit(c, user["id"], "lead.updated", {"lead_id": lead_id})
