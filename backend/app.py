@@ -36,6 +36,7 @@ from pydantic import BaseModel, Field
 
 from backend.advanced_audit import analyze_document
 from backend.prospect_verification import verify_candidate, qualify_website_opportunity
+from backend.quality_metrics import build_quality_metrics, website_presence_category
 
 try:
     from cryptography.fernet import Fernet, InvalidToken
@@ -222,6 +223,34 @@ def init_db():
             status TEXT NOT NULL DEFAULT 'Unverified',score INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS prospect_validation_samples(
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            lead_id TEXT,
+            business_name TEXT NOT NULL,
+            industry TEXT NOT NULL,
+            location TEXT NOT NULL,
+            predicted_identity_verified INTEGER NOT NULL,
+            predicted_website_presence TEXT NOT NULL,
+            predicted_website_state TEXT NOT NULL,
+            predicted_contact_email TEXT,
+            predicted_contact_phone TEXT,
+            ground_truth_identity TEXT NOT NULL DEFAULT 'unknown',
+            ground_truth_website_presence TEXT NOT NULL DEFAULT 'unknown',
+            ground_truth_website_state TEXT NOT NULL DEFAULT 'not_assessed',
+            ground_truth_email_correct INTEGER,
+            ground_truth_phone_correct INTEGER,
+            reviewer_evidence TEXT NOT NULL DEFAULT '',
+            reviewer_notes TEXT NOT NULL DEFAULT '',
+            reviewed_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_validation_user_created
+            ON prospect_validation_samples(user_id,created_at);
+        CREATE INDEX IF NOT EXISTS idx_validation_user_strata
+            ON prospect_validation_samples(user_id,industry,location);
         CREATE TABLE IF NOT EXISTS drafts(
             id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             lead_id TEXT,kind TEXT NOT NULL,subject TEXT NOT NULL,body TEXT NOT NULL,
@@ -343,6 +372,7 @@ def init_db():
         add_column(c, "leads", "pitch_eligible", "INTEGER NOT NULL DEFAULT 0")
         add_column(c, "leads", "opportunity_reason", "TEXT NOT NULL DEFAULT ''")
         add_column(c, "leads", "verified_at", "TEXT")
+        add_column(c, "leads", "website_presence", "TEXT NOT NULL DEFAULT 'unknown'")
         add_column(c, "drafts", "to_email", "TEXT")
         add_column(c, "drafts", "gmail_draft_id", "TEXT")
         add_column(c, "integrations", "account_email", "TEXT")
@@ -642,6 +672,15 @@ class ResearchRunIn(BaseModel):
     industry: Literal["any", "restaurant", "salon", "retail", "professional", "hotel", "healthcare", "education"] = "any"
     keywords: str = Field(default="", max_length=120)
     max_results: int = Field(default=6, ge=1, le=12)
+
+class ValidationReviewIn(BaseModel):
+    ground_truth_identity: Literal["exists", "does_not_exist", "unknown"] = "unknown"
+    ground_truth_website_presence: Literal["website_found", "no_website_found", "unknown"] = "unknown"
+    ground_truth_website_state: Literal["working", "broken", "needs_improvement", "access_restricted", "not_assessed"] = "not_assessed"
+    ground_truth_email_correct: Optional[bool] = None
+    ground_truth_phone_correct: Optional[bool] = None
+    reviewer_evidence: str = Field(min_length=10, max_length=4000)
+    reviewer_notes: str = Field(default="", max_length=2000)
 
 class CompetitorIn(BaseModel):
     lead_id: str = Field(min_length=1, max_length=100)
@@ -1107,6 +1146,66 @@ def logout(request: Request, response: Response):
 @app.get("/api/auth/me")
 def me(user=Depends(current_user)):
     return {**user, "email_verified": bool(user.get("email_verified")), "is_admin": user_is_admin(user)}
+
+@app.get("/api/quality/validation")
+def list_quality_validation(user=Depends(current_user)):
+    """Return only the signed-in workspace's prospect validation samples."""
+    with db() as c:
+        rows = c.execute(
+            "SELECT * FROM prospect_validation_samples WHERE user_id=? ORDER BY created_at DESC",
+            (user["id"],),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+@app.get("/api/quality/metrics")
+def prospect_quality_metrics(user=Depends(current_user)):
+    """Compute descriptive metrics from this workspace's independently reviewed samples."""
+    with db() as c:
+        rows = c.execute(
+            "SELECT * FROM prospect_validation_samples WHERE user_id=? ORDER BY created_at DESC",
+            (user["id"],),
+        ).fetchall()
+    return build_quality_metrics(dict(row) for row in rows)
+
+
+@app.post("/api/quality/validation/{sample_id}")
+def review_quality_validation(sample_id: str, payload: ValidationReviewIn, user=Depends(current_user)):
+    if not payload.reviewer_evidence.strip():
+        raise HTTPException(422, "Provide an independent source or evidence description for this review.")
+    stamp = now()
+    with db() as c:
+        row = c.execute(
+            "SELECT id FROM prospect_validation_samples WHERE id=? AND user_id=?",
+            (sample_id, user["id"]),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Validation sample not found in this workspace.")
+        c.execute(
+            """UPDATE prospect_validation_samples SET
+               ground_truth_identity=?,ground_truth_website_presence=?,ground_truth_website_state=?,
+               ground_truth_email_correct=?,ground_truth_phone_correct=?,
+               reviewer_evidence=?,reviewer_notes=?,reviewed_at=?,updated_at=?
+               WHERE id=? AND user_id=?""",
+            (
+                payload.ground_truth_identity, payload.ground_truth_website_presence,
+                payload.ground_truth_website_state,
+                None if payload.ground_truth_email_correct is None else int(payload.ground_truth_email_correct),
+                None if payload.ground_truth_phone_correct is None else int(payload.ground_truth_phone_correct),
+                payload.reviewer_evidence.strip(), payload.reviewer_notes.strip(), stamp, stamp,
+                sample_id, user["id"],
+            ),
+        )
+        audit(c, user["id"], "quality.validation_reviewed", {
+            "sample_id": sample_id,
+            "identity_labelled": payload.ground_truth_identity != "unknown",
+            "website_presence_labelled": payload.ground_truth_website_presence != "unknown",
+            "website_status_labelled": payload.ground_truth_website_state != "not_assessed",
+            "email_checked": payload.ground_truth_email_correct is not None,
+            "phone_checked": payload.ground_truth_phone_correct is not None,
+        })
+    return {"ok": True, "reviewed_at": stamp}
+
 
 @app.get("/api/leads")
 def list_leads(user=Depends(current_user)):
@@ -1729,6 +1828,24 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                 "Independent corroboration could not be completed: " + corroboration_error
             )
         tags = serper_business_tags(payload.industry, category)
+        sample_id = secrets.token_urlsafe(18)
+        website_presence = website_presence_category(
+            website, verification, search_completed=not bool(corroboration_error)
+        )
+        with db() as c:
+            c.execute(
+                """INSERT INTO prospect_validation_samples(
+                    id,user_id,business_name,industry,location,
+                    predicted_identity_verified,predicted_website_presence,predicted_website_state,
+                    predicted_contact_email,predicted_contact_phone,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    sample_id, user["id"], name, payload.industry, location,
+                    int(bool(verification["verified"])), website_presence,
+                    website_state if website_state in {"working","broken","needs_improvement","access_restricted"} else "unknown",
+                    email, phone, now(), now(),
+                ),
+            )
         if address:
             tags["addr:street"] = address
         strategy = business_strategy(tags)
@@ -1780,6 +1897,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                 "verification_reasons": verification["reasons"],
                 "verification_error": corroboration_error,
                 "website": website, "website_state": website_state,
+                "website_presence": website_presence, "validation_sample_id": sample_id,
                 "evidence": evidence, "source_url": source_url,
                 "opportunity_score": score, "score_reasons": score_reasons,
                 "pitch_eligible": False, "opportunity_reason": "business_identity_not_verified",
@@ -1800,6 +1918,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                     "verification_status": "verified",
                     "verification_score": verification["evidence_score"],
                     "website": website, "website_state": website_state,
+                    "website_presence": website_presence, "validation_sample_id": sample_id,
                     "evidence": evidence, "source_url": source_url,
                     "opportunity_score": score, "score_reasons": score_reasons,
                     "pitch_eligible": bool(existing["pitch_eligible"]),
@@ -1815,14 +1934,14 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                     id,user_id,name,website,market,evidence,status,score,created_at,updated_at,
                     contact_email,contact_phone,source_url,do_not_contact,research_origin,
                     verification_status,verification_score,verification_evidence,
-                    pitch_eligible,opportunity_reason,verified_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?)""",
+                    pitch_eligible,opportunity_reason,verified_at,website_presence
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,?)""",
                 (
                     lead_id, user["id"], name, website, location, evidence, "Verified", score,
                     stamp, stamp, email, phone, source_url, "serper_places",
                     "verified", verification["evidence_score"],
                     json.dumps(verification, ensure_ascii=False)[:12000],
-                    int(pitch_eligible), opportunity_reason, stamp,
+                    int(pitch_eligible), opportunity_reason, stamp, website_presence,
                 ),
             )
             audit(c, user["id"], "research.prospect_verified", {
@@ -1890,6 +2009,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             "verification_score": verification["evidence_score"],
             "verification_reasons": verification["reasons"],
             "website": website, "website_state": website_state,
+            "website_presence": website_presence, "validation_sample_id": sample_id,
             "evidence": evidence, "source_url": source_url,
             "contact_email": email, "contact_email_corroborated": verification["email_corroborated"],
             "contact_phone": phone, "contact_phone_corroborated": verification["phone_corroborated"],
