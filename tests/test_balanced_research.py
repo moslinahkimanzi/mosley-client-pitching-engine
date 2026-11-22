@@ -99,7 +99,7 @@ class BalancedResearchTest(unittest.TestCase):
             "Example Italian Restaurant", "Nairobi",
             "Westlands, Nairobi, Kenya", results,
         )
-        self.assertEqual(candidate, "https://exampleitalianrestaurant.co.ke")
+        self.assertEqual(candidate, "https://example-italian-restaurant.co.ke")
 
 
 if __name__ == "__main__":
