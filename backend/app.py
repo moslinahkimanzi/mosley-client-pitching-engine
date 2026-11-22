@@ -359,11 +359,11 @@ async def security_middleware(request: Request, call_next):
         category, cap = "ai", 6
     elif path == "/api/feedback":
         category, cap = "feedback", 5
-    elif path == "/api/admin/improvements/analyze":
+    elif path in {"/api/admin/improvements/analyze", "/api/admin/test-lab/plan"}:
         category, cap = "improvement_analysis", 3
     elif path in {"/api/research/search", "/api/research/run"}:
         category, cap = "search", 5
-    elif path == "/api/audit-website":
+    elif path == "/api/audit-website" or path == "/api/admin/test-lab/audit" or path.endswith("/verify-website"):
         category, cap = "website", 10
     elif path.endswith("/gmail") and request.method == "POST":
         category, cap = "gmail", 8
