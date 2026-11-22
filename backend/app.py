@@ -1799,6 +1799,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                 "source_count": len(verification["sources"]), "pitch_eligible": pitch_eligible,
             })
 
+            verified_email = email if verification["email_corroborated"] else None
             proposal_id = None
             draft_id = None
             if pitch_eligible:
@@ -1826,7 +1827,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                     """INSERT INTO drafts(id,user_id,lead_id,kind,subject,body,state,created_at,to_email)
                        VALUES(?,?,?,?,?,?,?,?,?)""",
                     (draft_id, user["id"], lead_id, "Cold email", subject, body,
-                     "pending_approval", stamp, email),
+                     "pending_approval", stamp, verified_email),
                 )
                 pitch_ready_count += 1
 
@@ -1839,7 +1840,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
 
         gmail_draft_created = False
         gmail_draft_error = None
-        if pitch_eligible and email and draft_id:
+        if pitch_eligible and verified_email and draft_id:
             with db() as c:
                 gmail_connected = bool(c.execute(
                     "SELECT 1 FROM integrations WHERE user_id=? AND provider='gmail'", (user["id"],)
@@ -1859,7 +1860,8 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             "verification_reasons": verification["reasons"],
             "website": website, "website_state": website_state,
             "evidence": evidence, "source_url": source_url,
-            "contact_email": email, "contact_phone": phone,
+            "contact_email": email, "contact_email_corroborated": verification["email_corroborated"],
+            "contact_phone": phone, "contact_phone_corroborated": verification["phone_corroborated"],
             "recommendation": strategy["type"], "pages": strategy["pages"],
             "opportunity_score": score, "score_reasons": score_reasons,
             "pitch_eligible": pitch_eligible, "opportunity_reason": opportunity_reason,
