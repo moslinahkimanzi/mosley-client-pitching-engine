@@ -85,6 +85,9 @@ class ResearchWorkflowTest(unittest.TestCase):
         self.assertIn("independent Serper web corroboration", result["provider"])
         self.assertEqual(result["resolved_location"], "Nairobi")
         self.assertEqual(len(result["results"]), 1)
+        self.assertNotIn("balanced_results", result)
+        self.assertNotIn("balance", result)
+        self.assertEqual(result["research_limits"]["max_verified_results"], 6)
         prospect = result["results"][0]
         self.assertTrue(prospect["verified"])
         self.assertEqual(prospect["verification_status"], "verified")
@@ -187,6 +190,42 @@ class ResearchWorkflowTest(unittest.TestCase):
         self.assertEqual(client.get("/api/leads").json(), [])
         self.assertEqual(client.get("/api/proposals").json(), [])
         self.assertEqual(client.get("/api/drafts").json(), [])
+
+    def test_research_stops_at_overall_verified_target_without_category_targets(self):
+        client, csrf = self._registered_client()
+        places_response = {
+            "places": [
+                {"title": "Target Restaurant One", "address": "1 Test Road, Nairobi, Kenya",
+                 "website": "https://one.example"},
+                {"title": "Target Restaurant Two", "address": "2 Test Road, Nairobi, Kenya",
+                 "website": "https://two.example"},
+                {"title": "Target Restaurant Three", "address": "3 Test Road, Nairobi, Kenya",
+                 "website": "https://three.example"},
+            ]
+        }
+        with patch.dict(os.environ, {"SERPER_API_KEY": "test-serper-key"}), patch.object(
+            mcas, "serper_request", return_value=places_response
+        ) as serper, patch.object(
+            mcas, "safe_site_fetch",
+            side_effect=[
+                {"http_status": 200, "title": "Target Restaurant One"},
+                {"http_status": 200, "title": "Target Restaurant Two"},
+            ],
+        ) as site_fetch:
+            response = client.post(
+                "/api/research/run",
+                json={"location": "Nairobi", "industry": "restaurant", "max_results": 2},
+                headers={"X-CSRF-Token": csrf},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual(result["summary"]["verified_businesses"], 2)
+        self.assertEqual(len(result["results"]), 2)
+        self.assertEqual(serper.call_count, 1)
+        self.assertEqual(serper.call_args.args[0], "places")
+        self.assertEqual(site_fetch.call_count, 2)
+        self.assertNotIn("website_research_groups", result["summary"])
+        self.assertNotIn("balanced_results", result)
 
     def test_quality_review_requires_evidence_and_is_workspace_private(self):
         client, csrf = self._registered_client()
