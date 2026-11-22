@@ -1418,7 +1418,7 @@ def safe_site_fetch(initial_url):
             raise HTTPException(400, "HTTPS-to-HTTP redirects are blocked")
         ip = resolve_public(p.hostname)
         conn_cls = PinnedHTTPS if p.scheme == "https" else PinnedHTTP
-        conn = conn_cls(p.hostname, ip, port, 8)
+        conn = conn_cls(p.hostname, ip, port, 5)
         path = urllib.parse.urlunparse(("", "", p.path or "/", p.params, p.query, ""))
         try:
             conn.request("GET", path, headers={"Host": p.hostname, "User-Agent": "MCAS-SiteAudit/1.0",
@@ -1847,7 +1847,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             website=website, website_audit=website_audit, source_url=source_url,
         )
         needs_web_corroboration = not verification["verified"]
-        corroboration_error = corroboration_service_error
+        corroboration_error = corroboration_service_error if needs_web_corroboration else None
         web_results = []
         if needs_web_corroboration and not corroboration_error:
             web_cache_key = "web:" + re.sub(r"[^a-z0-9]+", " ", (name + " " + address).casefold()).strip()
