@@ -363,30 +363,84 @@ def verify_candidate(
     }
 
 
+def verified_website_problem_findings(website_audit: dict | None) -> list[dict]:
+    """Return only reproducible homepage observations suitable for a sales diagnosis.
+
+    This deliberately excludes inferred vulnerabilities, unavailable cookie flags,
+    and recommendations that cannot be established from one bounded HTML response.
+    """
+    audit = website_audit or {}
+    advanced = audit.get("advanced_audit") if isinstance(audit.get("advanced_audit"), dict) else audit
+    raw = advanced.get("findings") if isinstance(advanced, dict) else []
+    allowed = {
+        "Page title", "Meta description", "Single primary heading",
+        "Viewport metadata", "Image alternative text", "Contact pathway",
+        "Clear action elements",
+    }
+    results = []
+    seen = set()
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or item.get("name") or "").strip()
+        evidence = str(item.get("evidence") or "").strip()
+        category = str(item.get("category") or "").strip()
+        key = (title, evidence)
+        if title in allowed and evidence and key not in seen:
+            seen.add(key)
+            results.append({
+                "title": title[:120],
+                "category": category[:80],
+                "evidence": evidence[:500],
+                "status": "observed_on_fetched_homepage",
+            })
+    # Older/basic fetch responses may not contain the advanced audit payload.
+    if not results:
+        basic_checks = (
+            ("Viewport metadata", "has_viewport_meta"),
+            ("Meta description", "has_meta_description"),
+        )
+        for label, key in basic_checks:
+            if audit.get(key) is False:
+                results.append({
+                    "title": label,
+                    "category": "technical",
+                    "evidence": label + " was not detected in the fetched homepage HTML.",
+                    "status": "observed_on_fetched_homepage",
+                })
+        if audit.get("title") is None and audit.get("http_status") and 200 <= int(audit.get("http_status") or 0) < 400:
+            results.append({
+                "title": "Page title",
+                "category": "technical",
+                "evidence": "No HTML page title was detected in the fetched homepage response.",
+                "status": "observed_on_fetched_homepage",
+            })
+    return results[:12]
+
+
 def qualify_website_opportunity(
     verification: dict,
     website_state: str,
     website_audit: dict | None = None,
 ) -> tuple[bool, str]:
-    """Require a verified identity and a reproducible, identity-linked website issue."""
+    """Require verified business identity and reproducible, first-party website evidence."""
     website_audit = website_audit or {}
     if verification.get("status") != "verified":
         return False, "business_identity_not_verified"
+    identity_linked = bool(
+        verification.get("website_identity_match")
+        or verification.get("website_domain_corroborated")
+    )
     if (website_state == "broken"
             and int(website_audit.get("confirmed_unavailable_checks") or 0) >= 2
-            and (verification.get("website_identity_match") or verification.get("website_domain_corroborated"))):
+            and identity_linked):
         return True, "identity_linked_website_returned_404_or_410_twice"
-    if website_state == "needs_improvement" and verification.get("website_identity_match"):
-        missing = [
-            key for key in ("has_viewport_meta", "has_meta_description")
-            if website_audit.get(key) is False
-        ]
-        if website_audit.get("title") is None:
-            missing.append("title")
-        if missing:
-            return True, "confirmed_homepage_metadata_gaps"
+    if website_state == "needs_improvement" and identity_linked:
+        findings = verified_website_problem_findings(website_audit)
+        if findings:
+            return True, "verified_first_party_homepage_technical_observations"
     if website_state == "not_listed":
-        return False, "website_not_listed_is_not_proof_of_no_website"
-    if website_state == "needs_review" or website_state == "access_restricted":
+        return False, "website_not_identified_in_bounded_search_not_proof_of_absence"
+    if website_state in {"needs_review", "access_restricted"}:
         return False, "website_condition_not_verified"
-    return False, "no_material_website_issue_detected"
+    return False, "no_material_identity_linked_website_issue_detected"

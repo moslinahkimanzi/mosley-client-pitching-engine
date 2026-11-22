@@ -287,6 +287,12 @@ def init_db():
             state_hash TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             expires_at INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS google_login_states(
+            state_hash TEXT PRIMARY KEY,
+            admin_bootstrap_authorized INTEGER NOT NULL DEFAULT 0,
+            expires_at INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS integrations(
             user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             provider TEXT NOT NULL,encrypted_refresh_token TEXT NOT NULL,connected_at TEXT NOT NULL,
@@ -634,7 +640,6 @@ class MfaCodeIn(BaseModel):
 
 
 class AdminMfaSetupIn(BaseModel):
-    password: str = Field(min_length=1, max_length=200)
     bootstrap_token: str = Field(min_length=32, max_length=200)
 
 class LoginIn(BaseModel):
@@ -919,6 +924,173 @@ def send_email_verification_message(recipient: str, verification_url: str) -> bo
             getattr(exc, "smtp_code", None),
         )
         return False
+
+
+class GoogleLoginStartIn(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    admin_bootstrap_token: str = Field(default="", max_length=200)
+
+
+def google_oauth_config():
+    client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "").strip()
+    client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
+    redirect_uri = os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "").strip()
+    if not (client_id and client_secret and redirect_uri):
+        raise HTTPException(503, "Google sign-in is not configured. The operator must set GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and GOOGLE_OAUTH_REDIRECT_URI.")
+    parsed = urllib.parse.urlparse(redirect_uri)
+    if parsed.scheme not in ({"https"} if IS_PROD else {"https", "http"}) or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+        raise HTTPException(503, "GOOGLE_OAUTH_REDIRECT_URI must be a valid HTTPS callback URL (HTTP is allowed only in development).")
+    return client_id, client_secret, redirect_uri
+
+
+@app.get("/api/auth/google/bootstrap-required")
+def google_bootstrap_required(request: Request, email: str = Query(min_length=3, max_length=254)):
+    normalized = email.strip().lower()
+    try:
+        validate_email(normalized)
+    except HTTPException:
+        return {"required": False}
+    ip = request.client.host if request and request.client else "unknown"
+    ip_tag = hashlib.sha256(ip.encode()).hexdigest()[:24]
+    if consume_rate_limits(["google-bootstrap-check:" + ip_tag], 30, 900):
+        raise HTTPException(429, "Too many checks. Try again later.")
+    if not is_configured_admin_email(normalized):
+        return {"required": False}
+    with db() as c:
+        exists = c.execute("SELECT 1 FROM users WHERE email=?", (normalized,)).fetchone()
+    return {"required": not bool(exists)}
+
+
+@app.post("/api/auth/google/start")
+def google_login_start(payload: GoogleLoginStartIn, response: Response, request: Request):
+    client_id, _, redirect_uri = google_oauth_config()
+    email = payload.email.strip().lower()
+    validate_email(email)
+    ip = request.client.host if request.client else "unknown"
+    ip_tag = hashlib.sha256(ip.encode()).hexdigest()[:24]
+    if consume_rate_limits(["google-login-start:" + ip_tag], 20, 900):
+        raise HTTPException(429, "Too many Google sign-in attempts. Try again later.")
+    admin_authorized = False
+    if is_configured_admin_email(email):
+        with db() as c:
+            existing = c.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
+        if not existing:
+            bootstrap = os.getenv("MCAS_ADMIN_BOOTSTRAP_TOKEN", "")
+            if len(bootstrap) < 32 or not hmac.compare_digest(bootstrap, payload.admin_bootstrap_token):
+                raise HTTPException(403, "A valid administrator bootstrap token is required to create the configured administrator account.")
+            admin_authorized = True
+    state = secrets.token_urlsafe(32)
+    with db() as c:
+        c.execute("DELETE FROM google_login_states WHERE expires_at<?", (int(time.time()),))
+        c.execute(
+            "INSERT INTO google_login_states(state_hash,admin_bootstrap_authorized,expires_at,created_at) VALUES(?,?,?,?)",
+            (token_hash(state), int(admin_authorized), int(time.time()) + 600, now()),
+        )
+    response.set_cookie("mcas_google_state", state, max_age=600, httponly=True,
+                        secure=IS_PROD, samesite="lax", path="/")
+    params = urllib.parse.urlencode({
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state,
+        "prompt": "select_account",
+    })
+    return {"authorization_url": "https://accounts.google.com/o/oauth2/v2/auth?" + params}
+
+
+@app.get("/api/auth/google/callback")
+def google_login_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+    if error:
+        return RedirectResponse("/?google=cancelled", status_code=303)
+    cookie_state = request.cookies.get("mcas_google_state", "") if request else ""
+    if not code or not state or not cookie_state or not hmac.compare_digest(state, cookie_state):
+        raise HTTPException(400, "Google sign-in state is invalid or expired. Start again.")
+    with db() as c:
+        state_row = c.execute(
+            "SELECT * FROM google_login_states WHERE state_hash=? AND expires_at>?",
+            (token_hash(state), int(time.time())),
+        ).fetchone()
+        if not state_row:
+            raise HTTPException(400, "Google sign-in state was already used or expired. Start again.")
+        c.execute("DELETE FROM google_login_states WHERE state_hash=?", (token_hash(state),))
+    client_id, client_secret, redirect_uri = google_oauth_config()
+    token_body = urllib.parse.urlencode({
+        "code": code, "client_id": client_id, "client_secret": client_secret,
+        "redirect_uri": redirect_uri, "grant_type": "authorization_code",
+    }).encode()
+    try:
+        token_request = urllib.request.Request(
+            "https://oauth2.googleapis.com/token", data=token_body,
+            headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(token_request, timeout=10) as result:
+            token_data = json.loads(result.read(32768).decode("utf-8"))
+        access_token = str(token_data.get("access_token") or "")
+        if not access_token:
+            raise ValueError("Google did not return an access token.")
+        profile_request = urllib.request.Request(
+            "https://openidconnect.googleapis.com/v1/userinfo",
+            headers={"Authorization": "Bearer " + access_token, "Accept": "application/json"},
+        )
+        with urllib.request.urlopen(profile_request, timeout=10) as result:
+            profile = json.loads(result.read(32768).decode("utf-8"))
+    except Exception:
+        SECURITY_LOGGER.warning("Google OAuth exchange or userinfo lookup failed.")
+        raise HTTPException(502, "Google sign-in could not be completed. Try again.")
+    email = str(profile.get("email") or "").strip().lower()
+    subject = str(profile.get("sub") or "").strip()
+    verified_email = profile.get("email_verified") is True
+    if not subject or not verified_email:
+        raise HTTPException(403, "Google did not return a verified email identity.")
+    try:
+        validate_email(email)
+    except HTTPException:
+        raise HTTPException(403, "Google returned an invalid account email.")
+    is_admin = is_configured_admin_email(email)
+    uid = None
+    with db() as c:
+        row = c.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
+        if row:
+            uid = row["id"]
+            c.execute("UPDATE users SET email_verified=1,email_verified_at=COALESCE(email_verified_at,?) WHERE id=?", (now(), uid))
+            audit(c, uid, "account.google_login")
+        else:
+            if is_admin and not int(state_row["admin_bootstrap_authorized"]):
+                raise HTTPException(403, "The configured administrator account must be created through the administrator bootstrap flow.")
+            uid = secrets.token_urlsafe(18)
+            c.execute(
+                "INSERT INTO users(id,email,password_hash,created_at,email_verified,email_verified_at) VALUES(?,?,?,?,1,?)",
+                (uid, email, password_hash(secrets.token_urlsafe(48)), now(), now()),
+            )
+            audit(c, uid, "account.created_google")
+        if is_admin and ADMIN_MFA_REQUIRED:
+            user_row = c.execute("SELECT admin_totp_secret FROM users WHERE id=?", (uid,)).fetchone()
+            if user_row and user_row["admin_totp_secret"]:
+                challenge = secrets.token_urlsafe(32)
+                c.execute("DELETE FROM mfa_login_challenges WHERE expires_at<?", (int(time.time()),))
+                c.execute(
+                    "INSERT INTO mfa_login_challenges(token_hash,user_id,expires_at,attempts) VALUES(?,?,?,0)",
+                    (mfa_challenge_hash(challenge), uid, int(time.time()) + 300),
+                )
+                audit(c, uid, "admin.mfa_challenge_issued")
+                redirect = RedirectResponse("/?google_mfa=1", status_code=303)
+                redirect.set_cookie("mcas_mfa_challenge", challenge, max_age=300, httponly=True,
+                                    secure=IS_PROD, samesite="strict", path="/")
+                redirect.delete_cookie("mcas_google_state", path="/")
+                return redirect
+        c.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
+        session = secrets.token_urlsafe(36)
+        c.execute("INSERT INTO sessions VALUES(?,?,?)",
+                  (token_hash(session), uid, int(time.time()) + SESSION_SECONDS))
+        audit(c, uid, "account.login_google")
+    redirect = RedirectResponse("/", status_code=303)
+    redirect.set_cookie(COOKIE, session, max_age=SESSION_SECONDS, httponly=True,
+                        secure=IS_PROD, samesite="lax", path="/")
+    set_csrf(redirect)
+    redirect.delete_cookie("mcas_google_state", path="/")
+    return redirect
 
 
 @app.post("/api/auth/register", status_code=201)
@@ -1828,11 +2000,10 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                         website_audit["second_check_error"] = str(getattr(exc, "detail", exc))[:180]
                         website_state = "needs_review"
                 elif 200 <= status < 400:
-                    missing = [
-                        key for key in ("has_viewport_meta", "has_meta_description")
-                        if website_audit.get(key) is False
-                    ]
-                    website_state = "needs_improvement" if missing else "working"
+                    from backend.prospect_verification import verified_website_problem_findings
+                    findings = verified_website_problem_findings(website_audit)
+                    website_audit["verified_problem_findings"] = findings
+                    website_state = "needs_improvement" if findings else "working"
                 elif status in {401, 403, 429}:
                     website_state = "access_restricted"
                 else:
@@ -1881,21 +2052,24 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                     status = int(website_audit.get("http_status") or 0)
                     if status in {404, 410}:
                         website_checks += 1
-                        second = safe_site_fetch(website)
-                        second_status = int(second.get("http_status") or 0)
-                        if second_status in {404, 410}:
-                            confirmed_unavailable_checks = 2
-                            website_audit["second_check_http_status"] = second_status
-                            website_state = "broken"
-                        else:
-                            website_audit["second_check_http_status"] = second_status
+                        try:
+                            second = safe_site_fetch(website)
+                            second_status = int(second.get("http_status") or 0)
+                            if second_status in {404, 410}:
+                                confirmed_unavailable_checks = 2
+                                website_audit["second_check_http_status"] = second_status
+                                website_state = "broken"
+                            else:
+                                website_audit["second_check_http_status"] = second_status
+                                website_state = "needs_review"
+                        except Exception as exc:
+                            website_audit["second_check_error"] = str(getattr(exc, "detail", exc))[:180]
                             website_state = "needs_review"
                     elif 200 <= status < 400:
-                        missing = [
-                            key for key in ("has_viewport_meta", "has_meta_description")
-                            if website_audit.get(key) is False
-                        ]
-                        website_state = "needs_improvement" if missing else "working"
+                        from backend.prospect_verification import verified_website_problem_findings
+                        findings = verified_website_problem_findings(website_audit)
+                        website_audit["verified_problem_findings"] = findings
+                        website_state = "needs_improvement" if findings else "working"
                     elif status in {401, 403, 429}:
                         website_state = "access_restricted"
                     else:
@@ -2223,19 +2397,84 @@ def create_builder_prompt(lead_id: str, user=Depends(current_user)):
     return {"lead_id": lead_id, "business": lead["name"], "prompt": prompt,
             "note": "Client acceptance is recorded, but confirm the final scope, content, budget and delivery terms before starting build work."}
 
-@app.post("/api/audit-website")
-def audit_website(payload: dict, user=Depends(current_user)):
-    raw = str(payload.get("url", ""))[:2048].strip()
+def normalise_public_website_url(value: object) -> str:
+    raw = str(value or "").strip()[:2048]
     if not raw:
         raise HTTPException(422, "Provide a public website URL.")
+    if not re.match(r"^https?://", raw, re.I):
+        raw = "https://" + raw
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        raise HTTPException(422, "Enter a public website domain or HTTP/HTTPS URL without credentials.")
+    return raw
+
+
+def build_admin_feature_test_plan(feature: str, audit_result: dict) -> list[str]:
+    """Create a human-executed acceptance checklist; never run AI-generated code."""
+    text_value = feature.strip()
+    plan = [
+        "Open the staging website in a private browser session and confirm the feature is visible only to the intended role.",
+        "Complete the primary user journey using test data; confirm the expected result and visible confirmation state.",
+        "Test invalid, empty, duplicate and boundary inputs; confirm safe validation and useful error messages.",
+        "Test keyboard-only navigation, labels, focus order and a narrow mobile viewport.",
+        "Confirm the feature does not expose secrets, private records or another customer's workspace data.",
+        "Check browser console and server logs for errors; record the exact URL, browser, timestamp and reproduction steps.",
+        "Repeat the test after refresh and sign-out/sign-in to check persistence and permission enforcement.",
+    ]
+    advanced = audit_result.get("advanced_audit") or {}
+    if (advanced.get("scores") or {}).get("mobile", 100) < 100:
+        plan.append("Manually inspect mobile layout and responsive behaviour; static audit detected mobile-related review items.")
+    if (advanced.get("scores") or {}).get("accessibility", 100) < 100:
+        plan.append("Run keyboard and screen-reader checks; static audit detected accessibility review items.")
+    if (advanced.get("scores") or {}).get("transport_security_headers", 100) < 100:
+        plan.append("Review response security headers with the hosting/security team; missing headers are not proof of an exploitable vulnerability.")
+    return plan[:12]
+
+
+@app.post("/api/audit-website")
+def audit_website(payload: dict, user=Depends(current_user)):
+    raw = normalise_public_website_url(payload.get("url", ""))
     result = safe_site_fetch(raw)
     result["checked_at"] = now()
+    from backend.prospect_verification import verified_website_problem_findings
+    result["website_problem_findings"] = verified_website_problem_findings(result)
+    result["audit_scope"] = "Bounded static homepage HTML and response-header inspection. JavaScript-rendered states and interactions may not be visible."
     with db() as c:
         audit(c, user["id"], "website.audit", {
             "url": result.get("url"), "status": result.get("http_status"),
             "overall_score": (result.get("advanced_audit") or {}).get("overall_score"),
         })
     return result
+
+
+@app.post("/api/admin/test-lab/run")
+def admin_feature_test_lab(payload: dict, user=Depends(current_user)):
+    require_admin(user)
+    feature = str(payload.get("feature") or "").strip()[:2000]
+    if len(feature) < 12:
+        raise HTTPException(422, "Describe the AI-suggested feature or behaviour to test (at least 12 characters).")
+    raw = normalise_public_website_url(payload.get("url", ""))
+    result = safe_site_fetch(raw)
+    result["checked_at"] = now()
+    from backend.prospect_verification import verified_website_problem_findings
+    result["website_problem_findings"] = verified_website_problem_findings(result)
+    plan = build_admin_feature_test_plan(feature, result)
+    with db() as c:
+        audit(c, user["id"], "admin.test_lab.run", {
+            "url": result.get("url"), "feature_length": len(feature),
+            "http_status": result.get("http_status"),
+            "overall_score": (result.get("advanced_audit") or {}).get("overall_score"),
+        })
+    return {
+        "feature": feature,
+        "staging_url": result.get("url"),
+        "http_status": result.get("http_status"),
+        "audit": result.get("advanced_audit"),
+        "observed_findings": result.get("website_problem_findings") or [],
+        "manual_test_plan": plan,
+        "execution_boundary": "This lab performs a safe, read-only static website inspection and creates a manual acceptance checklist. It does not execute generated code, modify the target website, submit forms, authenticate to the target, or prove dynamic feature behaviour.",
+        "checked_at": result["checked_at"],
+    }
 
 
 @app.post("/api/competitor-intelligence")
@@ -2353,10 +2592,14 @@ def assistant_system_prompt(task: str) -> str:
         )
     if task == "email":
         return shared + (
-            "TASK: write a first-contact business email that is specific to the supplied verified evidence. "
-            "If evidence is incomplete, say so rather than claiming a problem. Use a relevant subject and a "
-            "natural, respectful call to action. Include a polite opt-out sentence. Output the subject and body "
-            "clearly, without unsupported claims."
+            "TASK: write a persuasive, highly personalised first-contact business email that is specific to the supplied verified evidence. "
+            "Start with a concise subject line that is relevant, not clickbait. Open with a genuine business-specific observation; "
+            "explain one concrete, evidence-backed website issue and its likely customer/business consequence without exaggerating. "
+            "Connect the issue to a practical improvement the sender can deliver. Explain the value in plain language, avoid generic praise, "
+            "and finish with one low-friction, respectful call to action (for example, permission to send a short outline or arrange a brief call). "
+            "If no verified website problem exists, do not invent one: say the observation is preliminary and offer a general improvement discussion. "
+            "Do not claim the recipient has lost sales, customers or revenue unless supplied evidence proves it. "
+            "Include a polite opt-out sentence. Keep it around 100–160 words. Output a clearly labelled subject and email body only."
         )
     return shared + (
         "TASK: prepare a useful, structured proposal based only on supplied requirements and context. "
@@ -2966,9 +3209,9 @@ def admin_mfa_setup(payload: AdminMfaSetupIn, user=Depends(current_user)):
     if len(bootstrap) < 32 or not hmac.compare_digest(bootstrap, payload.bootstrap_token):
         raise HTTPException(403, "A valid server-side administrator bootstrap token is required for first-time MFA enrollment.")
     with db() as c:
-        row = c.execute("SELECT password_hash,admin_totp_secret FROM users WHERE id=?", (user["id"],)).fetchone()
-        if not row or not verify_password(payload.password, row["password_hash"]):
-            raise HTTPException(401, "Re-enter your MCAS password to begin administrator MFA setup.")
+        row = c.execute("SELECT admin_totp_secret FROM users WHERE id=?", (user["id"],)).fetchone()
+        if not row:
+            raise HTTPException(404, "Administrator account not found.")
         if row["admin_totp_secret"]:
             raise HTTPException(409, "Administrator MFA is already enabled.")
         secret = generate_totp_secret()
@@ -3533,8 +3776,8 @@ def admin_maintenance(user=Depends(current_user)):
          )},
         {"name": "AI feedback improvement analysis", "status": "configured" if os.getenv("AI_API_BASE_URL") and os.getenv("AI_API_KEY") and os.getenv("AI_MODEL") else "not_configured",
          "detail": "Only explicitly opted-in non-security feedback is eligible. The system is capped at " + str(ai_monthly_limit) + " analysis attempts per UTC month."},
-        {"name": "Customer email verification", "status": "not_implemented",
-         "detail": "Customer registration does not verify email ownership in this release."},
+        {"name": "Google sign-in", "status": "configured" if os.getenv("GOOGLE_OAUTH_CLIENT_ID") and os.getenv("GOOGLE_OAUTH_CLIENT_SECRET") and os.getenv("GOOGLE_OAUTH_REDIRECT_URI") else "not_implemented",
+         "detail": "Customer sign-in uses Google OpenID Connect and accepts only a Google-verified email. The OAuth callback and exact redirect URI must be configured in Google Cloud Console."},
         {"name": "Database encryption at rest", "status": "external_action",
          "detail": "MCAS does not encrypt the SQLite database file. Configure encrypted storage or a managed database with encryption at rest."},
         {"name": "Encrypted off-site backups", "status": "external_action",
