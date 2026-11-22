@@ -384,10 +384,12 @@ async function runAdvisorLiveAudit(){
  if(!lead.website)return note('advisorNotice','This prospect has no saved website URL. Add and verify a public URL before running a check.',true);
  const btn=$('advisorLiveAuditBtn');btn.disabled=true;btn.textContent='Checking website…';
  try{
-  const result=await api('/api/audit-website',{method:'POST',body:JSON.stringify({url:lead.website})});
+  const result=await api('/api/audit-website',{method:'POST',body:JSON.stringify({url:lead.website,lead_id:lead.id,max_pages:10})});
   advisorLatestAudit=result;advisorAuditLeadId=lead.id;
+  lead.website_status=result.website_status||lead.website_status;
+  lead.website_verified_at=result.website_status==='verified'?result.checked_at:null;
   renderAdvisorDiagnosis(lead,result);
-  note('advisorNotice','Fresh lightweight website check complete. Findings are shown separately from recommendations.');
+  note('advisorNotice','Fresh bounded multi-page website audit complete. Prospect website status has been refreshed; findings are separated from recommendations.');
  }catch(e){note('advisorNotice','Website check could not be completed: '+e.message,true);}
  finally{btn.disabled=false;btn.textContent='Run fresh website check';}
 }
