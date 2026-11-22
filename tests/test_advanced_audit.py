@@ -36,7 +36,7 @@ class AdvancedAuditTests(unittest.TestCase):
 
         self.assertEqual(report["pages_checked"], 2)
         self.assertEqual(set(fetched), {"https://example.test/", "https://example.test/about"})
-        self.assertEqual(report["summary"]["high"], 1)
+        self.assertEqual(report["summary"]["medium"], 1)
         self.assertTrue(any(item["code"] == "http_error" for item in report["findings"]))
         self.assertIn("penetration-test certification", report["scope_note"])
 
