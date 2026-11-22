@@ -1853,23 +1853,6 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
         website_presence = website_presence_category(
             website, verification, search_completed=not bool(corroboration_error)
         )
-        with db() as c:
-            c.execute(
-                """INSERT INTO prospect_validation_samples(
-                    id,user_id,business_name,industry,location,
-                    predicted_identity_verified,predicted_website_presence,predicted_website_state,
-                    predicted_contact_email,predicted_contact_phone,source_url,website_url,
-                    prediction_evidence,created_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    sample_id, user["id"], name, payload.industry, location,
-                    int(bool(verification["verified"])), website_presence,
-                    website_state if website_state in {"working","broken","needs_improvement","access_restricted"} else "unknown",
-                    email, phone, source_url, website,
-                    json.dumps({"evidence": evidence, "verification": verification, "website_audit": website_audit}, ensure_ascii=False)[:16000],
-                    now(), now(),
-                ),
-            )
         if address:
             tags["addr:street"] = address
         strategy = business_strategy(tags)
@@ -1910,6 +1893,26 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             evidence += " Website condition could not be established reliably."
         elif website_audit:
             evidence += " Listed website responded with HTTP " + str(website_audit.get("http_status")) + "."
+
+        # Capture every candidate and the exact prediction/evidence snapshot before
+        # the save/withhold decision. This makes false negatives measurable too.
+        with db() as c:
+            c.execute(
+                """INSERT INTO prospect_validation_samples(
+                    id,user_id,business_name,industry,location,
+                    predicted_identity_verified,predicted_website_presence,predicted_website_state,
+                    predicted_contact_email,predicted_contact_phone,source_url,website_url,
+                    prediction_evidence,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    sample_id, user["id"], name, payload.industry, location,
+                    int(bool(verification["verified"])), website_presence,
+                    website_state if website_state in {"working","broken","needs_improvement","access_restricted"} else "unknown",
+                    email, phone, source_url, website,
+                    json.dumps({"evidence": evidence, "verification": verification, "website_audit": website_audit}, ensure_ascii=False)[:16000],
+                    now(), now(),
+                ),
+            )
 
         # Uncorroborated results are reported as candidates, never CRM prospects.
         if not verification["verified"]:
