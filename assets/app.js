@@ -7,43 +7,45 @@ function note(id,msg,error=false){$(id).textContent=msg;$(id).className='notice'
 function cookie(name){const item=document.cookie.split('; ').find(x=>x.startsWith(name+'='));return item?decodeURIComponent(item.split('=').slice(1).join('=')):'';}
 async function refreshCsrf(){const r=await fetch('/api/auth/csrf',{credentials:'same-origin'});if(!r.ok)throw new Error('Unable to initialise security token');const j=await r.json();state.csrf=j.csrf_token||cookie('mcas_csrf');}
 async function api(path,opts={}){const method=(opts.method||'GET').toUpperCase();const headers={'Accept':'application/json',...(opts.headers||{})};if(opts.body!==undefined)headers['Content-Type']='application/json';if(['POST','PATCH','DELETE','PUT'].includes(method)){state.csrf=cookie('mcas_csrf')||state.csrf;headers['X-CSRF-Token']=state.csrf;}const r=await fetch(path,{...opts,method,headers,credentials:'same-origin'});const type=r.headers.get('content-type')||'';const data=type.includes('application/json')?await r.json():await r.text();if(!r.ok)throw new Error(data.detail||data.message||data||('Request failed ('+r.status+')'));return data;}
-function showAuth(){ $('app').classList.add('hide');$('auth').classList.remove('hide');$('mfaChallengeForm').classList.add('hide');if(pendingEmailVerificationToken){$('authForm').classList.add('hide');$('authTabs').classList.add('hide');$('emailVerificationPanel').classList.remove('hide');}else{$('authForm').classList.remove('hide');$('authTabs').classList.remove('hide');$('emailVerificationPanel').classList.add('hide');}}
+let googleMfaPending=false;
+function showAuth(){
+ $('app').classList.add('hide');$('auth').classList.remove('hide');
+ $('authForm').classList.toggle('hide',googleMfaPending);
+ $('mfaChallengeForm').classList.toggle('hide',!googleMfaPending);
+}
 function updateAdminNavigation(){const allowed=state.user?.is_admin===true;$('settingsNavGroup').classList.toggle('hide',!allowed);$('settingsNav').classList.toggle('hide',!allowed);}
 function showApp(){ $('auth').classList.add('hide');$('app').classList.remove('hide');$('signedEmail').textContent=state.user.email||'';updateAdminNavigation();}
 function page(name){if(['security','admin-maintenance','ai-improvement-centre'].includes(name)&&!state.user?.is_admin){toast('Settings are private and available only to the configured administrator.',true);name='overview';}document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id===name));document.querySelectorAll('[data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===name));if(name==='prospects')renderLeads();if(name==='quality-validation')loadQualityValidation();if(name==='studio')renderDrafts();if(name==='followups')renderFollowups();if(name==='proposals')renderProposals();if(name==='updates'){loadUpdates();loadMyFeedback();}if(name==='admin-maintenance')loadAdminMaintenance();if(name==='ai-improvement-centre')loadImprovementReviews();}
 document.querySelectorAll('[data-page]').forEach(b=>b.addEventListener('click',()=>page(b.dataset.page)));
 document.querySelectorAll('[data-go]').forEach(b=>b.addEventListener('click',()=>page(b.dataset.go)));
-let pendingEmailVerificationToken='';
-function setAuthMode(mode){state.authMode=mode;$('loginTab').classList.toggle('active',mode==='login');$('registerTab').classList.toggle('active',mode==='register');$('authSubmit').textContent=mode==='login'?'Sign in securely':'Create account';$('authPassword').autocomplete=mode==='login'?'current-password':'new-password';$('authPassword').minLength=mode==='login'?1:12;$('authAdminBootstrapWrap').classList.toggle('hide',mode!=='register');$('authForm').classList.remove('hide');$('mfaChallengeForm').classList.add('hide');$('emailVerificationPanel').classList.add('hide');$('authTabs').classList.remove('hide');note('authNotice','');}
-function showEmailVerification(token,email,message){pendingEmailVerificationToken=token||'';$('authForm').classList.add('hide');$('mfaChallengeForm').classList.add('hide');$('authTabs').classList.add('hide');$('emailVerificationPanel').classList.remove('hide');$('resendVerificationEmail').value=email||$('authEmail').value.trim();$('confirmEmailVerification').classList.toggle('hide',!pendingEmailVerificationToken);note('emailVerificationNotice',message||'Check your inbox for the verification link. It expires in 24 hours.');}
-$('loginTab').addEventListener('click',()=>setAuthMode('login'));$('registerTab').addEventListener('click',()=>setAuthMode('register'));
+let bootstrapCheckTimer=null;
+$('authEmail').addEventListener('input',()=>{
+ clearTimeout(bootstrapCheckTimer);
+ $('authAdminBootstrapWrap').classList.add('hide');
+ $('authAdminBootstrap').required=false;
+ const email=$('authEmail').value.trim();
+ if(!email.includes('@'))return;
+ bootstrapCheckTimer=setTimeout(async()=>{
+  try{
+   const data=await api('/api/auth/google/bootstrap-required?email='+encodeURIComponent(email));
+   const required=data.required===true;
+   $('authAdminBootstrapWrap').classList.toggle('hide',!required);
+   $('authAdminBootstrap').required=required;
+  }catch(_){$('authAdminBootstrapWrap').classList.add('hide');}
+ },250);
+});
 $('authForm').addEventListener('submit',async e=>{
  e.preventDefault();const btn=$('authSubmit');btn.disabled=true;
  try{
   await refreshCsrf();
-  const endpoint=state.authMode==='login'?'/api/auth/login':'/api/auth/register';
-  const payload={email:$('authEmail').value.trim(),password:$('authPassword').value};
-  if(state.authMode==='register')payload.admin_bootstrap_token=$('authAdminBootstrap').value;
-  const data=await api(endpoint,{method:'POST',body:JSON.stringify(payload)});
-  if(data.email_verification_required){
-   $('authPassword').value='';
-   if(data.development_verification_url){const url=new URL(data.development_verification_url,location.origin);showEmailVerification(url.searchParams.get('verify_token'),data.email,'Development mode: MCAS could not confirm email delivery. Use the local verification button below to activate this test account. Check the server terminal for SMTP diagnostics.');}
-   else if(data.email_sent===true){showEmailVerification('',data.email,'The SMTP server accepted the verification message. This confirms handoff to the mail provider, not final inbox delivery. Check Inbox, Spam and Promotions; delivery can be delayed.');}
-    else showEmailVerification('',data.email,data.message||'MCAS could not confirm that the verification email was accepted by the SMTP server. Check the server configuration and logs, then request another link.');
-   return;
-  }
-  if(data.mfa_required){
-   $('authForm').classList.add('hide');$('mfaChallengeForm').classList.remove('hide');
-   $('mfaLoginNotice').textContent=data.message||'Enter your authenticator code.';
-   $('mfaLoginCode').focus();return;
-  }
-  await refreshCsrf();state.user=await api('/api/auth/me');showApp();await loadAll();
- }catch(err){note('authNotice',err.message,true);if(state.authMode==='login'&&/verify your email/i.test(err.message)){showEmailVerification('', $('authEmail').value.trim(),err.message);}}
- finally{btn.disabled=false;}
+  const data=await api('/api/auth/google/start',{method:'POST',body:JSON.stringify({
+   email:$('authEmail').value.trim(),
+   admin_bootstrap_token:$('authAdminBootstrap').value
+  })});
+  if(!data.authorization_url||!data.authorization_url.startsWith('https://accounts.google.com/'))throw new Error('Google returned an invalid sign-in destination.');
+  location.assign(data.authorization_url);
+ }catch(err){note('authNotice',err.message,true);btn.disabled=false;}
 });
-$('confirmEmailVerification').addEventListener('click',async()=>{const btn=$('confirmEmailVerification');btn.disabled=true;try{await refreshCsrf();const result=await api('/api/auth/verify-email/confirm',{method:'POST',body:JSON.stringify({token:pendingEmailVerificationToken})});pendingEmailVerificationToken='';note('emailVerificationNotice',result.message+' You can now sign in.');btn.classList.add('hide');$('authTabs').classList.remove('hide');setAuthMode('login');$('authEmail').value=result.email||$('resendVerificationEmail').value;$('authPassword').focus();}catch(e){note('emailVerificationNotice',e.message,true);}finally{btn.disabled=false;}});
-$('resendVerificationForm').addEventListener('submit',async e=>{e.preventDefault();const btn=e.submitter;btn.disabled=true;try{await refreshCsrf();const result=await api('/api/auth/resend-verification',{method:'POST',body:JSON.stringify({email:$('resendVerificationEmail').value.trim()})});if(result.development_verification_url){const url=new URL(result.development_verification_url,location.origin);showEmailVerification(url.searchParams.get('verify_token'),$('resendVerificationEmail').value,'Development mode: use the local verification button to activate this account.');}else note('emailVerificationNotice',result.message);}catch(err){note('emailVerificationNotice',err.message,true);}finally{btn.disabled=false;}});
-$('verificationBackToLogin').addEventListener('click',()=>{pendingEmailVerificationToken='';history.replaceState({},'',location.pathname);setAuthMode('login');});
 $('mfaChallengeForm').addEventListener('submit',async e=>{
  e.preventDefault();const btn=$('mfaLoginSubmit');btn.disabled=true;
  try{
@@ -468,7 +470,7 @@ $('proposalList').addEventListener('click',()=>{});
 $('gmailConnect').addEventListener('click',()=>{location.href='/api/integrations/gmail/start';});
 $('gmailDisconnect').addEventListener('click',async()=>{try{await api('/api/integrations/gmail',{method:'DELETE'});await loadAll();note('gmailNotice','Gmail disconnected.');}catch(e){note('gmailNotice',e.message,true);}});
 $('downloadExport').addEventListener('click',()=>{const pack={exported_at:new Date().toISOString(),leads:state.leads,drafts:state.drafts,followups:state.followups,proposals:state.proposals};const blob=new Blob([JSON.stringify(pack,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='mcas-workspace-export.json';a.click();URL.revokeObjectURL(a.href);note('exportNotice','Workspace export downloaded. Protect this file; it contains customer information.');});
-function queryFlags(){const u=new URL(location.href);const status=u.searchParams.get('gmail');if(status==='connected')note('gmailNotice','Google account connected. It matches your MCAS sign-in email.');else if(status==='cancelled')note('gmailNotice','Gmail connection was cancelled.');else if(status==='email_mismatch')note('gmailNotice','The Google account you selected does not match the email address you use to sign in to MCAS. No new Gmail connection was saved. Choose the matching Google account.',true);else if(status==='email_unverified')note('gmailNotice','Google did not confirm the selected account email. No Gmail connection was saved.',true);if(status){u.searchParams.delete('gmail');history.replaceState({},'',u.pathname);}const verifyToken=u.searchParams.get('verify_token');if(verifyToken){history.replaceState({},'',u.pathname);showEmailVerification(verifyToken,'','Your verification link is valid. Click Confirm email address below to activate your account. Opening the link alone does not complete verification.');}}
+function queryFlags(){const u=new URL(location.href);const status=u.searchParams.get('gmail');if(status==='connected')note('gmailNotice','Google account connected. It matches your MCAS sign-in email.');else if(status==='cancelled')note('gmailNotice','Gmail connection was cancelled.');else if(status==='email_mismatch')note('gmailNotice','The Google account you selected does not match the email address you use to sign in to MCAS. No new Gmail connection was saved. Choose the matching Google account.',true);else if(status==='email_unverified')note('gmailNotice','Google did not confirm the selected account email. No new Gmail connection was saved.',true);if(status){u.searchParams.delete('gmail');history.replaceState({},'',u.pathname);}googleMfaPending=u.searchParams.get('google_mfa')==='1';if(googleMfaPending){u.searchParams.delete('google_mfa');history.replaceState({},'',u.pathname);$('mfaChallengeForm').classList.remove('hide');$('authForm').classList.add('hide');$('mfaLoginNotice').textContent='Google identity confirmed. Complete your administrator authenticator check.';}}
 
 const advisorProfiles={
  professional:{type:'Professional services website',pages:['Home with a clear value proposition','Services / expertise pages','About and credentials','Case studies or testimonials (with permission)','Contact / consultation request'],features:['Clear enquiry form with spam protection','Service-specific calls to action','Trust signals: credentials, team and verified testimonials','Search-friendly service and location pages'],quality:['Credible, restrained visual design','Fast mobile-first layouts','Accessible typography and contrast','Clear service descriptions and next steps']},
