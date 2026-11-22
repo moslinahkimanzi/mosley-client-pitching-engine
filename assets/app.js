@@ -358,7 +358,7 @@ $('startResearchBtn').addEventListener('click',async()=>{
   })});
   $('researchRunResults').innerHTML=d.results.map(x=>{
    const label=websiteStateText(x.website_state);
-   const verificationBadge=x.verified?'<span class="badge green">IDENTITY VERIFIED · '+esc(x.verification_score)+'/100 evidence</span>':'<span class="badge amber">NOT VERIFIED · NOT SAVED</span>';
+   const verificationBadge=x.verified?'<span class="badge green">IDENTITY VERIFIED · '+esc(x.verification_score)+'/100 evidence</span>':(x.verification_status==='verification_unavailable'?'<span class="badge amber">VERIFICATION UNAVAILABLE · NOT SAVED</span>':'<span class="badge amber">NOT VERIFIED · NOT SAVED</span>');
    const verificationDetails=(x.verification_reasons||[]).length?'<p><b>Verification checks:</b> '+esc(x.verification_reasons.join(' '))+'</p>':'';
    const verificationSources=(x.verification?.sources||[]).filter(v=>v.url&&(v.url.startsWith('https://')||v.url.startsWith('http://'))).map(v=>'<li>'+esc(v.label||v.type)+': <a href="'+safeLink(v.url)+'" target="_blank" rel="noopener noreferrer">'+esc(v.domain||v.url)+'</a></li>').join('');
    const sourceEvidence=verificationSources?'<p><b>Verification evidence sources:</b></p><ul>'+verificationSources+'</ul>':'';
