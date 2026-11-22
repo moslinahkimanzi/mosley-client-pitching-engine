@@ -1751,7 +1751,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
     # scales with the requested per-group target but is deliberately bounded.
     # A smaller pool is faster and cheaper; shortfalls are disclosed, never padded.
     candidate_budget = min(30, max(12, payload.max_results * 4))
-    cache_key = query.casefold()
+    cache_key = query.casefold() + ":" + str(candidate_budget)
     cached = _SERPER_CACHE.get(cache_key)
     places = cached[1] if cached and time.time() - cached[0] < _SERPER_CACHE_TTL else None
     if places is None:
