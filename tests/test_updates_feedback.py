@@ -20,6 +20,13 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
         })
         self.mfa_key_patch.start()
         self.addCleanup(self.mfa_key_patch.stop)
+        # These tests use development verification tokens; do not contact SMTP.
+        self.email_sender_patch = patch("backend.app.send_email_verification_message", return_value=False)
+        self.email_sender_patch.start()
+        self.addCleanup(self.email_sender_patch.stop)
+        self.production_mode_patch = patch("backend.app.IS_PROD", False)
+        self.production_mode_patch.start()
+        self.addCleanup(self.production_mode_patch.stop)
 
     def _register(self, client, email=None):
         email = email or ("updates-test-" + uuid.uuid4().hex + "@example.test")
