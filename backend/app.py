@@ -640,7 +640,6 @@ class MfaCodeIn(BaseModel):
 
 
 class AdminMfaSetupIn(BaseModel):
-    password: str = Field(min_length=1, max_length=200)
     bootstrap_token: str = Field(min_length=32, max_length=200)
 
 class LoginIn(BaseModel):
@@ -3207,9 +3206,9 @@ def admin_mfa_setup(payload: AdminMfaSetupIn, user=Depends(current_user)):
     if len(bootstrap) < 32 or not hmac.compare_digest(bootstrap, payload.bootstrap_token):
         raise HTTPException(403, "A valid server-side administrator bootstrap token is required for first-time MFA enrollment.")
     with db() as c:
-        row = c.execute("SELECT password_hash,admin_totp_secret FROM users WHERE id=?", (user["id"],)).fetchone()
-        if not row or not verify_password(payload.password, row["password_hash"]):
-            raise HTTPException(401, "Re-enter your MCAS password to begin administrator MFA setup.")
+        row = c.execute("SELECT admin_totp_secret FROM users WHERE id=?", (user["id"],)).fetchone()
+        if not row:
+            raise HTTPException(404, "Administrator account not found.")
         if row["admin_totp_secret"]:
             raise HTTPException(409, "Administrator MFA is already enabled.")
         secret = generate_totp_secret()
