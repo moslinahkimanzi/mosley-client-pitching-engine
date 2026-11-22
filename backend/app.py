@@ -559,7 +559,7 @@ def google_authenticate(payload: GoogleSignInIn, response: Response, request: Re
     response.set_cookie(COOKIE, session, max_age=SESSION_SECONDS, httponly=True,
                         secure=IS_PROD, samesite="lax", path="/")
     set_csrf(response)
-    return {"id": uid, "email": email, "is_admin": user_is_admin({"email": email})}
+    return {"id": uid, "email": email, "is_admin": user_is_admin({"email": email, "google_subject": subject})}
 
 def validate_email(email: Optional[str]):
     if email is None or email == "":
@@ -833,7 +833,11 @@ def safe_site_fetch(initial_url):
                 conn.close()
                 if not location or hop == 3:
                     raise HTTPException(502, "Website redirect could not be safely followed")
-                url = urllib.parse.urljoin(url, location)
+                next_url = urllib.parse.urljoin(url, location)
+                next_scheme = urllib.parse.urlparse(next_url).scheme.lower()
+                if p.scheme == "https" and next_scheme != "https":
+                    raise HTTPException(400, "HTTPS-to-HTTP redirects are blocked")
+                url = next_url
                 continue
             ctype = headers.get("content-type", "")
             common = {
