@@ -2175,7 +2175,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
     return {
         "location": location, "resolved_location": location, "query": query,
         "industry": payload.industry,
-        "provider": "Serper Places + conditional independent web corroboration",
+        "provider": "Serper Places + independent Serper web corroboration (conditional)",
         "results": discovered,
         "balanced_results": balanced["balanced_results"],
         "additional_results": balanced["additional_results"],
