@@ -287,6 +287,12 @@ def init_db():
             state_hash TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             expires_at INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS google_login_states(
+            state_hash TEXT PRIMARY KEY,
+            admin_bootstrap_authorized INTEGER NOT NULL DEFAULT 0,
+            expires_at INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS integrations(
             user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             provider TEXT NOT NULL,encrypted_refresh_token TEXT NOT NULL,connected_at TEXT NOT NULL,
@@ -919,6 +925,156 @@ def send_email_verification_message(recipient: str, verification_url: str) -> bo
             getattr(exc, "smtp_code", None),
         )
         return False
+
+
+class GoogleLoginStartIn(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    admin_bootstrap_token: str = Field(default="", max_length=200)
+
+
+def google_oauth_config():
+    client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "").strip()
+    client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
+    redirect_uri = os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "").strip()
+    if not (client_id and client_secret and redirect_uri):
+        raise HTTPException(503, "Google sign-in is not configured. The operator must set GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and GOOGLE_OAUTH_REDIRECT_URI.")
+    parsed = urllib.parse.urlparse(redirect_uri)
+    if parsed.scheme not in ({"https"} if IS_PROD else {"https", "http"}) or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+        raise HTTPException(503, "GOOGLE_OAUTH_REDIRECT_URI must be a valid HTTPS callback URL (HTTP is allowed only in development).")
+    return client_id, client_secret, redirect_uri
+
+
+@app.post("/api/auth/google/start")
+def google_login_start(payload: GoogleLoginStartIn, response: Response, request: Request):
+    client_id, _, redirect_uri = google_oauth_config()
+    email = payload.email.strip().lower()
+    validate_email(email)
+    ip = request.client.host if request.client else "unknown"
+    ip_tag = hashlib.sha256(ip.encode()).hexdigest()[:24]
+    if consume_rate_limits(["google-login-start:" + ip_tag], 20, 900):
+        raise HTTPException(429, "Too many Google sign-in attempts. Try again later.")
+    admin_authorized = False
+    if is_configured_admin_email(email):
+        with db() as c:
+            existing = c.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
+        if not existing:
+            bootstrap = os.getenv("MCAS_ADMIN_BOOTSTRAP_TOKEN", "")
+            if len(bootstrap) < 32 or not hmac.compare_digest(bootstrap, payload.admin_bootstrap_token):
+                raise HTTPException(403, "A valid administrator bootstrap token is required to create the configured administrator account.")
+            admin_authorized = True
+    state = secrets.token_urlsafe(32)
+    with db() as c:
+        c.execute("DELETE FROM google_login_states WHERE expires_at<?", (int(time.time()),))
+        c.execute(
+            "INSERT INTO google_login_states(state_hash,admin_bootstrap_authorized,expires_at,created_at) VALUES(?,?,?,?)",
+            (token_hash(state), int(admin_authorized), int(time.time()) + 600, now()),
+        )
+    response.set_cookie("mcas_google_state", state, max_age=600, httponly=True,
+                        secure=IS_PROD, samesite="lax", path="/")
+    params = urllib.parse.urlencode({
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state,
+        "prompt": "select_account",
+    })
+    return {"authorization_url": "https://accounts.google.com/o/oauth2/v2/auth?" + params}
+
+
+@app.get("/api/auth/google/callback")
+def google_login_callback(code: str = "", state: str = "", error: str = "",
+                          request: Request = None, response: Response = None):
+    if error:
+        return RedirectResponse("/?google=cancelled", status_code=303)
+    cookie_state = request.cookies.get("mcas_google_state", "") if request else ""
+    if not code or not state or not cookie_state or not hmac.compare_digest(state, cookie_state):
+        raise HTTPException(400, "Google sign-in state is invalid or expired. Start again.")
+    with db() as c:
+        state_row = c.execute(
+            "SELECT * FROM google_login_states WHERE state_hash=? AND expires_at>?",
+            (token_hash(state), int(time.time())),
+        ).fetchone()
+        if not state_row:
+            raise HTTPException(400, "Google sign-in state was already used or expired. Start again.")
+        c.execute("DELETE FROM google_login_states WHERE state_hash=?", (token_hash(state),))
+    client_id, client_secret, redirect_uri = google_oauth_config()
+    token_body = urllib.parse.urlencode({
+        "code": code, "client_id": client_id, "client_secret": client_secret,
+        "redirect_uri": redirect_uri, "grant_type": "authorization_code",
+    }).encode()
+    try:
+        token_request = urllib.request.Request(
+            "https://oauth2.googleapis.com/token", data=token_body,
+            headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(token_request, timeout=10) as result:
+            token_data = json.loads(result.read(32768).decode("utf-8"))
+        access_token = str(token_data.get("access_token") or "")
+        if not access_token:
+            raise ValueError("Google did not return an access token.")
+        profile_request = urllib.request.Request(
+            "https://openidconnect.googleapis.com/v1/userinfo",
+            headers={"Authorization": "Bearer " + access_token, "Accept": "application/json"},
+        )
+        with urllib.request.urlopen(profile_request, timeout=10) as result:
+            profile = json.loads(result.read(32768).decode("utf-8"))
+    except Exception:
+        SECURITY_LOGGER.warning("Google OAuth exchange or userinfo lookup failed.")
+        raise HTTPException(502, "Google sign-in could not be completed. Try again.")
+    email = str(profile.get("email") or "").strip().lower()
+    subject = str(profile.get("sub") or "").strip()
+    verified_email = profile.get("email_verified") is True
+    if not subject or not verified_email:
+        raise HTTPException(403, "Google did not return a verified email identity.")
+    try:
+        validate_email(email)
+    except HTTPException:
+        raise HTTPException(403, "Google returned an invalid account email.")
+    is_admin = is_configured_admin_email(email)
+    uid = None
+    with db() as c:
+        row = c.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
+        if row:
+            uid = row["id"]
+            c.execute("UPDATE users SET email_verified=1,email_verified_at=COALESCE(email_verified_at,?) WHERE id=?", (now(), uid))
+            audit(c, uid, "account.google_login")
+        else:
+            if is_admin and not int(state_row["admin_bootstrap_authorized"]):
+                raise HTTPException(403, "The configured administrator account must be created through the administrator bootstrap flow.")
+            uid = secrets.token_urlsafe(18)
+            c.execute(
+                "INSERT INTO users(id,email,password_hash,created_at,email_verified,email_verified_at) VALUES(?,?,?,?,1,?)",
+                (uid, email, password_hash(secrets.token_urlsafe(48)), now(), now()),
+            )
+            audit(c, uid, "account.created_google")
+        if is_admin and ADMIN_MFA_REQUIRED:
+            user_row = c.execute("SELECT admin_totp_secret FROM users WHERE id=?", (uid,)).fetchone()
+            if user_row and user_row["admin_totp_secret"]:
+                challenge = secrets.token_urlsafe(32)
+                c.execute("DELETE FROM mfa_login_challenges WHERE expires_at<?", (int(time.time()),))
+                c.execute(
+                    "INSERT INTO mfa_login_challenges(token_hash,user_id,expires_at,attempts) VALUES(?,?,?,0)",
+                    (mfa_challenge_hash(challenge), uid, int(time.time()) + 300),
+                )
+                audit(c, uid, "admin.mfa_challenge_issued")
+                redirect = RedirectResponse("/?google_mfa=1", status_code=303)
+                redirect.set_cookie("mcas_mfa_challenge", challenge, max_age=300, httponly=True,
+                                    secure=IS_PROD, samesite="strict", path="/")
+                redirect.delete_cookie("mcas_google_state", path="/")
+                return redirect
+        c.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
+        session = secrets.token_urlsafe(36)
+        c.execute("INSERT INTO sessions VALUES(?,?,?)",
+                  (token_hash(session), uid, int(time.time()) + SESSION_SECONDS))
+        audit(c, uid, "account.login_google")
+    redirect = RedirectResponse("/", status_code=303)
+    redirect.set_cookie(COOKIE, session, max_age=SESSION_SECONDS, httponly=True,
+                        secure=IS_PROD, samesite="lax", path="/")
+    set_csrf(redirect)
+    redirect.delete_cookie("mcas_google_state", path="/")
+    return redirect
 
 
 @app.post("/api/auth/register", status_code=201)
