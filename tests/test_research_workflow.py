@@ -180,7 +180,7 @@ class ResearchWorkflowTest(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 200, response.text)
         result = response.json()
-        self.assertEqual(mocked.call_count, 4)
+        self.assertEqual(mocked.call_count, 2)
         self.assertEqual(result["saved"], 0)
         self.assertEqual(result["results"][0]["verification_status"], "verification_unavailable")
         self.assertFalse(result["results"][0]["verified"])
