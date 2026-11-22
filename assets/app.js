@@ -663,7 +663,8 @@ function advisorPrice(data,lead){
 }
 const MCAS_KES_PER_USD=130;
 function moneyKES(n){return 'KES '+Number(n).toLocaleString('en-KE');}
-function moneyUSDFromKES(n){return '(data,lead,price){
+function moneyUSDFromKES(n){return '$'+(Number(n)/MCAS_KES_PER_USD).toLocaleString('en-US',{minimumFractionDigits:0,maximumFractionDigits:0});}
+function buildAdvisorPrompt(data,lead,price){
  const name=lead?.name||'BUSINESS NAME TO CONFIRM';
  const market=lead?.market||'Location to confirm';
  const website=lead?.website||'No verified website URL is recorded; do not assume one exists.';
