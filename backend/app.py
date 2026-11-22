@@ -1912,6 +1912,14 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                 (user["id"], name, location),
             ).fetchone()
             if existing:
+                c.execute(
+                    "UPDATE prospect_validation_samples SET lead_id=?,updated_at=? WHERE id=? AND user_id=?",
+                    (existing["id"], now(), sample_id, user["id"]),
+                )
+                c.execute(
+                    "UPDATE leads SET website_presence=?,updated_at=? WHERE id=? AND user_id=?",
+                    (website_presence, now(), existing["id"], user["id"]),
+                )
                 discovered.append({
                     "name": name, "lead_id": existing["id"], "duplicate": True,
                     "saved": True, "verified": True, "verification": verification,
@@ -1943,6 +1951,10 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                     json.dumps(verification, ensure_ascii=False)[:12000],
                     int(pitch_eligible), opportunity_reason, stamp, website_presence,
                 ),
+            )
+            c.execute(
+                "UPDATE prospect_validation_samples SET lead_id=?,updated_at=? WHERE id=? AND user_id=?",
+                (lead_id, now(), sample_id, user["id"]),
             )
             audit(c, user["id"], "research.prospect_verified", {
                 "lead_id": lead_id, "verification_score": verification["evidence_score"],
