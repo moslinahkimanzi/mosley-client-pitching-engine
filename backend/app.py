@@ -2399,19 +2399,84 @@ def create_builder_prompt(lead_id: str, user=Depends(current_user)):
     return {"lead_id": lead_id, "business": lead["name"], "prompt": prompt,
             "note": "Client acceptance is recorded, but confirm the final scope, content, budget and delivery terms before starting build work."}
 
-@app.post("/api/audit-website")
-def audit_website(payload: dict, user=Depends(current_user)):
-    raw = str(payload.get("url", ""))[:2048].strip()
+def normalise_public_website_url(value: object) -> str:
+    raw = str(value or "").strip()[:2048]
     if not raw:
         raise HTTPException(422, "Provide a public website URL.")
+    if not re.match(r"^https?://", raw, re.I):
+        raw = "https://" + raw
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        raise HTTPException(422, "Enter a public website domain or HTTP/HTTPS URL without credentials.")
+    return raw
+
+
+def build_admin_feature_test_plan(feature: str, audit_result: dict) -> list[str]:
+    """Create a human-executed acceptance checklist; never run AI-generated code."""
+    text_value = feature.strip()
+    plan = [
+        "Open the staging website in a private browser session and confirm the feature is visible only to the intended role.",
+        "Complete the primary user journey using test data; confirm the expected result and visible confirmation state.",
+        "Test invalid, empty, duplicate and boundary inputs; confirm safe validation and useful error messages.",
+        "Test keyboard-only navigation, labels, focus order and a narrow mobile viewport.",
+        "Confirm the feature does not expose secrets, private records or another customer's workspace data.",
+        "Check browser console and server logs for errors; record the exact URL, browser, timestamp and reproduction steps.",
+        "Repeat the test after refresh and sign-out/sign-in to check persistence and permission enforcement.",
+    ]
+    advanced = audit_result.get("advanced_audit") or {}
+    if (advanced.get("scores") or {}).get("mobile", 100) < 100:
+        plan.append("Manually inspect mobile layout and responsive behaviour; static audit detected mobile-related review items.")
+    if (advanced.get("scores") or {}).get("accessibility", 100) < 100:
+        plan.append("Run keyboard and screen-reader checks; static audit detected accessibility review items.")
+    if (advanced.get("scores") or {}).get("transport_security_headers", 100) < 100:
+        plan.append("Review response security headers with the hosting/security team; missing headers are not proof of an exploitable vulnerability.")
+    return plan[:12]
+
+
+@app.post("/api/audit-website")
+def audit_website(payload: dict, user=Depends(current_user)):
+    raw = normalise_public_website_url(payload.get("url", ""))
     result = safe_site_fetch(raw)
     result["checked_at"] = now()
+    from backend.prospect_verification import verified_website_problem_findings
+    result["website_problem_findings"] = verified_website_problem_findings(result)
+    result["audit_scope"] = "Bounded static homepage HTML and response-header inspection. JavaScript-rendered states and interactions may not be visible."
     with db() as c:
         audit(c, user["id"], "website.audit", {
             "url": result.get("url"), "status": result.get("http_status"),
             "overall_score": (result.get("advanced_audit") or {}).get("overall_score"),
         })
     return result
+
+
+@app.post("/api/admin/test-lab/run")
+def admin_feature_test_lab(payload: dict, user=Depends(current_user)):
+    require_admin(user)
+    feature = str(payload.get("feature") or "").strip()[:2000]
+    if len(feature) < 12:
+        raise HTTPException(422, "Describe the AI-suggested feature or behaviour to test (at least 12 characters).")
+    raw = normalise_public_website_url(payload.get("url", ""))
+    result = safe_site_fetch(raw)
+    result["checked_at"] = now()
+    from backend.prospect_verification import verified_website_problem_findings
+    result["website_problem_findings"] = verified_website_problem_findings(result)
+    plan = build_admin_feature_test_plan(feature, result)
+    with db() as c:
+        audit(c, user["id"], "admin.test_lab.run", {
+            "url": result.get("url"), "feature_length": len(feature),
+            "http_status": result.get("http_status"),
+            "overall_score": (result.get("advanced_audit") or {}).get("overall_score"),
+        })
+    return {
+        "feature": feature,
+        "staging_url": result.get("url"),
+        "http_status": result.get("http_status"),
+        "audit": result.get("advanced_audit"),
+        "observed_findings": result.get("website_problem_findings") or [],
+        "manual_test_plan": plan,
+        "execution_boundary": "This lab performs a safe, read-only static website inspection and creates a manual acceptance checklist. It does not execute generated code, modify the target website, submit forms, authenticate to the target, or prove dynamic feature behaviour.",
+        "checked_at": result["checked_at"],
+    }
 
 
 @app.post("/api/competitor-intelligence")
