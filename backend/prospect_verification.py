@@ -98,7 +98,7 @@ def _closed_status(place: dict) -> bool:
     ]
     text = " ".join(str(value or "") for value in values).casefold()
     return bool(place.get("permanentlyClosed") is True or
-                re.search(r"\b(permanently closed|closed permanently|permanently_closed)\b", text))
+                re.search(r"\b(permanently closed|closed permanently|permanently_closed|closed_permanently)\b", text))
 
 
 def verify_candidate(
