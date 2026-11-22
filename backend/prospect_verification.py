@@ -119,6 +119,8 @@ def find_business_website_candidate(
         if any(host == blocked or host.endswith("." + blocked)
                for blocked in _NON_WEBSITE_HOSTS):
             continue
+        if any(marker in host for marker in ("directory", "listing", "review", "maps")):
+            continue
         title = str(result.get("title") or "")
         snippet = str(result.get("snippet") or result.get("description") or "")
         match_text = title + " " + snippet
