@@ -196,6 +196,24 @@ function renderAdminMaintenance(){
  $('adminFeedbackList').innerHTML=(data.feedback||[]).map(item=>'<div class="item" data-feedback-card="'+esc(item.id)+'"><div class="itemtop"><strong>'+esc(item.title)+'</strong><span class="badge">'+esc(feedbackStatusLabel(item.status))+'</span></div><p>'+esc(item.category)+' · '+esc(item.customer_email)+' · '+esc(item.created_at)+'</p><p>'+esc(item.message)+'</p><div class="field"><label>Review status</label><select data-feedback-status><option value="received" '+(item.status==='received'?'selected':'')+'>Received</option><option value="reviewing" '+(item.status==='reviewing'?'selected':'')+'>Under review</option><option value="planned" '+(item.status==='planned'?'selected':'')+'>Planned</option><option value="in_progress" '+(item.status==='in_progress'?'selected':'')+'>In progress</option><option value="completed" '+(item.status==='completed'?'selected':'')+'>Completed</option><option value="declined" '+(item.status==='declined'?'selected':'')+'>Not planned</option></select></div><div class="field"><label>Reply / internal note (visible to this customer)</label><textarea data-feedback-note maxlength="1000">'+esc(item.admin_note||'')+'</textarea></div><button data-feedback-save="'+esc(item.id)+'" class="primary">Save review</button></div>').join('')||'<div class="empty">No customer feedback has been submitted.</div>';
 }
 $('refreshMaintenanceBtn').addEventListener('click',loadAdminMaintenance);
+$('runAdminFeatureTest').addEventListener('click',async()=>{
+ const button=$('runAdminFeatureTest');
+ const feature=$('adminTestFeature').value.trim();
+ const url=$('adminTestUrl').value.trim();
+ if(feature.length<12)return note('adminFeatureTestNotice','Describe the feature and expected behaviour (at least 12 characters).',true);
+ if(!url)return note('adminFeatureTestNotice','Enter a staging website URL.',true);
+ button.disabled=true;$('adminFeatureTestResult').innerHTML='';
+ note('adminFeatureTestNotice','Running a read-only staging-site inspection…');
+ try{
+  const data=await api('/api/admin/test-lab/run',{method:'POST',body:JSON.stringify({feature,url})});
+  const findings=(data.observed_findings||[]).map(x=>'<div class="item"><b>'+esc(x.title)+'</b><p>'+esc(x.evidence)+'</p></div>').join('');
+  const plan=(data.manual_test_plan||[]).map(x=>'<li>'+esc(x)+'</li>').join('');
+  const audit=data.audit||{};
+  $('adminFeatureTestResult').innerHTML='<div class="good"><b>Staging response: HTTP '+esc(data.http_status)+'</b><p>'+esc(data.staging_url)+' · Static audit score: '+esc(audit.overall_score??'N/A')+'/100</p></div><div class="item"><h3>Feature under test</h3><p>'+esc(data.feature)+'</p></div><h3>Observed website findings</h3>'+(findings||'<div class="empty">No supported technical findings were detected by this limited check.</div>')+'<div class="item"><h3>Manual acceptance checklist</h3><ol>'+plan+'</ol></div><div class="warning">'+esc(data.execution_boundary)+'</div>';
+  note('adminFeatureTestNotice','Inspection complete. Execute each acceptance check manually in staging and record evidence before approving a release.');
+ }catch(e){note('adminFeatureTestNotice',e.message,true);}
+ finally{button.disabled=false;}
+});
 $('improvementReviewList').addEventListener('click',async e=>{
  const rollbackButton=e.target.closest('[data-improvement-rollback]');
  if(rollbackButton){
