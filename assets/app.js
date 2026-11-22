@@ -674,9 +674,6 @@ $('advisorCopyPrompt').addEventListener('click',async()=>{
 });
 
 
-queryFlags();boot();
-})();
-
 function safePublicHttpUrl(value){try{const u=new URL(String(value));return ['http:','https:'].includes(u.protocol)?u.href:'#';}catch(_){return '#';}}
 function renderAuditResult(data){
  const root=$('advancedAuditResult');if(!root)return;
@@ -699,8 +696,13 @@ $('runCompetitorIntel')?.addEventListener('click',async()=>{
  try{
   const data=await api('/api/competitor-intelligence',{method:'POST',body:JSON.stringify({lead_id:leadId,industry:$('competitorIndustry').value,max_results:Number($('competitorLimit').value)})});
   const summary=data.comparison||{},items=data.competitors||[],target=data.target||{},targetScore=target.website_audit?.overall_score;
-  $('competitorResult').innerHTML='<div class="good"><b>'+esc(summary.competitors_found||0)+' candidate competitors found</b><p>Target website: '+esc(target.website_state||'not listed')+(targetScore!==undefined?' · static audit '+esc(targetScore)+'/100':'')+'</p><p>Websites listed: '+esc(summary.with_listed_websites||0)+' · No website listed: '+esc(summary.without_listed_websites||0)+' · Responding: '+esc(summary.responding_websites||0)+'</p></div>'+items.map(x=>'<div class="item"><div class="itemtop"><strong>'+esc(x.name)+'</strong><span class="badge">'+esc(x.website_state)+'</span></div><p>'+esc(x.category||'Category unconfirmed')+' · '+esc(x.address||'Address unavailable')+'</p><p>'+esc(x.website||'No website URL returned by provider')+'</p><p>Rating: '+esc(x.rating??'Not listed')+' ('+esc(x.rating_count??0)+' reviews shown by provider)</p><p><a href="'+esc(safePublicHttpUrl(x.source_url||''))+'" target="_blank" rel="noopener noreferrer">View discovery source</a></p></div>').join('')||'<div class="empty">No candidate competitors were returned for this query.</div>'+'<p class="tiny">'+(data.limitations||[]).map(esc).join('<br>')+'</p>';
+  const competitorCards=items.map(x=>'<div class="item"><div class="itemtop"><strong>'+esc(x.name)+'</strong><span class="badge">'+esc(x.website_state)+'</span></div><p>'+esc(x.category||'Category unconfirmed')+' · '+esc(x.address||'Address unavailable')+'</p><p>'+esc(x.website||'No website URL returned by provider')+'</p><p>Rating: '+esc(x.rating??'Not listed')+' ('+esc(x.rating_count??0)+' reviews shown by provider)</p><p><a href="'+esc(safePublicHttpUrl(x.source_url||''))+'" target="_blank" rel="noopener noreferrer">View discovery source</a></p></div>').join('');
+  const limitationText=(data.limitations||[]).map(esc).join('<br>');
+  $('competitorResult').innerHTML='<div class="good"><b>'+esc(summary.competitors_found||0)+' candidate competitors found</b><p>Target website: '+esc(target.website_state||'not listed')+(targetScore!==undefined?' · static audit '+esc(targetScore)+'/100':'')+'</p><p>Websites listed: '+esc(summary.with_listed_websites||0)+' · No website listed: '+esc(summary.without_listed_websites||0)+' · Responding: '+esc(summary.responding_websites||0)+'</p></div>'+(competitorCards||'<div class="empty">No candidate competitors were returned for this query.</div>')+(limitationText?'<p class="tiny">'+limitationText+'</p>':'')
   note('competitorNotice','Research complete. Treat matches and provider data as unverified candidates.');
  }catch(e){note('competitorNotice',e.message,true);}
  finally{$('runCompetitorIntel').disabled=false;}
 });
+
+queryFlags();boot();
+})();
