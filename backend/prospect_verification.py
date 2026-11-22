@@ -164,6 +164,22 @@ def _closed_status(place: dict) -> bool:
                 re.search(r"\b(permanently closed|closed permanently|permanently_closed|closed_permanently)\b", text))
 
 
+def _website_domain_matches_business(name: str, host: str) -> bool:
+    """Require a distinctive business-name token in the candidate first-party domain."""
+    domain_tokens = set(re.findall(r"[a-z0-9]+", host.casefold()))
+    generic = {
+        "restaurant", "restaurants", "hotel", "hotels", "salon", "cafe",
+        "clinic", "medical", "school", "shop", "store", "services",
+        "service", "group", "company", "business", "co", "com", "org",
+        "net", "ke", "uk", "com", "org",
+    }
+    distinctive = {
+        token for token in _name_tokens(name)
+        if len(token) >= 4 and token not in generic
+    }
+    return bool(distinctive & domain_tokens)
+
+
 def verify_candidate(
     place: dict,
     location: str,
@@ -185,9 +201,10 @@ def verify_candidate(
     website_host = _host(website)
     title = str(website_audit.get("title") or "")
     title_score = name_match_score(name, title)
+    website_domain_name_match = _website_domain_matches_business(name, website_host)
     website_identity_match = bool(
         website_host and _is_acceptable_source_host(website_host)
-        and title_score >= 0.8
+        and title_score >= 0.8 and website_domain_name_match
     )
 
     matched_sources: list[dict] = []
@@ -226,7 +243,25 @@ def verify_candidate(
 
     has_place_identity = bool(name and len(_name_tokens(name)) >= 1 and address)
     is_closed = _closed_status(place)
-    corroborated = website_identity_match or bool(matched_sources)
+    # One third-party page is insufficient on its own. Require two distinct
+    # public domains, or one matching page plus corroborated phone/email.
+    strong_public_corroboration = (
+        len(matched_sources) >= 2
+        or (len(matched_sources) >= 1 and (
+            any(
+                len(_phone_digits(place.get("phoneNumber") or place.get("phone"))) >= 7
+                and _phone_digits(place.get("phoneNumber") or place.get("phone"))[-7:]
+                    in _phone_digits(" ".join(combined_source_text))
+                for _ in (0,)
+            )
+            or (
+                str(place.get("email") or "").strip()
+                and str(place.get("email") or "").strip().casefold()
+                    in " ".join(combined_source_text).casefold()
+            )
+        ))
+    )
+    corroborated = website_identity_match or strong_public_corroboration
     verified = has_place_identity and corroborated and not is_closed
 
     score = 0
@@ -238,11 +273,15 @@ def verify_candidate(
         score += 20
         reasons.append("Structured Places result contains a street or locality address.")
     if matched_sources:
-        score += 45
-        reasons.append("At least one distinct public page matches the business name and locality.")
+        score += 25 if len(matched_sources) == 1 else 45
+        reasons.append(
+            "One independent public page matches; an additional independent source or corroborated contact is required."
+            if len(matched_sources) == 1 else
+            "At least two distinct public domains match the business name and locality."
+        )
     if website_identity_match:
         score += 45
-        reasons.append("The listed website's page title matches the business name.")
+        reasons.append("The listed website title and distinctive domain name both match the business.")
     if website and website_host and _is_acceptable_source_host(website_host):
         score += 5
     website_domain_corroborated = bool(website_host and website_host in matched_hosts)
@@ -305,13 +344,15 @@ def verify_candidate(
         "reasons": reasons,
         "sources": sources,
         "website_identity_match": website_identity_match,
+        "website_domain_name_match": website_domain_name_match,
         "website_domain_corroborated": website_domain_corroborated,
         "phone_corroborated": phone_corroborated,
         "email_corroborated": email_corroborated,
         "closed": is_closed,
         "definition": (
             "Auto-verified means a structured Places listing has a name and address "
-            "and a matching listed website title or a distinct public page matching "
+            "and either a matching first-party website title plus distinctive domain-name token, "
+            "or at least two independent public domains (or one public domain plus corroborated contact data) matching "
             "the name and locality. It does not prove current trading, ownership, "
             "contact deliverability, permission to market, or buying intent."
         ),
