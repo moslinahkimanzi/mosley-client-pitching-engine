@@ -1787,9 +1787,18 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
     seen_names = set()
     corroboration_service_error = None
 
-    # Scan the bounded Places response instead of stopping after N total
-    # businesses. Equal-sized groups require evaluating enough candidates.
+    # Scan only until every requested group is full. This avoids spending
+    # independent-search quota on surplus candidates when balance is achieved.
+    # If a group cannot be filled, the bounded pool is exhausted and the
+    # shortfall is reported honestly.
     for place in places:
+        current_group_counts = {
+            key: sum(1 for item in discovered
+                    if item.get("verified") and item.get("saved") and item.get("research_group") == key)
+            for key in ("website_found", "no_website_found", "broken_website")
+        }
+        if all(count >= payload.max_results for count in current_group_counts.values()):
+            break
         name = str(place.get("title") or place.get("name") or "").strip()
         address = str(place.get("address") or "").strip()
         dedupe_key = re.sub(r"[^a-z0-9]+", " ", name.casefold()).strip() + "|" + re.sub(
