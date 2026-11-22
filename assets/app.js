@@ -57,7 +57,7 @@ $('mfaChallengeForm').addEventListener('submit',async e=>{
  e.preventDefault();const btn=$('mfaLoginSubmit');btn.disabled=true;
  try{
   const result=await api('/api/auth/mfa',{method:'POST',body:JSON.stringify({code:$('mfaLoginCode').value.trim()})});
-  await refreshCsrf();state.user=await api('/api/auth/me');$('mfaLoginCode').value='';googleMfaPending=false;showApp();await loadAll();
+  await refreshCsrf();state.user=await api('/api/auth/me');$('mfaLoginCode').value='';showApp();await loadAll();
  }catch(err){note('mfaLoginNotice',err.message,true);}
  finally{btn.disabled=false;}
 });
@@ -203,10 +203,9 @@ function renderAdminMaintenance(){
  $('adminFeedbackList').innerHTML=(data.feedback||[]).map(item=>'<div class="item" data-feedback-card="'+esc(item.id)+'"><div class="itemtop"><strong>'+esc(item.title)+'</strong><span class="badge">'+esc(feedbackStatusLabel(item.status))+'</span></div><p>'+esc(item.category)+' · '+esc(item.customer_email)+' · '+esc(item.created_at)+'</p><p>'+esc(item.message)+'</p><div class="field"><label>Review status</label><select data-feedback-status><option value="received" '+(item.status==='received'?'selected':'')+'>Received</option><option value="reviewing" '+(item.status==='reviewing'?'selected':'')+'>Under review</option><option value="planned" '+(item.status==='planned'?'selected':'')+'>Planned</option><option value="in_progress" '+(item.status==='in_progress'?'selected':'')+'>In progress</option><option value="completed" '+(item.status==='completed'?'selected':'')+'>Completed</option><option value="declined" '+(item.status==='declined'?'selected':'')+'>Not planned</option></select></div><div class="field"><label>Reply / internal note (visible to this customer)</label><textarea data-feedback-note maxlength="1000">'+esc(item.admin_note||'')+'</textarea></div><button data-feedback-save="'+esc(item.id)+'" class="primary">Save review</button></div>').join('')||'<div class="empty">No customer feedback has been submitted.</div>';
 }
 $('refreshMaintenanceBtn').addEventListener('click',loadAdminMaintenance);
+
 $('runAdminFeatureTest').addEventListener('click',async()=>{
- const button=$('runAdminFeatureTest');
- const feature=$('adminTestFeature').value.trim();
- const url=$('adminTestUrl').value.trim();
+ const button=$('runAdminFeatureTest'),feature=$('adminTestFeature').value.trim(),url=$('adminTestUrl').value.trim();
  if(feature.length<12)return note('adminFeatureTestNotice','Describe the feature and expected behaviour (at least 12 characters).',true);
  if(!url)return note('adminFeatureTestNotice','Enter a staging website URL.',true);
  button.disabled=true;$('adminFeatureTestResult').innerHTML='';
@@ -221,6 +220,7 @@ $('runAdminFeatureTest').addEventListener('click',async()=>{
  }catch(e){note('adminFeatureTestNotice',e.message,true);}
  finally{button.disabled=false;}
 });
+
 $('improvementReviewList').addEventListener('click',async e=>{
  const rollbackButton=e.target.closest('[data-improvement-rollback]');
  if(rollbackButton){
@@ -479,7 +479,13 @@ async function copyField(fieldId,noteId,label){
 }
 function selectedLead(id){return state.leads.find(l=>l.id===id);}
 function emailText(l){const name=l.name,evidence=(l.evidence||'').trim(),checked=evidence&&!/not checked|unknown|not verified|not yet verified/i.test(evidence),service=$('service').value.trim()||'professional, mobile-friendly websites';const evidenceLine=checked?'I noted this from the information available: '+evidence+' I have not treated this as a full audit.':'I came across your public business listing while researching '+(l.market||'your area')+'. I have not confirmed a specific website problem, so I do not want to make assumptions.';return 'Hello '+name+' team,\n\n'+evidenceLine+'\n\nI help businesses make it easier for customers to understand their services and get in touch through '+service+'. A practical starting point could be clear service information, a mobile-friendly layout and a simple enquiry path, shaped around what your team actually needs.\n\nWould a brief 10–15 minute conversation next week be useful? I can share a few relevant ideas first, with no obligation.\n\nBest regards,\n'+$('signature').value.trim()+'\n\nIf you would prefer not to receive another message from me, just reply and I will not contact you again.';}
-$('copyEmail').addEventListener('click',async()=>{const subject=$('emailSubject').value.trim();const body=$('emailBody').value.trim();if(!body)return note('emailNotice','Generate or enter an email first.',true);const text=(subject?'Subject: '+subject+'\n\n':'')+body;try{await navigator.clipboard.writeText(text);note('emailNotice','Email subject and body copied to your clipboard.');}catch(_){$('emailBody').focus();$('emailBody').select();note('emailNotice','Clipboard access was blocked. The body is selected; press Ctrl+C to copy it.');}});
+$('copyEmail').addEventListener('click',async()=>{
+ const subject=$('emailSubject').value.trim(),body=$('emailBody').value.trim();
+ if(!body)return note('emailNotice','Generate or enter an email first.',true);
+ const text=(subject?'Subject: '+subject+'\n\n':'')+body;
+ try{await navigator.clipboard.writeText(text);note('emailNotice','Email subject and body copied to your clipboard.');}
+ catch(_){$('emailBody').focus();$('emailBody').select();note('emailNotice','Clipboard access was blocked. The body is selected; press Ctrl+C to copy it.');}
+});
 $('genEmail').addEventListener('click',()=>{const l=selectedLead($('emailLead').value);if(!l)return note('emailNotice','Add a prospect first.',true);if(l.do_not_contact)return note('emailNotice','This prospect is marked do-not-contact. Outreach is blocked.',true);$('emailTo').value=l.contact_email||'';$('emailSubject').value='A website idea for '+l.name;$('emailBody').value=emailText(l);note('emailNotice','Draft generated from your recorded evidence. Verify before use.');});
 async function aiDraft(task){const l=selectedLead(task==='reply'?$('replyLead').value:task==='proposal'?$('proposalLead').value:$('emailLead').value);if(!l)return note(task==='reply'?'replyNotice':task==='proposal'?'proposalNotice':'emailNotice','Select a prospect first.',true);if(l.do_not_contact&&task!=='reply')return note(task==='proposal'?'proposalNotice':'emailNotice','Prospect is marked do-not-contact; outreach draft blocked.',true);try{const incoming=task==='reply'?$('incoming').value.trim():'';const service=task==='reply'?$('replyService').value:$('service').value;const d=await api('/api/assistant/draft',{method:'POST',body:JSON.stringify({lead_id:l.id,task,prospect_name:l.name,market:l.market||'',service:service||'website services',evidence:l.evidence||'',incoming})});if(task==='email'){$('emailBody').value=d.draft;$('emailSubject').value='A website idea for '+l.name;note('emailNotice',d.warning);}if(task==='reply'){$('replyBody').value=d.draft;note('replyNotice','AI reply generated. Review and edit it, then choose Save edited reply as new draft. Nothing was saved or sent automatically.');}if(task==='proposal'){$('proposalContent').value=d.draft;note('proposalNotice',d.warning);}}catch(e){note(task==='reply'?'replyNotice':task==='proposal'?'proposalNotice':'emailNotice',e.message,true);}}
 $('aiEmail').addEventListener('click',()=>aiDraft('email'));$('aiProposal').addEventListener('click',()=>aiDraft('proposal'));
@@ -497,7 +503,7 @@ $('proposalList').addEventListener('click',()=>{});
 $('gmailConnect').addEventListener('click',()=>{location.href='/api/integrations/gmail/start';});
 $('gmailDisconnect').addEventListener('click',async()=>{try{await api('/api/integrations/gmail',{method:'DELETE'});await loadAll();note('gmailNotice','Gmail disconnected.');}catch(e){note('gmailNotice',e.message,true);}});
 $('downloadExport').addEventListener('click',()=>{const pack={exported_at:new Date().toISOString(),leads:state.leads,drafts:state.drafts,followups:state.followups,proposals:state.proposals};const blob=new Blob([JSON.stringify(pack,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='mcas-workspace-export.json';a.click();URL.revokeObjectURL(a.href);note('exportNotice','Workspace export downloaded. Protect this file; it contains customer information.');});
-function queryFlags(){const u=new URL(location.href);const status=u.searchParams.get('gmail');if(status==='connected')note('gmailNotice','Google account connected. It matches your MCAS sign-in email.');else if(status==='cancelled')note('gmailNotice','Gmail connection was cancelled.');else if(status==='email_mismatch')note('gmailNotice','The Google account you selected does not match the email address you use to sign in to MCAS. No new Gmail connection was saved. Choose the matching Google account.',true);else if(status==='email_unverified')note('gmailNotice','Google did not confirm the selected account email. No new Gmail connection was saved.',true);if(u.searchParams.get('google')==='cancelled')note('authNotice','Google sign-in was cancelled. You can try again.');if(status){u.searchParams.delete('gmail');history.replaceState({},'',u.pathname);}googleMfaPending=u.searchParams.get('google_mfa')==='1';if(googleMfaPending){u.searchParams.delete('google_mfa');history.replaceState({},'',u.pathname);$('mfaChallengeForm').classList.remove('hide');$('authForm').classList.add('hide');$('mfaLoginNotice').textContent='Google identity confirmed. Complete your administrator authenticator check.';}}
+function queryFlags(){const u=new URL(location.href);const status=u.searchParams.get('gmail');if(status==='connected')note('gmailNotice','Google account connected. It matches your MCAS sign-in email.');else if(status==='cancelled')note('gmailNotice','Gmail connection was cancelled.');else if(status==='email_mismatch')note('gmailNotice','The Google account you selected does not match the email address you use to sign in to MCAS. No new Gmail connection was saved. Choose the matching Google account.',true);else if(status==='email_unverified')note('gmailNotice','Google did not confirm the selected account email. No new Gmail connection was saved.',true);if(status){u.searchParams.delete('gmail');history.replaceState({},'',u.pathname);}if(u.searchParams.get('google')==='cancelled')note('authNotice','Google sign-in was cancelled. You can try again.');googleMfaPending=u.searchParams.get('google_mfa')==='1';if(googleMfaPending){u.searchParams.delete('google_mfa');history.replaceState({},'',u.pathname);$('mfaChallengeForm').classList.remove('hide');$('authForm').classList.add('hide');$('mfaLoginNotice').textContent='Google identity confirmed. Complete your administrator authenticator check.';}}
 
 const advisorProfiles={
  professional:{type:'Professional services website',pages:['Home with a clear value proposition','Services / expertise pages','About and credentials','Case studies or testimonials (with permission)','Contact / consultation request'],features:['Clear enquiry form with spam protection','Service-specific calls to action','Trust signals: credentials, team and verified testimonials','Search-friendly service and location pages'],quality:['Credible, restrained visual design','Fast mobile-first layouts','Accessible typography and contrast','Clear service descriptions and next steps']},
@@ -670,9 +676,9 @@ function advisorPrice(data,lead){
  }
  return item;
 }
-const MCAS_KES_PER_USD=130;
 function moneyKES(n){return 'KES '+Number(n).toLocaleString('en-KE');}
-function moneyUSDFromKES(n){return '$'+(Number(n)/MCAS_KES_PER_USD).toLocaleString('en-US',{minimumFractionDigits:0,maximumFractionDigits:0});}
+const MCAS_KES_PER_USD=130;
+function moneyUSDFromKES(n){return '
 function buildAdvisorPrompt(data,lead,price){
  const name=lead?.name||'BUSINESS NAME TO CONFIRM';
  const market=lead?.market||'Location to confirm';
@@ -727,7 +733,7 @@ function buildAdvisorPrompt(data,lead,price){
  '- A concise handover note covering how the owner edits content, connects the domain, configures hosting, forms, analytics and any third-party integrations.',
  '',
  'SCOPE AND COMMERCIAL NOTE',
- 'The indicative project estimate is '+moneyUSDFromKES(price.low)+'–'+moneyUSDFromKES(price.high)+' USD (approximately '+moneyKES(price.low)+'–'+moneyKES(price.high)+'). Planning conversion assumption: KES '+MCAS_KES_PER_USD+' per USD; confirm the current exchange rate before quoting. This is an indicative Kenya-market estimate, not a fixed quotation or a promise. Do not display it on the public website unless the business owner specifically requests it.',
+ 'The indicative project estimate is '+moneyUSDFromKES(price.low)+'–'+moneyUSDFromKES(price.high)+' USD (approximately '+moneyKES(price.low)+'–'+moneyKES(price.high)+'). Planning conversion assumption: KES '+MCAS_KES_PER_USD+' per USD; confirm the current exchange rate before quoting. This is an indicative Kenya-market estimate, not a fixed quotation or a promise. Do not display this estimate on the public website unless the business owner specifically requests it.',
  '',
  'Before building, state any essential missing information as questions or placeholders. Then create the full website. Prioritise clarity, trust, accessibility, mobile usability, maintainability and a useful customer journey.'
  ].join('\n');
@@ -748,502 +754,8 @@ function generateAdvisorPlan(){
  '<div class="item"><h3>Design direction and quality standard</h3><ul>'+data.quality.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul></div>'+
  '<div class="warning"><b>Before build:</b> Confirm business facts, page content, owner access, integrations, data collected, domain, hosting, maintenance and acceptance criteria with the business. Do not publish placeholder claims or fake testimonials.</div>';
  let marketNote='The USD values are converted from broad Kenya-market planning bands using an illustrative KES 130 per USD assumption, not a live exchange-rate feed. Confirm the exchange rate, client requirements, local market and final scope before making a quote.';
-const priceHtml=`<div class="item"><span class="badge green">Indicative website project estimate · USD</span><h3>${esc(price.label)}</h3><div class="metric">${moneyUSDFromKES(price.low)} – ${moneyUSDFromKES(price.high)}</div><p class="tiny">Approximate KES equivalent: ${moneyKES(price.low)} – ${moneyKES(price.high)}. Assumed rate: KES ${MCAS_KES_PER_USD} per USD; verify live FX before quoting.</p><p>${esc(price.scope)}</p><p class="tiny">${esc(marketNote)}</p></div>`;
+ const priceHtml=\`<div class="item"><span class="badge green">Indicative website project estimate · USD</span><h3>\${esc(price.label)}</h3><div class="metric">\${moneyUSDFromKES(price.low)} – \${moneyUSDFromKES(price.high)}</div><p class="tiny">Approximate KES equivalent: \${moneyKES(price.low)} – \${moneyKES(price.high)}. Assumed rate: KES \${MCAS_KES_PER_USD} per USD; verify live FX before quoting.</p><p>\${esc(price.scope)}</p><p class="tiny">\${esc(marketNote)}</p></div>\`;
  $('advisorPricingOutput').innerHTML=priceHtml+
- '<div class="item"><h3>Possible recurring costs (budget separately)</h3><p>Domain and hosting: approximately KES 3,500–15,000 per year. Optional maintenance: approximately KES 5,000–25,000 per month, depending on provider and scope.</p><p class="tiny">Indicative published guide figures; renewals, traffic, email, premium plugins, payment fees, content production and taxes may be additional.</p></div>'+
- '<div class="item"><h3>Pricing references (Kenya, 2026)</h3><p><a href="https://wfw.co.ke/blog/how-much-does-a-website-cost-in-kenya" target="_blank" rel="noopener noreferrer">Wallflower Agency — business, company and e-commerce price guide (13 September 2026)</a></p><p><a href="https://www.thabititechnologies.com/blog/website-cost-in-kenya" target="_blank" rel="noopener noreferrer">Thabiti Technologies — website types and custom system ranges (4 October 2026)</a></p><p><a href="https://digital4africa.com/website-cost-kenya/" target="_blank" rel="noopener noreferrer">Digital4Africa — website and running-cost guide (October 2026)</a></p><p><a href="https://edgecom.co.ke/website-cost-kenya" target="_blank" rel="noopener noreferrer">Edgecom — published starting prices and VAT notes (October 2026)</a></p></div>'+
- '<div class="warning"><b>Estimate only:</b> Actual value depends on the final page count, design, copywriting, integrations, e-commerce/booking workflow, data migration, hosting, support and developer experience. Confirm scope before quoting. Some published prices exclude VAT; check tax treatment and third-party charges separately.</div>';
- $('advisorPromptText').value=buildAdvisorPrompt(data,lead,price);
- $('advisorPromptPanel').classList.remove('hide');
- note('advisorNotice','Full plan, evidence-led diagnosis, indicative USD estimate and AI-builder prompt generated. The FX conversion is an assumption, not a live rate. Review evidence and scope before quoting.');
-}
-$('advisorLead').addEventListener('change',()=>{renderAdvisorProspectPicker();updateAdvisorProspect();});
-$('advisorLeadPickerButton').addEventListener('click',()=>{const menu=$('advisorLeadPickerMenu');if(menu.classList.contains('hide'))openAdvisorProspectPicker();else closeAdvisorProspectPicker();});
-$('advisorLeadSearch').addEventListener('input',renderAdvisorProspectPicker);
-$('advisorLeadOptions').addEventListener('click',e=>{
- const choice=e.target.closest('[data-advisor-prospect-id]');if(!choice)return;
- const id=choice.dataset.advisorProspectId;
- if(!state.leads.some(l=>String(l.id)===String(id)))return;
- $('advisorLead').value=id;
- closeAdvisorProspectPicker();
- renderAdvisorProspectPicker();
- updateAdvisorProspect();
- $('advisorLeadPickerButton').focus();
-});
-$('advisorLeadSearch').addEventListener('keydown',e=>{
- if(e.key==='Escape'){closeAdvisorProspectPicker();$('advisorLeadPickerButton').focus();}
-});
-$('advisorLeadPickerButton').addEventListener('keydown',e=>{
- if(e.key==='Escape')closeAdvisorProspectPicker();
- if(e.key==='ArrowDown'&&!$('advisorLeadPickerMenu').classList.contains('hide')){$('advisorLeadOptions').querySelector('button')?.focus();}
-});
-document.addEventListener('click',e=>{if(!$('advisorProspectPicker')?.contains(e.target))closeAdvisorProspectPicker();});
-$('advisorLiveAuditBtn').addEventListener('click',runAdvisorLiveAudit);
-$('advisorBuildPlan').addEventListener('click',generateAdvisorPlan);
-$('advisorCopyPrompt').addEventListener('click',async()=>{
- const text=$('advisorPromptText').value;
- if(!text.trim())return note('advisorNotice','Generate the full website plan first.',true);
- try{await navigator.clipboard.writeText(text);note('advisorNotice','AI-builder prompt copied. Paste it into your website builder.');}
- catch(e){$('advisorPromptText').focus();$('advisorPromptText').select();note('advisorNotice','Select the prompt and copy it manually with Ctrl+C.');}
-});
-
-
-
-
-queryFlags();boot();
-})();
-
-
-// Standalone audit/competitor controls. These deliberately do not depend on
-// the main app closure's private $, api, note or esc bindings.
-(()=>{
- 'use strict';
- const byId=id=>document.getElementById(id);
- const htmlEscape=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
- const showNotice=(id,message,isError=false)=>{
-  const element=byId(id);
-  if(!element)return;
-  element.textContent=message;
-  element.className='notice'+(isError?' error':'');
- };
- const readCookie=name=>{
-  const part=document.cookie.split('; ').find(item=>item.startsWith(name+'='));
-  if(!part)return '';
-  try{return decodeURIComponent(part.slice(name.length+1));}catch(_){return part.slice(name.length+1);}
- };
- const parseResponse=async response=>{
-  const type=response.headers.get('content-type')||'';
-  if(type.includes('application/json'))return await response.json();
-  return await response.text();
- };
- const postJson=async(path,payload)=>{
-  const csrfResponse=await fetch('/api/auth/csrf',{credentials:'same-origin',cache:'no-store'});
-  const csrfData=await parseResponse(csrfResponse);
-  if(!csrfResponse.ok)throw new Error('Could not initialise the MCAS security token. Refresh the page and sign in again.');
-  const csrf=readCookie('mcas_csrf')||(csrfData&&csrfData.csrf_token)||'';
-  if(!csrf)throw new Error('MCAS security token is missing. Refresh the page and sign in again.');
-  const response=await fetch(path,{
-   method:'POST',
-   credentials:'same-origin',
-   headers:{'Accept':'application/json','Content-Type':'application/json','X-CSRF-Token':csrf},
-   body:JSON.stringify(payload)
-  });
-  const data=await parseResponse(response);
-  if(!response.ok){
-   const message=(data&&typeof data==='object'&&(data.detail||data.message))||data;
-   throw new Error(typeof message==='string'?message:'Request failed ('+response.status+').');
-  }
-  if(!data||typeof data!=='object')throw new Error('MCAS returned an unexpected response.');
-  return data;
- };
- const safePublicHttpUrl=value=>{
-  try{
-   const url=new URL(String(value));
-   return ['http:','https:'].includes(url.protocol)?url.href:'#';
-  }catch(_){return '#';}
- };
- const renderAuditResult=data=>{
-  const root=byId('advancedAuditResult');
-  if(!root)return;
-  const audit=data.advanced_audit||{};
-  const scores=audit.scores||{};
-  const scoreRows=Object.entries(scores).map(([key,value])=>
-   '<div class="row"><span>'+htmlEscape(String(key).replace(/_/g,' '))+'</span><b>'+htmlEscape(value)+'/100</b></div>'
-  ).join('');
-  const findings=(audit.findings||[]).map(item=>
-   '<div class="item"><div class="itemtop"><strong>'+htmlEscape(item.title)+'</strong><span class="badge">'+htmlEscape(item.priority)+'</span></div><p>'+htmlEscape(String(item.category||'').replace(/_/g,' '))+' · '+htmlEscape(item.evidence)+'</p></div>'
-  ).join('');
-  const limitations=(audit.limitations||[]).map(item=>'<li>'+htmlEscape(item)+'</li>').join('');
-  root.innerHTML='<div class="good"><b>Overall static audit score: '+htmlEscape(audit.overall_score??'N/A')+'/100</b><p>HTTP '+htmlEscape(data.http_status)+' · '+htmlEscape(data.url)+'</p></div>'+
-   scoreRows+'<h3>Findings for manual review</h3>'+
-   (findings||'<div class="empty">No review findings were detected by this limited check.</div>')+
-   '<h3>Important limitations</h3><ul>'+limitations+'</ul>';
- };
- byId('runAdvancedAudit')?.addEventListener('click',async()=>{
-  const button=byId('runAdvancedAudit');
-  const input=byId('advancedAuditUrl');
-  const url=input?.value.trim()||'';
-  if(!url)return showNotice('advancedAuditNotice','Enter a public website URL.',true);
-  button.disabled=true;
-  showNotice('advancedAuditNotice','Checking public page safely…');
-  try{
-   const result=await postJson('/api/audit-website',{url});
-   renderAuditResult(result);
-   showNotice('advancedAuditNotice','Audit completed. Findings are observations for manual verification, not confirmed vulnerabilities.');
-  }catch(error){
-   showNotice('advancedAuditNotice',error.message||'The audit request failed.',true);
-  }finally{
-   button.disabled=false;
-  }
- });
- byId('runCompetitorIntel')?.addEventListener('click',async()=>{
-  const button=byId('runCompetitorIntel');
-  const leadId=byId('competitorLead')?.value||'';
-  if(!leadId)return showNotice('competitorNotice','Select a saved prospect first.',true);
-  button.disabled=true;
-  showNotice('competitorNotice','Searching public business listings and checking candidate websites…');
-  try{
-   const data=await postJson('/api/competitor-intelligence',{
-    lead_id:leadId,
-    industry:byId('competitorIndustry')?.value||'restaurant',
-    max_results:Number(byId('competitorLimit')?.value||5)
-   });
-   const summary=data.comparison||{};
-   const items=data.competitors||[];
-   const target=data.target||{};
-   const targetScore=target.website_audit?.overall_score;
-   const cards=items.map(item=>
-    '<div class="item"><div class="itemtop"><strong>'+htmlEscape(item.name)+'</strong><span class="badge">'+htmlEscape(item.website_state)+'</span></div>'+
-    '<p>'+htmlEscape(item.category||'Category unconfirmed')+' · '+htmlEscape(item.address||'Address unavailable')+'</p>'+
-    '<p>'+htmlEscape(item.website||'No website URL returned by provider')+'</p>'+
-    '<p>Rating: '+htmlEscape(item.rating??'Not listed')+' ('+htmlEscape(item.rating_count??0)+' reviews shown by provider)</p>'+
-    '<p><a href="'+htmlEscape(safePublicHttpUrl(item.source_url||''))+'" target="_blank" rel="noopener noreferrer">View discovery source</a></p></div>'
-   ).join('');
-   const limitations=(data.limitations||[]).map(htmlEscape).join('<br>');
-   const root=byId('competitorResult');
-   if(root){
-    root.innerHTML='<div class="good"><b>'+htmlEscape(summary.competitors_found||0)+' candidate competitors found</b>'+
-     '<p>Target website: '+htmlEscape(target.website_state||'not listed')+
-     (targetScore!==undefined?' · static audit '+htmlEscape(targetScore)+'/100':'')+'</p>'+
-     '<p>Websites listed: '+htmlEscape(summary.with_listed_websites||0)+
-     ' · No website listed: '+htmlEscape(summary.without_listed_websites||0)+
-     ' · Responding: '+htmlEscape(summary.responding_websites||0)+'</p></div>'+
-     (cards||'<div class="empty">No candidate competitors were returned for this query.</div>')+
-     (limitations?'<p class="tiny">'+limitations+'</p>':'');
-   }
-   showNotice('competitorNotice','Research complete. Treat matches and provider data as unverified candidates.');
-  }catch(error){
-   showNotice('competitorNotice',error.message||'Competitor research failed.',true);
-  }finally{
-   button.disabled=false;
-  }
- });
- console.info('[MCAS] Standalone audit and competitor controls initialised.');
-})();
-+(Number(n)/MCAS_KES_PER_USD).toLocaleString('en-US',{minimumFractionDigits:0,maximumFractionDigits:0});}
-function buildAdvisorPrompt(data,lead,price){
- const name=lead?.name||'BUSINESS NAME TO CONFIRM';
- const market=lead?.market||'Location to confirm';
- const website=lead?.website||'No verified website URL is recorded; do not assume one exists.';
- const evidence=lead?.evidence||$('advisorContext').value.trim()||'No prospect research evidence supplied. Ask for verified facts and use neutral placeholders.';
- const diagnosis=advisorFindings(lead,advisorAuditLeadId===lead?.id?advisorLatestAudit:null)
-  .map(x=>x.replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim()).join('\n- ');
- const pages=data.pages.map((x,i)=>(i+1)+'. '+x).join('\n');
- const features=data.features.map(x=>'- '+x).join('\n');
- const quality=data.universal.concat(data.quality).map(x=>'- '+x).join('\n');
- return [
- 'AI WEBSITE BUILDER PROMPT — '+name,
- '',
- 'ROLE AND OBJECTIVE',
- 'Act as a senior UX designer, brand designer, conversion strategist and experienced web developer. Build a polished, complete, responsive business website for the real business described below. This is a WEBSITE project, not an unrelated mobile app. Use the strongest native website/CMS capabilities of the builder. Do not stop at a wireframe or generic landing-page mockup.',
- '',
- 'BUSINESS PROFILE',
- 'Business: '+name,
- 'Location / market: '+market,
- 'Industry: '+data.profile.type,
- 'Current website: '+website,
- 'Primary business goal: '+({leads:'Generate qualified enquiries and leads',sales:'Sell products, accept orders or bookings online',trust:'Build credibility and communicate services',operations:'Support a defined business workflow',community:'Share information and build a community'}[data.goal]||data.goal),
- 'Research notes supplied by MCAS: '+evidence,
- '',
- 'DIAGNOSED / RESEARCHED OBSERVATIONS — HANDLE CAREFULLY',
- '- '+diagnosis,
- 'Use only these observations as evidence. Do not turn unverified or restricted checks into claims that the business has no website or that its website is broken. Treat proposed improvements as recommendations, not proven defects.',
- '',
- 'RECOMMENDED SITE STRUCTURE',
- pages,
- '',
- 'REQUIRED FUNCTIONAL FEATURES',
- features,
- '- '+data.required.join('\n- '),
- '',
- 'DESIGN AND CONTENT DIRECTION',
- '- Create a distinctive, credible visual identity suited to this industry and target audience; avoid a generic template look.',
- '- Use a clear visual hierarchy, readable typography, deliberate spacing, consistent components and authentic imagery relevant to the business.',
- '- Use the business name and supplied facts accurately. For missing phone numbers, email, address, prices, opening hours, team members, testimonials, credentials or product details, insert clearly labelled editable placeholders and request confirmation. Never invent them.',
- '- Make the principal action obvious: '+({leads:'request a quote / make an enquiry',sales:'book, order or purchase',trust:'contact the business or request a consultation',operations:'start the agreed workflow or request a demonstration',community:'join, participate or get in touch'}[data.goal]||'contact the business')+'.',
- '',
- 'TECHNICAL, SEO, ACCESSIBILITY AND QUALITY REQUIREMENTS',
- quality,
- '- Ensure all links, forms, menu items and buttons work. Include validation, helpful error messages, success states and a useful 404 page.',
- '- Make forms send data only to a configured endpoint chosen by the site owner; do not fabricate backend integrations or pretend submissions work without configuration.',
- '- Do not expose API keys, secret tokens or credentials in client-side code.',
- '',
- 'DELIVERABLES',
- '- Complete page designs and working navigation for the sitemap above.',
- '- Reusable header, footer, buttons, cards, forms and responsive components.',
- '- Realistic page copy based only on supplied business information; use clearly marked placeholders for unknowns.',
- '- A concise handover note covering how the owner edits content, connects the domain, configures hosting, forms, analytics and any third-party integrations.',
- '',
- 'SCOPE AND COMMERCIAL NOTE',
- 'The MCAS estimate for the likely website category is '+price.label+': '+moneyKES(price.low)+'–'+moneyKES(price.high)+' as an indicative Kenya-market build range. This is not a budget instruction or a quote for the AI builder. Do not display this estimate on the public website unless the business owner specifically requests it.',
- '',
- 'Before building, state any essential missing information as questions or placeholders. Then create the full website. Prioritise clarity, trust, accessibility, mobile usability, maintainability and a useful customer journey.'
- ].join('\n');
-}
-function generateAdvisorPlan(){
- const lead=advisorProspect();
- if($('advisorLead').value&&!lead)return note('advisorNotice','The selected prospect could not be found. Refresh the workspace and select it again.',true);
- const data=advisorPlanData();
- const price=advisorPrice(data,lead);
- renderAdvisorDiagnosis(lead,advisorAuditLeadId===lead?.id?advisorLatestAudit:null);
- const pageHtml=data.pages.map((x,i)=>'<li><b>'+esc(x)+'</b><br><span class="tiny">Define the page goal, primary content, proof points and a clear next action. Keep content specific to this business and verify all claims.</span></li>').join('');
- const featuresHtml=data.features.map(x=>'<li>'+esc(x)+'</li>').join('');
- const universalHtml=data.universal.concat(data.required).map(x=>'<li>'+esc(x)+'</li>').join('');
- $('advisorPlanOutput').innerHTML='<div class="item"><span class="badge green">Recommended website type</span><h3>'+esc(data.profile.type)+'</h3><p><b>Main goal:</b> '+esc(({leads:'Generate enquiries',sales:'Drive sales / bookings',trust:'Build credibility',operations:'Support business operations',community:'Engage a community'})[data.goal])+'</p></div>'+
- '<div class="item"><h3>Proposed sitemap and page purpose</h3><ol>'+pageHtml+'</ol></div>'+
- '<div class="item"><h3>Industry and goal-specific features</h3><ul>'+featuresHtml+'</ul></div>'+
- '<div class="item"><h3>Core website requirements</h3><ul>'+universalHtml+'</ul></div>'+
- '<div class="item"><h3>Design direction and quality standard</h3><ul>'+data.quality.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul></div>'+
- '<div class="warning"><b>Before build:</b> Confirm business facts, page content, owner access, integrations, data collected, domain, hosting, maintenance and acceptance criteria with the business. Do not publish placeholder claims or fake testimonials.</div>';
- let marketNote='Published Kenyan 2026 price guides vary substantially by scope: simple business sites commonly appear around KES 15,000–40,000; fuller company sites around KES 35,000–120,000; e-commerce commonly around KES 50,000–250,000; and custom portals around KES 120,000–500,000+. MCAS uses these as broad planning bands, not a guaranteed market price.';
- $('advisorPricingOutput').innerHTML='<div class="item"><span class="badge green">Indicative website project estimate · USD</span><h3>'+esc(price.label)+'</h3><div class="metric">'+moneyUSDFromKES(price.low)+' – '+moneyUSDFromKES(price.high)+'</div><p class="tiny">Approximate KES equivalent: '+moneyKES(price.low)+' – '+moneyKES(price.high)+'. Assumed rate: KES '+MCAS_KES_PER_USD+' per USD; verify live FX before quoting.</p><p>'+esc(price.scope)+'</p><p class="tiny">'+esc(marketNote)+'</p></div>'+
- '<div class="item"><h3>Possible recurring costs (budget separately)</h3><p>Domain and hosting: approximately KES 3,500–15,000 per year. Optional maintenance: approximately KES 5,000–25,000 per month, depending on provider and scope.</p><p class="tiny">Indicative published guide figures; renewals, traffic, email, premium plugins, payment fees, content production and taxes may be additional.</p></div>'+
- '<div class="item"><h3>Pricing references (Kenya, 2026)</h3><p><a href="https://wfw.co.ke/blog/how-much-does-a-website-cost-in-kenya" target="_blank" rel="noopener noreferrer">Wallflower Agency — business, company and e-commerce price guide (13 September 2026)</a></p><p><a href="https://www.thabititechnologies.com/blog/website-cost-in-kenya" target="_blank" rel="noopener noreferrer">Thabiti Technologies — website types and custom system ranges (4 October 2026)</a></p><p><a href="https://digital4africa.com/website-cost-kenya/" target="_blank" rel="noopener noreferrer">Digital4Africa — website and running-cost guide (October 2026)</a></p><p><a href="https://edgecom.co.ke/website-cost-kenya" target="_blank" rel="noopener noreferrer">Edgecom — published starting prices and VAT notes (October 2026)</a></p></div>'+
- '<div class="warning"><b>Estimate only:</b> Actual value depends on the final page count, design, copywriting, integrations, e-commerce/booking workflow, data migration, hosting, support and developer experience. Confirm scope before quoting. Some published prices exclude VAT; check tax treatment and third-party charges separately.</div>';
- $('advisorPromptText').value=buildAdvisorPrompt(data,lead,price);
- $('advisorPromptPanel').classList.remove('hide');
- note('advisorNotice','Full plan, evidence-led diagnosis, Kenya pricing estimate and AI-builder prompt generated. Review the evidence and scope before using the prompt.');
-}
-$('advisorLead').addEventListener('change',()=>{renderAdvisorProspectPicker();updateAdvisorProspect();});
-$('advisorLeadPickerButton').addEventListener('click',()=>{const menu=$('advisorLeadPickerMenu');if(menu.classList.contains('hide'))openAdvisorProspectPicker();else closeAdvisorProspectPicker();});
-$('advisorLeadSearch').addEventListener('input',renderAdvisorProspectPicker);
-$('advisorLeadOptions').addEventListener('click',e=>{
- const choice=e.target.closest('[data-advisor-prospect-id]');if(!choice)return;
- const id=choice.dataset.advisorProspectId;
- if(!state.leads.some(l=>String(l.id)===String(id)))return;
- $('advisorLead').value=id;
- closeAdvisorProspectPicker();
- renderAdvisorProspectPicker();
- updateAdvisorProspect();
- $('advisorLeadPickerButton').focus();
-});
-$('advisorLeadSearch').addEventListener('keydown',e=>{
- if(e.key==='Escape'){closeAdvisorProspectPicker();$('advisorLeadPickerButton').focus();}
-});
-$('advisorLeadPickerButton').addEventListener('keydown',e=>{
- if(e.key==='Escape')closeAdvisorProspectPicker();
- if(e.key==='ArrowDown'&&!$('advisorLeadPickerMenu').classList.contains('hide')){$('advisorLeadOptions').querySelector('button')?.focus();}
-});
-document.addEventListener('click',e=>{if(!$('advisorProspectPicker')?.contains(e.target))closeAdvisorProspectPicker();});
-$('advisorLiveAuditBtn').addEventListener('click',runAdvisorLiveAudit);
-$('advisorBuildPlan').addEventListener('click',generateAdvisorPlan);
-$('advisorCopyPrompt').addEventListener('click',async()=>{
- const text=$('advisorPromptText').value;
- if(!text.trim())return note('advisorNotice','Generate the full website plan first.',true);
- try{await navigator.clipboard.writeText(text);note('advisorNotice','AI-builder prompt copied. Paste it into your website builder.');}
- catch(e){$('advisorPromptText').focus();$('advisorPromptText').select();note('advisorNotice','Select the prompt and copy it manually with Ctrl+C.');}
-});
-
-
-
-
-queryFlags();boot();
-})();
-
-
-// Standalone audit/competitor controls. These deliberately do not depend on
-// the main app closure's private $, api, note or esc bindings.
-(()=>{
- 'use strict';
- const byId=id=>document.getElementById(id);
- const htmlEscape=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
- const showNotice=(id,message,isError=false)=>{
-  const element=byId(id);
-  if(!element)return;
-  element.textContent=message;
-  element.className='notice'+(isError?' error':'');
- };
- const readCookie=name=>{
-  const part=document.cookie.split('; ').find(item=>item.startsWith(name+'='));
-  if(!part)return '';
-  try{return decodeURIComponent(part.slice(name.length+1));}catch(_){return part.slice(name.length+1);}
- };
- const parseResponse=async response=>{
-  const type=response.headers.get('content-type')||'';
-  if(type.includes('application/json'))return await response.json();
-  return await response.text();
- };
- const postJson=async(path,payload)=>{
-  const csrfResponse=await fetch('/api/auth/csrf',{credentials:'same-origin',cache:'no-store'});
-  const csrfData=await parseResponse(csrfResponse);
-  if(!csrfResponse.ok)throw new Error('Could not initialise the MCAS security token. Refresh the page and sign in again.');
-  const csrf=readCookie('mcas_csrf')||(csrfData&&csrfData.csrf_token)||'';
-  if(!csrf)throw new Error('MCAS security token is missing. Refresh the page and sign in again.');
-  const response=await fetch(path,{
-   method:'POST',
-   credentials:'same-origin',
-   headers:{'Accept':'application/json','Content-Type':'application/json','X-CSRF-Token':csrf},
-   body:JSON.stringify(payload)
-  });
-  const data=await parseResponse(response);
-  if(!response.ok){
-   const message=(data&&typeof data==='object'&&(data.detail||data.message))||data;
-   throw new Error(typeof message==='string'?message:'Request failed ('+response.status+').');
-  }
-  if(!data||typeof data!=='object')throw new Error('MCAS returned an unexpected response.');
-  return data;
- };
- const safePublicHttpUrl=value=>{
-  try{
-   const url=new URL(String(value));
-   return ['http:','https:'].includes(url.protocol)?url.href:'#';
-  }catch(_){return '#';}
- };
- const renderAuditResult=data=>{
-  const root=byId('advancedAuditResult');
-  if(!root)return;
-  const audit=data.advanced_audit||{};
-  const scores=audit.scores||{};
-  const scoreRows=Object.entries(scores).map(([key,value])=>
-   '<div class="row"><span>'+htmlEscape(String(key).replace(/_/g,' '))+'</span><b>'+htmlEscape(value)+'/100</b></div>'
-  ).join('');
-  const findings=(audit.findings||[]).map(item=>
-   '<div class="item"><div class="itemtop"><strong>'+htmlEscape(item.title)+'</strong><span class="badge">'+htmlEscape(item.priority)+'</span></div><p>'+htmlEscape(String(item.category||'').replace(/_/g,' '))+' · '+htmlEscape(item.evidence)+'</p></div>'
-  ).join('');
-  const limitations=(audit.limitations||[]).map(item=>'<li>'+htmlEscape(item)+'</li>').join('');
-  root.innerHTML='<div class="good"><b>Overall static audit score: '+htmlEscape(audit.overall_score??'N/A')+'/100</b><p>HTTP '+htmlEscape(data.http_status)+' · '+htmlEscape(data.url)+'</p></div>'+
-   scoreRows+'<h3>Findings for manual review</h3>'+
-   (findings||'<div class="empty">No review findings were detected by this limited check.</div>')+
-   '<h3>Important limitations</h3><ul>'+limitations+'</ul>';
- };
- byId('runAdvancedAudit')?.addEventListener('click',async()=>{
-  const button=byId('runAdvancedAudit');
-  const input=byId('advancedAuditUrl');
-  const url=input?.value.trim()||'';
-  if(!url)return showNotice('advancedAuditNotice','Enter a public website URL.',true);
-  button.disabled=true;
-  showNotice('advancedAuditNotice','Checking public page safely…');
-  try{
-   const result=await postJson('/api/audit-website',{url});
-   renderAuditResult(result);
-   showNotice('advancedAuditNotice','Audit completed. Findings are observations for manual verification, not confirmed vulnerabilities.');
-  }catch(error){
-   showNotice('advancedAuditNotice',error.message||'The audit request failed.',true);
-  }finally{
-   button.disabled=false;
-  }
- });
- byId('runCompetitorIntel')?.addEventListener('click',async()=>{
-  const button=byId('runCompetitorIntel');
-  const leadId=byId('competitorLead')?.value||'';
-  if(!leadId)return showNotice('competitorNotice','Select a saved prospect first.',true);
-  button.disabled=true;
-  showNotice('competitorNotice','Searching public business listings and checking candidate websites…');
-  try{
-   const data=await postJson('/api/competitor-intelligence',{
-    lead_id:leadId,
-    industry:byId('competitorIndustry')?.value||'restaurant',
-    max_results:Number(byId('competitorLimit')?.value||5)
-   });
-   const summary=data.comparison||{};
-   const items=data.competitors||[];
-   const target=data.target||{};
-   const targetScore=target.website_audit?.overall_score;
-   const cards=items.map(item=>
-    '<div class="item"><div class="itemtop"><strong>'+htmlEscape(item.name)+'</strong><span class="badge">'+htmlEscape(item.website_state)+'</span></div>'+
-    '<p>'+htmlEscape(item.category||'Category unconfirmed')+' · '+htmlEscape(item.address||'Address unavailable')+'</p>'+
-    '<p>'+htmlEscape(item.website||'No website URL returned by provider')+'</p>'+
-    '<p>Rating: '+htmlEscape(item.rating??'Not listed')+' ('+htmlEscape(item.rating_count??0)+' reviews shown by provider)</p>'+
-    '<p><a href="'+htmlEscape(safePublicHttpUrl(item.source_url||''))+'" target="_blank" rel="noopener noreferrer">View discovery source</a></p></div>'
-   ).join('');
-   const limitations=(data.limitations||[]).map(htmlEscape).join('<br>');
-   const root=byId('competitorResult');
-   if(root){
-    root.innerHTML='<div class="good"><b>'+htmlEscape(summary.competitors_found||0)+' candidate competitors found</b>'+
-     '<p>Target website: '+htmlEscape(target.website_state||'not listed')+
-     (targetScore!==undefined?' · static audit '+htmlEscape(targetScore)+'/100':'')+'</p>'+
-     '<p>Websites listed: '+htmlEscape(summary.with_listed_websites||0)+
-     ' · No website listed: '+htmlEscape(summary.without_listed_websites||0)+
-     ' · Responding: '+htmlEscape(summary.responding_websites||0)+'</p></div>'+
-     (cards||'<div class="empty">No candidate competitors were returned for this query.</div>')+
-     (limitations?'<p class="tiny">'+limitations+'</p>':'');
-   }
-   showNotice('competitorNotice','Research complete. Treat matches and provider data as unverified candidates.');
-  }catch(error){
-   showNotice('competitorNotice',error.message||'Competitor research failed.',true);
-  }finally{
-   button.disabled=false;
-  }
- });
- console.info('[MCAS] Standalone audit and competitor controls initialised.');
-})();
-+(Number(n)/MCAS_KES_PER_USD).toLocaleString('en-US',{minimumFractionDigits:0,maximumFractionDigits:0});}
-function buildAdvisorPrompt(data,lead,price){
- const name=lead?.name||'BUSINESS NAME TO CONFIRM';
- const market=lead?.market||'Location to confirm';
- const website=lead?.website||'No verified website URL is recorded; do not assume one exists.';
- const evidence=lead?.evidence||$('advisorContext').value.trim()||'No prospect research evidence supplied. Ask for verified facts and use neutral placeholders.';
- const diagnosis=advisorFindings(lead,advisorAuditLeadId===lead?.id?advisorLatestAudit:null)
-  .map(x=>x.replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim()).join('\n- ');
- const pages=data.pages.map((x,i)=>(i+1)+'. '+x).join('\n');
- const features=data.features.map(x=>'- '+x).join('\n');
- const quality=data.universal.concat(data.quality).map(x=>'- '+x).join('\n');
- return [
- 'AI WEBSITE BUILDER PROMPT — '+name,
- '',
- 'ROLE AND OBJECTIVE',
- 'Act as a senior UX designer, brand designer, conversion strategist and experienced web developer. Build a polished, complete, responsive business website for the real business described below. This is a WEBSITE project, not an unrelated mobile app. Use the strongest native website/CMS capabilities of the builder. Do not stop at a wireframe or generic landing-page mockup.',
- '',
- 'BUSINESS PROFILE',
- 'Business: '+name,
- 'Location / market: '+market,
- 'Industry: '+data.profile.type,
- 'Current website: '+website,
- 'Primary business goal: '+({leads:'Generate qualified enquiries and leads',sales:'Sell products, accept orders or bookings online',trust:'Build credibility and communicate services',operations:'Support a defined business workflow',community:'Share information and build a community'}[data.goal]||data.goal),
- 'Research notes supplied by MCAS: '+evidence,
- '',
- 'DIAGNOSED / RESEARCHED OBSERVATIONS — HANDLE CAREFULLY',
- '- '+diagnosis,
- 'Use only these observations as evidence. Do not turn unverified or restricted checks into claims that the business has no website or that its website is broken. Treat proposed improvements as recommendations, not proven defects.',
- '',
- 'RECOMMENDED SITE STRUCTURE',
- pages,
- '',
- 'REQUIRED FUNCTIONAL FEATURES',
- features,
- '- '+data.required.join('\n- '),
- '',
- 'DESIGN AND CONTENT DIRECTION',
- '- Create a distinctive, credible visual identity suited to this industry and target audience; avoid a generic template look.',
- '- Use a clear visual hierarchy, readable typography, deliberate spacing, consistent components and authentic imagery relevant to the business.',
- '- Use the business name and supplied facts accurately. For missing phone numbers, email, address, prices, opening hours, team members, testimonials, credentials or product details, insert clearly labelled editable placeholders and request confirmation. Never invent them.',
- '- Make the principal action obvious: '+({leads:'request a quote / make an enquiry',sales:'book, order or purchase',trust:'contact the business or request a consultation',operations:'start the agreed workflow or request a demonstration',community:'join, participate or get in touch'}[data.goal]||'contact the business')+'.',
- '',
- 'TECHNICAL, SEO, ACCESSIBILITY AND QUALITY REQUIREMENTS',
- quality,
- '- Ensure all links, forms, menu items and buttons work. Include validation, helpful error messages, success states and a useful 404 page.',
- '- Make forms send data only to a configured endpoint chosen by the site owner; do not fabricate backend integrations or pretend submissions work without configuration.',
- '- Do not expose API keys, secret tokens or credentials in client-side code.',
- '',
- 'DELIVERABLES',
- '- Complete page designs and working navigation for the sitemap above.',
- '- Reusable header, footer, buttons, cards, forms and responsive components.',
- '- Realistic page copy based only on supplied business information; use clearly marked placeholders for unknowns.',
- '- A concise handover note covering how the owner edits content, connects the domain, configures hosting, forms, analytics and any third-party integrations.',
- '',
- 'SCOPE AND COMMERCIAL NOTE',
- 'The indicative project estimate is '+moneyUSDFromKES(price.low)+'–'+moneyUSDFromKES(price.high)+' USD (approximately '+moneyKES(price.low)+'–'+moneyKES(price.high)+'). Planning conversion assumption: KES '+MCAS_KES_PER_USD+' per USD; confirm the current exchange rate before quoting. This is an indicative Kenya-market estimate, not a fixed quotation or a promise. Do not display it on the public website unless the business owner specifically requests it.',
- '',
- 'Before building, state any essential missing information as questions or placeholders. Then create the full website. Prioritise clarity, trust, accessibility, mobile usability, maintainability and a useful customer journey.'
- ].join('\n');
-}
-function generateAdvisorPlan(){
- const lead=advisorProspect();
- if($('advisorLead').value&&!lead)return note('advisorNotice','The selected prospect could not be found. Refresh the workspace and select it again.',true);
- const data=advisorPlanData();
- const price=advisorPrice(data,lead);
- renderAdvisorDiagnosis(lead,advisorAuditLeadId===lead?.id?advisorLatestAudit:null);
- const pageHtml=data.pages.map((x,i)=>'<li><b>'+esc(x)+'</b><br><span class="tiny">Define the page goal, primary content, proof points and a clear next action. Keep content specific to this business and verify all claims.</span></li>').join('');
- const featuresHtml=data.features.map(x=>'<li>'+esc(x)+'</li>').join('');
- const universalHtml=data.universal.concat(data.required).map(x=>'<li>'+esc(x)+'</li>').join('');
- $('advisorPlanOutput').innerHTML='<div class="item"><span class="badge green">Recommended website type</span><h3>'+esc(data.profile.type)+'</h3><p><b>Main goal:</b> '+esc(({leads:'Generate enquiries',sales:'Drive sales / bookings',trust:'Build credibility',operations:'Support business operations',community:'Engage a community'})[data.goal])+'</p></div>'+
- '<div class="item"><h3>Proposed sitemap and page purpose</h3><ol>'+pageHtml+'</ol></div>'+
- '<div class="item"><h3>Industry and goal-specific features</h3><ul>'+featuresHtml+'</ul></div>'+
- '<div class="item"><h3>Core website requirements</h3><ul>'+universalHtml+'</ul></div>'+
- '<div class="item"><h3>Design direction and quality standard</h3><ul>'+data.quality.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul></div>'+
- '<div class="warning"><b>Before build:</b> Confirm business facts, page content, owner access, integrations, data collected, domain, hosting, maintenance and acceptance criteria with the business. Do not publish placeholder claims or fake testimonials.</div>';
- let marketNote='The USD values are converted from broad Kenya-market planning bands using an illustrative KES 130 per USD assumption, not a live exchange-rate feed. Confirm the exchange rate, client requirements, local market and final scope before making a quote.';
- $('advisorPricingOutput').innerHTML='<div class="item"><span class="badge green">Indicative website project estimate · USD</span><h3>'+esc(price.label)+'</h3><div class="metric">'+moneyUSDFromKES(price.low)+' – '+moneyUSDFromKES(price.high)</div><p class="tiny">Approximate KES equivalent: '+moneyKES(price.low)+' – '+moneyKES(price.high). Assumed rate: KES '+MCAS_KES_PER_USD per USD; verify live FX before quoting.</p><p>'+esc(price.scope)+'</p><p class="tiny">'+esc(marketNote)+'</p></div>'+
  '<div class="item"><h3>Possible recurring costs (budget separately)</h3><p>Domain and hosting: approximately KES 3,500–15,000 per year. Optional maintenance: approximately KES 5,000–25,000 per month, depending on provider and scope.</p><p class="tiny">Indicative published guide figures; renewals, traffic, email, premium plugins, payment fees, content production and taxes may be additional.</p></div>'+
  '<div class="item"><h3>Pricing references (Kenya, 2026)</h3><p><a href="https://wfw.co.ke/blog/how-much-does-a-website-cost-in-kenya" target="_blank" rel="noopener noreferrer">Wallflower Agency — business, company and e-commerce price guide (13 September 2026)</a></p><p><a href="https://www.thabititechnologies.com/blog/website-cost-in-kenya" target="_blank" rel="noopener noreferrer">Thabiti Technologies — website types and custom system ranges (4 October 2026)</a></p><p><a href="https://digital4africa.com/website-cost-kenya/" target="_blank" rel="noopener noreferrer">Digital4Africa — website and running-cost guide (October 2026)</a></p><p><a href="https://edgecom.co.ke/website-cost-kenya" target="_blank" rel="noopener noreferrer">Edgecom — published starting prices and VAT notes (October 2026)</a></p></div>'+
  '<div class="warning"><b>Estimate only:</b> Actual value depends on the final page count, design, copywriting, integrations, e-commerce/booking workflow, data migration, hosting, support and developer experience. Confirm scope before quoting. Some published prices exclude VAT; check tax treatment and third-party charges separately.</div>';
