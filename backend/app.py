@@ -944,7 +944,7 @@ def google_oauth_config():
 
 
 @app.get("/api/auth/google/bootstrap-required")
-def google_bootstrap_required(email: str = Query(min_length=3, max_length=254), request: Request = None):
+def google_bootstrap_required(request: Request, email: str = Query(min_length=3, max_length=254)):
     normalized = email.strip().lower()
     try:
         validate_email(normalized)
@@ -1000,8 +1000,7 @@ def google_login_start(payload: GoogleLoginStartIn, response: Response, request:
 
 
 @app.get("/api/auth/google/callback")
-def google_login_callback(code: str = "", state: str = "", error: str = "",
-                          request: Request = None, response: Response = None):
+def google_login_callback(request: Request, code: str = "", state: str = "", error: str = ""):
     if error:
         return RedirectResponse("/?google=cancelled", status_code=303)
     cookie_state = request.cookies.get("mcas_google_state", "") if request else ""
@@ -2593,10 +2592,14 @@ def assistant_system_prompt(task: str) -> str:
         )
     if task == "email":
         return shared + (
-            "TASK: write a first-contact business email that is specific to the supplied verified evidence. "
-            "If evidence is incomplete, say so rather than claiming a problem. Use a relevant subject and a "
-            "natural, respectful call to action. Include a polite opt-out sentence. Output the subject and body "
-            "clearly, without unsupported claims."
+            "TASK: write a persuasive, highly personalised first-contact business email that is specific to the supplied verified evidence. "
+            "Start with a concise subject line that is relevant, not clickbait. Open with a genuine business-specific observation; "
+            "explain one concrete, evidence-backed website issue and its likely customer/business consequence without exaggerating. "
+            "Connect the issue to a practical improvement the sender can deliver. Explain the value in plain language, avoid generic praise, "
+            "and finish with one low-friction, respectful call to action (for example, permission to send a short outline or arrange a brief call). "
+            "If no verified website problem exists, do not invent one: say the observation is preliminary and offer a general improvement discussion. "
+            "Do not claim the recipient has lost sales, customers or revenue unless supplied evidence proves it. "
+            "Include a polite opt-out sentence. Keep it around 100–160 words. Output a clearly labelled subject and email body only."
         )
     return shared + (
         "TASK: prepare a useful, structured proposal based only on supplied requirements and context. "
