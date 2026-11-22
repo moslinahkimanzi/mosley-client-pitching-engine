@@ -138,7 +138,9 @@ def find_business_website_candidate(
         # Require the domain itself to carry a distinctive business-name token.
         # This intentionally abstains when a search result could be a directory,
         # news article or unrelated third-party profile.
-        domain_name_match = bool(distinctive_name_tokens & host_tokens)
+        domain_name_match = bool(distinctive_name_tokens & host_tokens) or any(
+            len(token) >= 4 and token in host for token in distinctive_name_tokens
+        )
         if name_score < 0.8 or not locality_match or not domain_name_match:
             continue
         candidates.append((name_score, len(snippet), str(link)))
@@ -177,7 +179,9 @@ def _website_domain_matches_business(name: str, host: str) -> bool:
         token for token in _name_tokens(name)
         if len(token) >= 4 and token not in generic
     }
-    return bool(distinctive & domain_tokens)
+    return bool(distinctive & domain_tokens) or any(
+        len(token) >= 4 and token in host.casefold() for token in distinctive
+    )
 
 
 def verify_candidate(
