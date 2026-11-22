@@ -91,7 +91,7 @@ class BalancedResearchTest(unittest.TestCase):
             },
             {
                 "title": "Example Italian Restaurant",
-                "link": "https://exampleitalianrestaurant.co.ke",
+                "link": "https://example-italian-restaurant.co.ke",
                 "snippet": "Official website of Example Italian Restaurant in Nairobi",
             },
         ]
