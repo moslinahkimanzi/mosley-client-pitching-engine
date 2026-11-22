@@ -83,6 +83,8 @@ class ResearchWorkflowTest(unittest.TestCase):
         self.assertEqual(prospect["verification_status"], "verified")
         self.assertGreaterEqual(prospect["verification_score"], 80)
         self.assertEqual(prospect["website_state"], "not_listed")
+        self.assertEqual(prospect["website_presence"], "no_website_found")
+        self.assertTrue(prospect["validation_sample_id"])
         self.assertFalse(prospect["pitch_eligible"])
         self.assertFalse(prospect["proposal_created"])
         self.assertFalse(prospect["draft_created"])
@@ -101,6 +103,11 @@ class ResearchWorkflowTest(unittest.TestCase):
         self.assertEqual(leads[0]["verification_status"], "verified")
         self.assertEqual(leads[0]["research_origin"], "serper_places")
         self.assertEqual(leads[0]["pitch_eligible"], 0)
+        self.assertEqual(leads[0]["website_presence"], "no_website_found")
+        samples = client.get("/api/quality/validation").json()
+        self.assertEqual(len(samples), 1)
+        self.assertEqual(samples[0]["predicted_website_presence"], "no_website_found")
+        self.assertEqual(client.get("/api/quality/metrics").json()["overall"]["samples"], 1)
         self.assertEqual(client.get("/api/proposals").json(), [])
         self.assertEqual(client.get("/api/drafts").json(), [])
 
@@ -174,6 +181,68 @@ class ResearchWorkflowTest(unittest.TestCase):
         self.assertEqual(client.get("/api/leads").json(), [])
         self.assertEqual(client.get("/api/proposals").json(), [])
         self.assertEqual(client.get("/api/drafts").json(), [])
+
+    def test_quality_review_requires_evidence_and_is_workspace_private(self):
+        client, csrf = self._registered_client()
+        user_id = client.get("/api/auth/me").json()["id"]
+        sample_id = uuid.uuid4().hex
+        with mcas.db() as connection:
+            connection.execute(
+                """INSERT INTO prospect_validation_samples(
+                    id,user_id,business_name,industry,location,predicted_identity_verified,
+                    predicted_website_presence,predicted_website_state,predicted_contact_email,
+                    predicted_contact_phone,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (sample_id,user_id,"Validation API Test","restaurant","Nairobi",1,
+                 "website_found","working","contact@example.test","+254700000000",mcas.now(),mcas.now()),
+            )
+        payload = {
+            "ground_truth_identity":"exists",
+            "ground_truth_website_presence":"website_found",
+            "ground_truth_website_state":"working",
+            "ground_truth_email_correct":True,
+            "ground_truth_phone_correct":False,
+            "reviewer_evidence":"Independent official website checked on 2026-11-22: https://example.test",
+            "reviewer_notes":"Test fixture only",
+        }
+        response = client.post(
+            f"/api/quality/validation/{sample_id}",json=payload,
+            headers={"X-CSRF-Token":csrf},
+        )
+        self.assertEqual(response.status_code,200,response.text)
+        metrics = client.get("/api/quality/metrics").json()["overall"]
+        self.assertEqual(metrics["identity_verification"]["true_positive"],1)
+        self.assertEqual(metrics["website_status"]["accuracy"],1.0)
+        self.assertEqual(metrics["contact_data"]["email"]["accuracy"],1.0)
+        self.assertEqual(metrics["contact_data"]["phone"]["accuracy"],0.0)
+        self.assertEqual(client.get("/api/quality/validation").json()[0]["reviewer_notes"],"Test fixture only")
+
+        other_client, _ = self._registered_client()
+        self.assertEqual(other_client.get("/api/quality/validation").json(),[])
+        denied = other_client.post(
+            f"/api/quality/validation/{sample_id}",json=payload,
+            headers={"X-CSRF-Token":other_client.get("/api/auth/csrf").json()["csrf_token"]},
+        )
+        self.assertEqual(denied.status_code,404)
+
+    def test_quality_review_rejects_missing_independent_evidence(self):
+        client, csrf = self._registered_client()
+        user_id = client.get("/api/auth/me").json()["id"]
+        sample_id = uuid.uuid4().hex
+        with mcas.db() as connection:
+            connection.execute(
+                """INSERT INTO prospect_validation_samples(
+                    id,user_id,business_name,industry,location,predicted_identity_verified,
+                    predicted_website_presence,predicted_website_state,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (sample_id,user_id,"No Evidence Test","retail","Mombasa",0,"unknown","unknown",mcas.now(),mcas.now()),
+            )
+        response = client.post(
+            f"/api/quality/validation/{sample_id}",
+            json={"reviewer_evidence":"short"},
+            headers={"X-CSRF-Token":csrf},
+        )
+        self.assertEqual(response.status_code,422)
 
     def test_serper_web_search_returns_organic_results(self):
         client, _ = self._registered_client()
