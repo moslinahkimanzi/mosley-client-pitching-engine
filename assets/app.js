@@ -404,23 +404,15 @@ $('startResearchBtn').addEventListener('click',async()=>{
    location,industry:$('researchIndustry').value,keywords:$('researchKeywords').value.trim(),
    max_results:Number($('researchLimit').value)
   })});
-  // Render every discovered record. An empty balanced_results array must never
-  // hide candidates merely because one evidence category had no matches.
-  const balancedIds=new Set((Array.isArray(d.balanced_results)?d.balanced_results:[])
-   .map(item=>item.validation_sample_id).filter(Boolean));
-  const researchItems=Array.isArray(d.results)?d.results:
-   (Array.isArray(d.balanced_results)?d.balanced_results:[]);
+  // Render every discovered candidate in one flat list.
+  const researchItems=Array.isArray(d.results)?d.results:[];
   $('researchRunResults').innerHTML=researchItems.map(x=>{
    const label=websiteStateText(x.website_state);
-   const groupLabels={website_found:'BUSINESS WITH WEBSITE',no_website_found:'NO WEBSITE FOUND IN BOUNDED SEARCH',broken_website:'BUSINESS WITH BROKEN WEBSITE'};
-   const isBalanced=!!(x.validation_sample_id&&balancedIds.has(x.validation_sample_id));
-   const groupBadge=x.research_group?'<span class="badge '+(isBalanced?'green':'')+'">'+(isBalanced?'BALANCED GROUP · ':'VERIFIED CATEGORY · ')+esc(groupLabels[x.research_group]||x.research_group)+'</span>':'';
    const verificationBadge=x.verified?'<span class="badge green">IDENTITY VERIFIED · '+esc(x.verification_score)+'/100 evidence</span>':(x.verification_status==='verification_unavailable'?'<span class="badge amber">VERIFICATION UNAVAILABLE · NOT SAVED</span>':'<span class="badge amber">NOT VERIFIED · NOT SAVED</span>');
    const verificationDetails=(x.verification_reasons||[]).length?'<p><b>Verification checks:</b> '+esc(x.verification_reasons.join(' '))+'</p>':'';
    const verificationSources=(x.verification?.sources||[]).filter(v=>v.url&&(v.url.startsWith('https://')||v.url.startsWith('http://'))).map(v=>'<li>'+esc(v.label||v.type)+': <a href="'+safeLink(v.url)+'" target="_blank" rel="noopener noreferrer">'+esc(v.domain||v.url)+'</a></li>').join('');
    const sourceEvidence=verificationSources?'<p><b>Verification evidence sources:</b></p><ul>'+verificationSources+'</ul>':'';
    const pitchBadge=x.pitch_eligible?'<span class="badge green">WEBSITE OPPORTUNITY QUALIFIED</span>':'<span class="badge amber">NO VERIFIED PITCH OPPORTUNITY</span>';
-   const presenceBadge=x.website_presence==='website_found'?'<span class="badge green">BUSINESS WITH WEBSITE</span>':x.website_presence==='no_website_found'?'<span class="badge amber">NO WEBSITE FOUND IN BOUNDED SEARCH</span>':'<span class="badge">WEBSITE PRESENCE UNKNOWN</span>';
    const scoreLine=x.verified&&Number.isFinite(Number(x.opportunity_score))?'<p><b>Opportunity priority:</b> '+esc(x.opportunity_score)+'/100 <span class="tiny">(evidence-based sorting, not buying intent)</span></p>':'';
    const audit=x.website_audit?'<p><b>Quick check:</b> HTTP '+esc(x.website_audit.http_status??"unknown")+' · mobile viewport: '+esc(x.website_audit.has_viewport_meta===true?"detected":x.website_audit.has_viewport_meta===false?"not detected":"not checked")+' · meta description: '+esc(x.website_audit.has_meta_description===true?"detected":x.website_audit.has_meta_description===false?"not detected":"not checked")+' · H1: '+esc(x.website_audit.has_h1===true?"detected":x.website_audit.has_h1===false?"not detected":"not checked")+'</p>':'';
    const reasons=(x.score_reasons||[]).length?'<p class="tiny">Priority signals: '+esc(x.score_reasons.join("; "))+'</p>':'';
@@ -431,12 +423,10 @@ $('startResearchBtn').addEventListener('click',async()=>{
    const contact='<p><b>Provider-listed contact (not independently verified):</b> '+contactEmail+' · '+contactPhone+'</p>'+(x.contact_email_corroborated?'<p class="tiny">Email also appeared in an independent matching public source.</p>':'');
    const pages=(x.pages||[]).map(v=>'<li>'+esc(v)+'</li>').join('');
    const delivery=!x.verified?'Not saved: independent public evidence did not meet MCAS verification rules. No proposal or outreach draft was created.':(x.duplicate?'Already saved in your CRM; no duplicate proposal or email draft was created.':(!x.pitch_eligible?'Saved as a verified business, but no concrete website issue was confirmed. No proposal or outreach draft was created.':(x.gmail_draft_created?'Proposal, MCAS draft and Gmail draft created; nothing was sent.':(x.contact_email?'Proposal and MCAS draft saved. Gmail draft was not created: '+esc(x.gmail_draft_error||'check the Gmail connection in Integrations.'):'Proposal and MCAS draft saved. No public email was listed; recipient must be confirmed before outreach.'))));
-   return '<div class="item"><div class="itemtop"><strong>'+esc(x.name)+'</strong><span class="badge '+(x.website_state==='broken'||x.website_state==='needs_improvement'?'amber':'')+'">'+esc(label)+'</span></div>'+groupBadge+presenceBadge+verificationBadge+pitchBadge+verificationDetails+sourceEvidence+scoreLine+reasons+website+contact+audit+'<p>'+esc(x.evidence||'No additional evidence returned.')+'</p>'+(x.recommendation?'<p><b>Recommended:</b> '+esc(x.recommendation)+'</p><ul>'+pages+'</ul>':'')+'<p>'+source+'</p><p class="tiny">'+delivery+'</p></div>';
+   return '<div class="item"><div class="itemtop"><strong>'+esc(x.name)+'</strong><span class="badge '+(x.website_state==='broken'||x.website_state==='needs_improvement'?'amber':'')+'">'+esc(label)+'</span></div>'+verificationBadge+pitchBadge+verificationDetails+sourceEvidence+scoreLine+reasons+website+contact+audit+'<p>'+esc(x.evidence||'No additional evidence returned.')+'</p>'+(x.recommendation?'<p><b>Recommended:</b> '+esc(x.recommendation)+'</p><ul>'+pages+'</ul>':'')+'<p>'+source+'</p><p class="tiny">'+delivery+'</p></div>';
   }).join('')||'<div class="empty">No business candidates were returned by the discovery provider. Check the research query, location, Serper account and server logs.</div>';
-  const summary=d.summary||{}, balance=d.balance||{}, available=balance.available_by_group||{};
-  const perGroup=Number(balance.balanced_per_group||0);
-  const shortage=Object.entries(balance.shortfalls||{}).filter(([,n])=>Number(n)>0).map(([k,n])=>k.replaceAll('_',' ')+': '+n).join(', ');
-  note('researchRunNotice','Research finished in '+(d.resolved_location||d.location)+'. Balanced results: '+perGroup+' businesses in EACH of the three groups ('+(perGroup*3)+' total). Available evidence: websites '+(available.website_found||0)+', no website found '+(available.no_website_found||0)+', broken websites '+(available.broken_website||0)+'. '+(shortage?'Shortfall — '+shortage+'. MCAS did not invent or relabel businesses. ':'All three requested group targets were met. ')+(summary.rejected_unverified_candidates||0)+' unverified candidates withheld; '+(summary.pitch_ready||0)+' pitch-ready opportunities; '+d.saved+' verified prospects saved. Website presence means evidence found in a bounded search, not proof of global absence. '+((d.discovery_warnings||[]).length?'Some supplemental Places searches were unavailable: '+d.discovery_warnings.join('; ')+'. ':'')+d.warning);
+  const summary=d.summary||{}, limits=d.research_limits||{};
+  note('researchRunNotice','Research finished in '+(d.resolved_location||d.location)+'. Verified businesses: '+(summary.verified_businesses||0)+'. Candidates reviewed: '+(summary.reviewed||0)+'. Pitch-ready opportunities: '+(summary.pitch_ready||0)+'. New prospects saved: '+d.saved+'. Places requests: '+(limits.places_searches??'unknown')+(limits.places_cache_hit?' (cached)':'')+'; independent web searches: '+(limits.independent_web_searches??'unknown')+'. '+(summary.rejected_unverified_candidates||0)+' unverified candidates withheld from the CRM. '+d.warning);
   await loadAll();
  }catch(e){$('researchRunResults').innerHTML='<div class="empty">No research results were saved. '+esc(e.message)+'</div>';note('researchRunNotice',e.message,true);}
  finally{btn.disabled=false;}
