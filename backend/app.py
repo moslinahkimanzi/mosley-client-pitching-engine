@@ -1828,11 +1828,10 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                         website_audit["second_check_error"] = str(getattr(exc, "detail", exc))[:180]
                         website_state = "needs_review"
                 elif 200 <= status < 400:
-                    missing = [
-                        key for key in ("has_viewport_meta", "has_meta_description")
-                        if website_audit.get(key) is False
-                    ]
-                    website_state = "needs_improvement" if missing else "working"
+                    from backend.prospect_verification import verified_website_problem_findings
+                    findings = verified_website_problem_findings(website_audit)
+                    website_audit["verified_problem_findings"] = findings
+                    website_state = "needs_improvement" if findings else "working"
                 elif status in {401, 403, 429}:
                     website_state = "access_restricted"
                 else:
@@ -1881,21 +1880,24 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                     status = int(website_audit.get("http_status") or 0)
                     if status in {404, 410}:
                         website_checks += 1
-                        second = safe_site_fetch(website)
-                        second_status = int(second.get("http_status") or 0)
-                        if second_status in {404, 410}:
-                            confirmed_unavailable_checks = 2
-                            website_audit["second_check_http_status"] = second_status
-                            website_state = "broken"
-                        else:
-                            website_audit["second_check_http_status"] = second_status
+                        try:
+                            second = safe_site_fetch(website)
+                            second_status = int(second.get("http_status") or 0)
+                            if second_status in {404, 410}:
+                                confirmed_unavailable_checks = 2
+                                website_audit["second_check_http_status"] = second_status
+                                website_state = "broken"
+                            else:
+                                website_audit["second_check_http_status"] = second_status
+                                website_state = "needs_review"
+                        except Exception as exc:
+                            website_audit["second_check_error"] = str(getattr(exc, "detail", exc))[:180]
                             website_state = "needs_review"
                     elif 200 <= status < 400:
-                        missing = [
-                            key for key in ("has_viewport_meta", "has_meta_description")
-                            if website_audit.get(key) is False
-                        ]
-                        website_state = "needs_improvement" if missing else "working"
+                        from backend.prospect_verification import verified_website_problem_findings
+                        findings = verified_website_problem_findings(website_audit)
+                        website_audit["verified_problem_findings"] = findings
+                        website_state = "needs_improvement" if findings else "working"
                     elif status in {401, 403, 429}:
                         website_state = "access_restricted"
                     else:
