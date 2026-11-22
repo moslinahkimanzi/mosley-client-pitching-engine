@@ -192,6 +192,7 @@ def init_db():
         add_column(c, "leads", "website_verified_at", "TEXT")
         add_column(c, "leads", "website_audit_json", "TEXT NOT NULL DEFAULT '{}'")
         add_column(c, "users", "google_subject", "TEXT")
+        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_subject ON users(google_subject) WHERE google_subject IS NOT NULL")
         add_column(c, "leads", "contact_phone", "TEXT")
         add_column(c, "leads", "source_url", "TEXT")
         add_column(c, "leads", "do_not_contact", "INTEGER NOT NULL DEFAULT 0")
@@ -520,8 +521,10 @@ def google_authenticate(payload: GoogleSignInIn, response: Response, request: Re
     nonce_hash = hashlib.sha256(payload.nonce.encode()).hexdigest()
     stamp = int(time.time())
     with db() as c:
-        row = c.execute("SELECT expires_at FROM google_auth_nonces WHERE nonce_hash=?", (nonce_hash,)).fetchone()
-        c.execute("DELETE FROM google_auth_nonces WHERE nonce_hash=?", (nonce_hash,))
+        row = c.execute(
+            "DELETE FROM google_auth_nonces WHERE nonce_hash=? AND expires_at>? RETURNING expires_at",
+            (nonce_hash, stamp),
+        ).fetchone()
     if not row or int(row["expires_at"]) <= stamp:
         log_security_event("auth.google_nonce_rejected", request)
         raise HTTPException(401, "Google sign-in expired. Refresh the page and try again.")
@@ -535,6 +538,7 @@ def google_authenticate(payload: GoogleSignInIn, response: Response, request: Re
     uid = None
     try:
         with db() as c:
+            c.execute("BEGIN IMMEDIATE")
             by_subject = c.execute("SELECT id FROM users WHERE google_subject=?", (subject,)).fetchone()
             by_email = c.execute("SELECT id,google_subject FROM users WHERE email=?", (email,)).fetchone()
             if by_subject:
@@ -1242,7 +1246,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             try:
                 website_audit = safe_site_fetch(website)
                 status = int(website_audit.get("http_status") or 0)
-                if status in {404, 410, 500, 502, 503, 504}:
+                if status in {404, 410} or status >= 500:
                     website_state = "broken"
                 elif status in {401, 403, 429}:
                     website_state = "access_restricted"
