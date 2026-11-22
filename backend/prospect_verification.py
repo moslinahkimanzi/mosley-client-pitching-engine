@@ -126,7 +126,20 @@ def find_business_website_candidate(
         match_text = title + " " + snippet
         name_score = name_match_score(business_name, match_text)
         locality_match = bool(locality_tokens & set(normalise_text(match_text).split()))
-        if name_score < 0.8 or not locality_match:
+        host_tokens = set(re.findall(r"[a-z0-9]+", host))
+        distinctive_name_tokens = {
+            token for token in _name_tokens(business_name)
+            if len(token) >= 4 and token not in {
+                "restaurant", "restaurants", "hotel", "hotels", "salon",
+                "cafe", "clinic", "medical", "school", "shop", "store",
+                "services", "service", "group", "company", "business",
+            }
+        }
+        # Require the domain itself to carry a distinctive business-name token.
+        # This intentionally abstains when a search result could be a directory,
+        # news article or unrelated third-party profile.
+        domain_name_match = bool(distinctive_name_tokens & host_tokens)
+        if name_score < 0.8 or not locality_match or not domain_name_match:
             continue
         candidates.append((name_score, len(snippet), str(link)))
     if not candidates:
