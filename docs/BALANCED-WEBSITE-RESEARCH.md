@@ -1,32 +1,52 @@
-# MCAS research: fast, evidence-first discovery
+# MCAS automatic prospect and website verification
 
-## Research behaviour
+## Research stages
 
-The Research command searches for businesses in one flat results list. There are no three-way result buckets, no equal-count target, and no wait for a rare category such as confirmed broken websites to be filled.
+1. **Discovery:** one structured Serper Places request, cached in-process for five minutes.
+2. **Direct website check:** when Places lists a website, MCAS fetches it using the existing SSRF-safe, DNS-pinned HTTP client. The checker validates redirect targets, blocks private/reserved addresses, allows only standard HTTP/HTTPS ports, and applies a short timeout and bounded response size.
+3. **Independent corroboration:** if the listed website does not provide a strong identity match, or Places has no website URL, MCAS makes at most one focused Serper web search for that candidate.
+4. **First-party domain candidate:** when no website is listed, a search result is considered a candidate only when its title/snippet matches the business name and locality and its domain contains a distinctive business-name token; social, directory, booking and review platforms are excluded.
+5. **Website check:** a discovered first-party candidate is fetched with the same safe checker. A 404/410 is repeated once. Two 404/410 responses are required before the website is labelled broken.
+6. **Persistence:** verification evidence, source URLs, website audit facts, check time and outcome are stored per workspace. New inconclusive candidates are saved as Unverified; they are not pitch-eligible.
 
-The selected maximum is the overall number of verified businesses MCAS aims to collect in a run. It stops once that number is reached or the bounded Places candidate pool is exhausted.
+## Identity evidence threshold
 
-## Discovery and verification
+A structured Places record must include a usable business name and address, and the business must not be reported permanently closed. Automatic verification requires either:
 
-- One focused Serper Places query is used per uncached research run. Places responses are cached in memory for five minutes.
-- The candidate pool is bounded to at most 20 records. Its size scales with the requested overall verified-business target.
-- A candidate with a listed first-party website can be identity-verified without an extra web search when the safely fetched page title strongly matches the business name.
-- MCAS uses an independent Serper web search only when the Places result and checked website do not provide sufficient identity evidence.
-- If the web search discovers a likely first-party website, MCAS fetches it using the existing SSRF-safe checker.
-- A website is marked broken only after two checks return HTTP 404 or 410 and its domain is linked to the verified business. Timeouts, access restrictions, server errors, and ambiguous redirects are not treated as broken.
-- Unverified candidates remain visible in the research results with their reasons, but are not saved as verified CRM prospects and do not generate outreach proposals or drafts.
+- A safely fetched first-party website whose page title matches the business name and whose domain contains a distinctive business-name token; or
+- At least two independent public web domains matching the business name and locality; or one matching public domain plus a Places phone/email that is corroborated in the matching public page text.
 
-## Cost and speed
+A single directory/search result is not enough. Social platforms and known aggregators do not independently verify identity. The evidence score is a deterministic rule-based index, not a statistical probability or measured accuracy percentage.
 
-One Places query is made per uncached search. Independent web queries are conditional, not automatic for every candidate. Five-minute in-memory caching reduces repeated requests for the same query during the same server process. The candidate cap and overall verified-business stop condition prevent runs from continuing indefinitely to fill artificial categories.
+## Website condition labels
 
-The API response includes research_limits, which reports the candidate budget, Places request/cache state, and number of independent web searches.
+- `working`: the site responded with HTTP 2xx/3xx and basic homepage metadata checks did not find the selected gaps.
+- `needs_improvement`: the site responded, but the bounded homepage check found a missing viewport declaration or meta description.
+- `broken`: two checks returned HTTP 404 or 410, and the website domain is linked to the verified business.
+- `access_restricted`: the site returned HTTP 401, 403 or 429. Its underlying condition remains unknown.
+- `needs_review`: timeout, unsafe redirect, server error, fetch failure, or ambiguous result. Never treated as broken.
+- `not_listed`: no likely first-party site was found in the bounded search. This is not proof that the business has no website.
 
-## Credibility and limitations
+These are lightweight homepage checks, not a full browser, accessibility, SEO, uptime history or penetration test.
 
-- Serper is a discovery provider, not a complete registry of every operating business.
-- A verified identity means the Places listing was corroborated by a matching public page or a matching first-party website title. It does not prove current trading, ownership, email deliverability, consent to contact, or buying intent.
-- A missing website URL in the Places listing is not proof that the business has no website.
-- Website condition labels describe the bounded checks MCAS performed; they are not a full browser, uptime, accessibility, SEO or penetration test.
-- Review evidence and contact details before outreach and respect applicable marketing and opt-out rules.
-- Gmail remains draft-only. MCAS does not read incoming messages or send outreach automatically.
+## Latency and API cost controls
+
+- Maximum eight candidate businesses per run.
+- At most one Places request per uncached query.
+- At most one independent web search per candidate.
+- Website checks run with four concurrent workers.
+- Each website check uses the existing five-second network timeout and bounded response body.
+- A second website request is made only for an initial 404/410 result.
+- Places results are cached in process for five minutes.
+
+A run can still take longer when Serper or target websites are slow. Candidate processing is bounded; provider errors are preserved as inconclusive evidence rather than converted into false verification.
+
+## Outreach safety
+
+Automatic identity verification does not prove that the business is currently trading, that the listed contact belongs to an authorised decision-maker, that an email is deliverable, that marketing is permitted, or that the business wants a website. Only independently corroborated phone/email values are stored as verified contact fields. Review current trading and applicable marketing/opt-out requirements before outreach.
+
+Research does not send email, create automatic Gmail drafts, or read incoming Gmail messages. Proposals and drafts remain approval-controlled.
+
+## Accuracy measurement
+
+CI tests prove expected software behaviour against fixtures; they do not establish real-world accuracy. Use the MCAS Data Quality review flow to independently label samples and calculate precision, recall, false-positive rates and website-state accuracy. Do not advertise a numeric accuracy claim until a sufficiently large, representative, independently reviewed sample supports it.

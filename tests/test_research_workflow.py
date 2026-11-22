@@ -45,97 +45,176 @@ class ResearchWorkflowTest(unittest.TestCase):
         csrf = client.get("/api/auth/csrf").json()["csrf_token"]
         return client, csrf
 
-    def test_places_discovery_saves_candidates_without_slow_per_business_checks(self):
+    def test_research_auto_verifies_matching_first_party_website(self):
         client, csrf = self._registered_client()
-        places_response = {
-            "places": [
-                {
-                    "title": "Research Test Italian Restaurant",
-                    "address": "1 Test Road, Nairobi, Kenya",
-                    "category": "Italian restaurant",
-                    "phoneNumber": "+254700000000",
-                    "rating": 4.5,
-                    "ratingCount": 20,
-                    "cid": "123456789",
-                },
-                {
-                    "title": "Research Test Cafe",
-                    "address": "2 Test Road, Nairobi, Kenya",
-                    "category": "Cafe",
-                    "website": "https://cafe.example",
-                },
-            ]
+        places = {"places": [{
+            "title": "Acacia Garden Restaurant",
+            "address": "Westlands, Nairobi, Kenya",
+            "category": "Restaurant",
+            "website": "https://acaciagarden.example",
+            "phoneNumber": "+254700123456",
+        }]}
+        website = {
+            "url": "https://acaciagarden.example",
+            "http_status": 200,
+            "content_type": "text/html",
+            "title": "Acacia Garden Restaurant | Nairobi",
+            "has_viewport_meta": True,
+            "has_meta_description": True,
+            "has_h1": True,
+            "has_form": True,
         }
         with patch.dict(os.environ, {"SERPER_API_KEY": "test-serper-key"}), patch.object(
-            mcas, "serper_request", return_value=places_response
-        ) as mocked, patch.object(mcas, "safe_site_fetch") as site_fetch:
-            response = client.post(
-                "/api/research/run",
-                json={"location": "Nairobi", "industry": "restaurant", "keywords": "Italian", "max_results": 5},
-                headers={"X-CSRF-Token": csrf},
-            )
-        self.assertEqual(response.status_code, 200, response.text)
-        result = response.json()
-        self.assertEqual(mocked.call_count, 1)
-        self.assertEqual(mocked.call_args.args[0], "places")
-        self.assertEqual(site_fetch.call_count, 0)
-        self.assertEqual(result["saved"], 2)
-        self.assertEqual(len(result["results"]), 2)
-        self.assertEqual(result["research_limits"]["independent_web_searches"], 0)
-        self.assertEqual(result["research_limits"]["website_checks"], 0)
-        self.assertEqual(result["summary"]["pending_manual_review"], 2)
-        for prospect in result["results"]:
-            self.assertFalse(prospect["verified"])
-            self.assertTrue(prospect["saved_as_candidate"])
-            self.assertEqual(prospect["verification_status"], "pending_manual_review")
-            self.assertFalse(prospect["pitch_eligible"])
-            self.assertFalse(prospect["proposal_created"])
-            self.assertFalse(prospect["draft_created"])
-        self.assertEqual(client.get("/api/leads").status_code, 200)
-        leads = client.get("/api/leads").json()
-        self.assertEqual(len(leads), 2)
-        self.assertTrue(all(x["status"] == "Unverified" for x in leads))
-        self.assertTrue(all(x["verification_status"] == "pending_manual_review" for x in leads))
-        self.assertEqual(client.get("/api/proposals").json(), [])
-        self.assertEqual(client.get("/api/drafts").json(), [])
-
-    def test_empty_places_response_returns_empty_candidates_without_extra_searches(self):
-        client, csrf = self._registered_client()
-        with patch.dict(os.environ, {"SERPER_API_KEY": "test-serper-key"}), patch.object(
-            mcas, "serper_request", return_value={"places": []}
-        ) as mocked:
+            mcas, "serper_request", return_value=places
+        ) as mocked, patch.object(mcas, "safe_site_fetch", return_value=website) as fetch:
             response = client.post(
                 "/api/research/run",
                 json={"location": "Nairobi", "industry": "restaurant", "max_results": 5},
                 headers={"X-CSRF-Token": csrf},
             )
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["results"], [])
+        result = response.json()
         self.assertEqual(mocked.call_count, 1)
-        self.assertTrue(response.json()["discovery_warnings"])
+        self.assertEqual(mocked.call_args.args[0], "places")
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(result["summary"]["verified_businesses"], 1)
+        prospect = result["results"][0]
+        self.assertTrue(prospect["verified"])
+        self.assertEqual(prospect["verification_status"], "verified")
+        self.assertEqual(prospect["website_state"], "working")
+        self.assertEqual(prospect["website_presence"], "website_found")
+        self.assertFalse(prospect["pitch_eligible"])
+        self.assertEqual(result["research_limits"]["independent_web_searches"], 0)
+        leads = client.get("/api/leads").json()
+        self.assertEqual(len(leads), 1)
+        self.assertEqual(leads[0]["verification_status"], "verified")
+        self.assertEqual(leads[0]["website_presence"], "website_found")
+        self.assertEqual(client.get("/api/proposals").json(), [])
+        self.assertEqual(client.get("/api/drafts").json(), [])
 
-    def test_research_does_not_make_per_business_calls_when_places_has_candidates(self):
+    def test_research_uses_bounded_independent_search_when_no_website_is_listed(self):
         client, csrf = self._registered_client()
-        places_response = {
-            "places": [{
-                "title": "Fast Discovery Test Restaurant",
-                "address": "1 Test Road, Nairobi, Kenya",
-                "category": "Restaurant",
-            }]
-        }
+        places = {"places": [{
+            "title": "Kijani Garden Restaurant",
+            "address": "Westlands, Nairobi, Kenya",
+            "category": "Restaurant",
+        }]}
+        organic = {"organic": [
+            {"title": "Kijani Garden Restaurant - Westlands",
+             "link": "https://nairobi-food-review.example/kijani",
+             "snippet": "Kijani Garden Restaurant in Westlands Nairobi"},
+            {"title": "Kijani Garden Restaurant contact",
+             "link": "https://local-eats-guide.example/kijani",
+             "snippet": "Kijani Garden Restaurant located in Westlands Nairobi"},
+        ]}
         with patch.dict(os.environ, {"SERPER_API_KEY": "test-serper-key"}), patch.object(
-            mcas, "serper_request", return_value=places_response
-        ) as mocked, patch.object(mcas, "safe_site_fetch") as site_fetch:
+            mcas, "serper_request", side_effect=[places, organic]
+        ) as mocked, patch.object(mcas, "safe_site_fetch") as fetch:
             response = client.post(
                 "/api/research/run",
                 json={"location": "Nairobi", "industry": "restaurant", "max_results": 3},
                 headers={"X-CSRF-Token": csrf},
             )
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(mocked.call_count, 1)
-        self.assertEqual(site_fetch.call_count, 0)
-        self.assertEqual(response.json()["summary"]["pending_manual_review"], 1)
-        self.assertEqual(response.json()["results"][0]["verification_status"], "pending_manual_review")
+        result = response.json()
+        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual([call.args[0] for call in mocked.call_args_list], ["places", "search"])
+        self.assertEqual(fetch.call_count, 0)
+        prospect = result["results"][0]
+        self.assertTrue(prospect["verified"])
+        self.assertEqual(prospect["website_presence"], "no_website_found")
+        self.assertEqual(prospect["website_state"], "not_listed")
+        self.assertFalse(prospect["pitch_eligible"])
+        self.assertEqual(result["research_limits"]["independent_web_searches"], 1)
+
+    def test_research_marks_broken_only_after_two_confirmed_404_checks(self):
+        client, csrf = self._registered_client()
+        places = {"places": [{
+            "title": "Acacia Garden Restaurant",
+            "address": "Westlands, Nairobi, Kenya",
+            "category": "Restaurant",
+            "website": "https://acaciagarden.example",
+        }]}
+        organic = {"organic": [
+            {"title": "Acacia Garden Restaurant Westlands",
+             "link": "https://acaciagarden.example",
+             "snippet": "Acacia Garden Restaurant in Westlands Nairobi"},
+            {"title": "Acacia Garden Restaurant Nairobi listing",
+             "link": "https://nairobi-eats-guide.example/acacia",
+             "snippet": "Acacia Garden Restaurant in Westlands Nairobi"},
+        ]}
+        with patch.dict(os.environ, {"SERPER_API_KEY": "test-serper-key"}), patch.object(
+            mcas, "serper_request", side_effect=[places, organic]
+        ) as mocked, patch.object(
+            mcas, "safe_site_fetch",
+            side_effect=[
+                {"url": "https://acaciagarden.example", "http_status": 404, "title": None},
+                {"url": "https://acaciagarden.example", "http_status": 404, "title": None},
+            ],
+        ) as fetch:
+            response = client.post(
+                "/api/research/run",
+                json={"location": "Nairobi", "industry": "restaurant", "max_results": 1},
+                headers={"X-CSRF-Token": csrf},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        prospect = response.json()["results"][0]
+        self.assertTrue(prospect["verified"])
+        self.assertEqual(prospect["website_state"], "broken")
+        self.assertEqual(prospect["website_audit"]["confirmed_unavailable_checks"], 2)
+        self.assertTrue(prospect["pitch_eligible"])
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(mocked.call_count, 2)
+
+    def test_single_public_result_does_not_auto_verify_candidate(self):
+        client, csrf = self._registered_client()
+        places = {"places": [{
+            "title": "Unconfirmed Test Restaurant",
+            "address": "Westlands, Nairobi, Kenya",
+            "category": "Restaurant",
+        }]}
+        organic = {"organic": [{
+            "title": "Unconfirmed Test Restaurant",
+            "link": "https://one-directory.example/business",
+            "snippet": "Unconfirmed Test Restaurant in Westlands Nairobi",
+        }]}
+        with patch.dict(os.environ, {"SERPER_API_KEY": "test-serper-key"}), patch.object(
+            mcas, "serper_request", side_effect=[places, organic]
+        ):
+            response = client.post(
+                "/api/research/run",
+                json={"location": "Nairobi", "industry": "restaurant", "max_results": 1},
+                headers={"X-CSRF-Token": csrf},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        prospect = response.json()["results"][0]
+        self.assertFalse(prospect["verified"])
+        self.assertEqual(prospect["verification_status"], "pending_manual_review")
+        self.assertFalse(prospect["pitch_eligible"])
+        lead = client.get("/api/leads").json()[0]
+        self.assertEqual(lead["status"], "Unverified")
+        self.assertEqual(lead["verification_status"], "pending_manual_review")
+
+    def test_provider_failure_in_verification_does_not_crash_or_claim_broken(self):
+        client, csrf = self._registered_client()
+        places = {"places": [{
+            "title": "Provider Timeout Restaurant",
+            "address": "Westlands, Nairobi, Kenya",
+            "category": "Restaurant",
+        }]}
+        with patch.dict(os.environ, {"SERPER_API_KEY": "test-serper-key"}), patch.object(
+            mcas, "serper_request", side_effect=[places, mcas.HTTPException(502, "search unavailable")]
+        ):
+            response = client.post(
+                "/api/research/run",
+                json={"location": "Nairobi", "industry": "restaurant", "max_results": 1},
+                headers={"X-CSRF-Token": csrf},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        prospect = response.json()["results"][0]
+        self.assertFalse(prospect["verified"])
+        self.assertEqual(prospect["website_state"], "needs_review")
+        self.assertFalse(prospect["pitch_eligible"])
 
     def test_marking_places_candidate_verified_records_manual_review(self):
         client, csrf = self._registered_client()

@@ -15,11 +15,18 @@ class ProspectVerificationTests(unittest.TestCase):
             "category": "Restaurant",
             "phoneNumber": "+254700123456",
         }
-        self.web_results = [{
-            "title": "Acacia Garden Restaurant | Westlands Nairobi",
-            "link": "https://acaciagarden.example/about",
-            "snippet": "Acacia Garden Restaurant located in Westlands, Nairobi. Contact and dining information.",
-        }]
+        self.web_results = [
+            {
+                "title": "Acacia Garden Restaurant | Westlands Nairobi",
+                "link": "https://acacia-directory.example/about",
+                "snippet": "Acacia Garden Restaurant located in Westlands, Nairobi. Contact and dining information.",
+            },
+            {
+                "title": "Acacia Garden Restaurant listing",
+                "link": "https://nairobi-food-guide.example/acacia",
+                "snippet": "Acacia Garden Restaurant in Westlands, Nairobi. Dining information.",
+            },
+        ]
 
     def test_normalises_business_names(self):
         self.assertEqual(name_match_score("Café Étoile Ltd", "Cafe Etoile - Nairobi"), 1.0)
@@ -33,6 +40,20 @@ class ProspectVerificationTests(unittest.TestCase):
         self.assertEqual(result["status"], "verified")
         self.assertGreaterEqual(result["evidence_score"], 80)
         self.assertTrue(any(item["type"] == "public_web_result" for item in result["sources"]))
+
+    def test_single_third_party_page_is_not_enough_to_verify(self):
+        one_source = [self.web_results[0]]
+        result = verify_candidate(self.place, "Nairobi", one_source)
+        self.assertFalse(result["verified"])
+        self.assertEqual(result["status"], "not_verified")
+
+    def test_first_party_domain_must_match_distinctive_business_name(self):
+        audit = {"title": "Acacia Garden Restaurant"}
+        result = verify_candidate(
+            self.place, "Nairobi", [], website="https://unrelated.example", website_audit=audit
+        )
+        self.assertFalse(result["verified"])
+        self.assertFalse(result["website_domain_name_match"])
 
     def test_rejects_places_only_record(self):
         result = verify_candidate(
