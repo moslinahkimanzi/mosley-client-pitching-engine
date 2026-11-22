@@ -72,23 +72,38 @@ class ProspectVerificationTests(unittest.TestCase):
         self.assertFalse(result["verified"])
         self.assertTrue(result["closed"])
 
+    def test_provider_closed_permanently_enum_is_recognised(self):
+        place = dict(self.place, businessStatus="CLOSED_PERMANENTLY")
+        result = verify_candidate(place, "Nairobi", self.web_results)
+        self.assertFalse(result["verified"])
+        self.assertTrue(result["closed"])
+
     def test_missing_website_is_not_pitch_opportunity(self):
         verification = {"status": "verified", "website_identity_match": False}
         eligible, reason = qualify_website_opportunity(verification, "not_listed", {})
         self.assertFalse(eligible)
         self.assertEqual(reason, "website_not_listed_is_not_proof_of_no_website")
 
-    def test_broken_website_requires_two_confirmed_checks(self):
-        verification = {"status": "verified", "website_identity_match": False}
+    def test_broken_website_requires_two_checks_and_domain_link(self):
+        verification = {
+            "status": "verified",
+            "website_identity_match": False,
+            "website_domain_corroborated": False,
+        }
         eligible, _ = qualify_website_opportunity(
             verification, "broken", {"confirmed_unavailable_checks": 1}
         )
         self.assertFalse(eligible)
+        eligible, _ = qualify_website_opportunity(
+            verification, "broken", {"confirmed_unavailable_checks": 2}
+        )
+        self.assertFalse(eligible)
+        verification["website_domain_corroborated"] = True
         eligible, reason = qualify_website_opportunity(
             verification, "broken", {"confirmed_unavailable_checks": 2}
         )
         self.assertTrue(eligible)
-        self.assertEqual(reason, "listed_website_returned_404_or_410_twice")
+        self.assertEqual(reason, "identity_linked_website_returned_404_or_410_twice")
 
     def test_metadata_gap_requires_website_identity_match(self):
         verification = {"status": "verified", "website_identity_match": False}
