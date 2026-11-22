@@ -66,6 +66,13 @@ class ApiSecurityTest(unittest.TestCase):
         from backend.app import db
         with db() as c:
             c.execute("DELETE FROM security_rate_limits")
+        # Authentication tests must not use sender credentials from a developer .env.
+        self.email_sender_patch = patch("backend.app.send_email_verification_message", return_value=False)
+        self.email_sender_patch.start()
+        self.addCleanup(self.email_sender_patch.stop)
+        self.production_mode_patch = patch("backend.app.IS_PROD", False)
+        self.production_mode_patch.start()
+        self.addCleanup(self.production_mode_patch.stop)
 
     def csrf(self, client):
         response = client.get("/api/auth/csrf")

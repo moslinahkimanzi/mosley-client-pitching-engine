@@ -216,7 +216,8 @@ class AccountEmailVerificationTests(unittest.TestCase):
                     # Simulate the browser opening the exact frontend route from the email.
                     landing = client.get("/?verify_token=" + token)
                     self.assertEqual(landing.status_code, 200)
-                    self.assertIn("emailVerificationPanel", landing.text)
+                    self.assertNotIn("emailVerificationPanel", landing.text)
+                    self.assertIn("Sign in securely with your Google account", landing.text)
                     self.assertEqual(landing.headers.get("cache-control"), "no-store")
                     self.assertEqual(landing.headers.get("referrer-policy"), "no-referrer")
                     with db() as connection:

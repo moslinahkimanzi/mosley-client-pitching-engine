@@ -21,6 +21,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from email.message import EmailMessage
@@ -33,6 +34,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
+
+from backend.advanced_audit import analyze_document
+from backend.prospect_verification import (verify_candidate, qualify_website_opportunity,
+    find_business_website_candidate)
+from backend.quality_metrics import build_quality_metrics, website_presence_category
 
 try:
     from cryptography.fernet import Fernet, InvalidToken
@@ -219,6 +225,37 @@ def init_db():
             status TEXT NOT NULL DEFAULT 'Unverified',score INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS prospect_validation_samples(
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            lead_id TEXT,
+            business_name TEXT NOT NULL,
+            industry TEXT NOT NULL,
+            location TEXT NOT NULL,
+            predicted_identity_verified INTEGER NOT NULL,
+            predicted_website_presence TEXT NOT NULL,
+            predicted_website_state TEXT NOT NULL,
+            predicted_contact_email TEXT,
+            predicted_contact_phone TEXT,
+            source_url TEXT,
+            website_url TEXT,
+            prediction_evidence TEXT NOT NULL DEFAULT '{}',
+            ground_truth_identity TEXT NOT NULL DEFAULT 'unknown',
+            ground_truth_website_presence TEXT NOT NULL DEFAULT 'unknown',
+            ground_truth_website_state TEXT NOT NULL DEFAULT 'not_assessed',
+            ground_truth_email_correct INTEGER,
+            ground_truth_phone_correct INTEGER,
+            reviewer_evidence TEXT NOT NULL DEFAULT '',
+            reviewer_notes TEXT NOT NULL DEFAULT '',
+            reviewed_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_validation_user_created
+            ON prospect_validation_samples(user_id,created_at);
+        CREATE INDEX IF NOT EXISTS idx_validation_user_strata
+            ON prospect_validation_samples(user_id,industry,location);
         CREATE TABLE IF NOT EXISTS drafts(
             id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             lead_id TEXT,kind TEXT NOT NULL,subject TEXT NOT NULL,body TEXT NOT NULL,
@@ -249,6 +286,12 @@ def init_db():
         CREATE TABLE IF NOT EXISTS oauth_states(
             state_hash TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             expires_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS google_login_states(
+            state_hash TEXT PRIMARY KEY,
+            admin_bootstrap_authorized INTEGER NOT NULL DEFAULT 0,
+            expires_at INTEGER NOT NULL,
+            created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS integrations(
             user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -333,6 +376,17 @@ def init_db():
         add_column(c, "leads", "contact_phone", "TEXT")
         add_column(c, "leads", "source_url", "TEXT")
         add_column(c, "leads", "do_not_contact", "INTEGER NOT NULL DEFAULT 0")
+        add_column(c, "leads", "research_origin", "TEXT NOT NULL DEFAULT 'manual'")
+        add_column(c, "leads", "verification_status", "TEXT NOT NULL DEFAULT 'manual_review'")
+        add_column(c, "leads", "verification_score", "INTEGER NOT NULL DEFAULT 0")
+        add_column(c, "leads", "verification_evidence", "TEXT NOT NULL DEFAULT '{}'")
+        add_column(c, "leads", "pitch_eligible", "INTEGER NOT NULL DEFAULT 0")
+        add_column(c, "leads", "opportunity_reason", "TEXT NOT NULL DEFAULT ''")
+        add_column(c, "leads", "verified_at", "TEXT")
+        add_column(c, "leads", "website_presence", "TEXT NOT NULL DEFAULT 'unknown'")
+        add_column(c, "prospect_validation_samples", "source_url", "TEXT")
+        add_column(c, "prospect_validation_samples", "website_url", "TEXT")
+        add_column(c, "prospect_validation_samples", "prediction_evidence", "TEXT NOT NULL DEFAULT '{}'")
         add_column(c, "drafts", "to_email", "TEXT")
         add_column(c, "drafts", "gmail_draft_id", "TEXT")
         add_column(c, "integrations", "account_email", "TEXT")
@@ -539,6 +593,8 @@ async def security_middleware(request: Request, call_next):
         category, cap = "search", 5
     elif path == "/api/audit-website":
         category, cap = "website", 10
+    elif path == "/api/competitor-intelligence":
+        category, cap = "competitor", 5
     elif path.endswith("/gmail") and request.method == "POST":
         category, cap = "gmail", 8
     else:
@@ -584,7 +640,6 @@ class MfaCodeIn(BaseModel):
 
 
 class AdminMfaSetupIn(BaseModel):
-    password: str = Field(min_length=1, max_length=200)
     bootstrap_token: str = Field(min_length=32, max_length=200)
 
 class LoginIn(BaseModel):
@@ -629,7 +684,23 @@ class ResearchRunIn(BaseModel):
     location: str = Field(min_length=2, max_length=100)
     industry: Literal["any", "restaurant", "salon", "retail", "professional", "hotel", "healthcare", "education"] = "any"
     keywords: str = Field(default="", max_length=120)
-    max_results: int = Field(default=6, ge=1, le=12)
+    # Maximum number of verified businesses to collect in this run.
+    max_results: int = Field(default=10, ge=1, le=20)
+
+class ValidationReviewIn(BaseModel):
+    ground_truth_identity: Literal["exists", "does_not_exist", "unknown"] = "unknown"
+    ground_truth_website_presence: Literal["website_found", "no_website_found", "unknown"] = "unknown"
+    ground_truth_website_state: Literal["working", "broken", "needs_improvement", "access_restricted", "not_assessed"] = "not_assessed"
+    ground_truth_email_correct: Optional[bool] = None
+    ground_truth_phone_correct: Optional[bool] = None
+    reviewer_evidence: str = Field(min_length=10, max_length=4000)
+    reviewer_notes: str = Field(default="", max_length=2000)
+
+class CompetitorIn(BaseModel):
+    lead_id: str = Field(min_length=1, max_length=100)
+    industry: Literal["restaurant", "salon", "retail", "professional", "hotel", "healthcare", "education"] = "restaurant"
+    max_results: int = Field(default=5, ge=2, le=8)
+
 
 class AIIn(BaseModel):
     lead_id: Optional[str] = None
@@ -853,6 +924,173 @@ def send_email_verification_message(recipient: str, verification_url: str) -> bo
             getattr(exc, "smtp_code", None),
         )
         return False
+
+
+class GoogleLoginStartIn(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    admin_bootstrap_token: str = Field(default="", max_length=200)
+
+
+def google_oauth_config():
+    client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "").strip()
+    client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
+    redirect_uri = os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "").strip()
+    if not (client_id and client_secret and redirect_uri):
+        raise HTTPException(503, "Google sign-in is not configured. The operator must set GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and GOOGLE_OAUTH_REDIRECT_URI.")
+    parsed = urllib.parse.urlparse(redirect_uri)
+    if parsed.scheme not in ({"https"} if IS_PROD else {"https", "http"}) or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+        raise HTTPException(503, "GOOGLE_OAUTH_REDIRECT_URI must be a valid HTTPS callback URL (HTTP is allowed only in development).")
+    return client_id, client_secret, redirect_uri
+
+
+@app.get("/api/auth/google/bootstrap-required")
+def google_bootstrap_required(request: Request, email: str = Query(min_length=3, max_length=254)):
+    normalized = email.strip().lower()
+    try:
+        validate_email(normalized)
+    except HTTPException:
+        return {"required": False}
+    ip = request.client.host if request and request.client else "unknown"
+    ip_tag = hashlib.sha256(ip.encode()).hexdigest()[:24]
+    if consume_rate_limits(["google-bootstrap-check:" + ip_tag], 30, 900):
+        raise HTTPException(429, "Too many checks. Try again later.")
+    if not is_configured_admin_email(normalized):
+        return {"required": False}
+    with db() as c:
+        exists = c.execute("SELECT 1 FROM users WHERE email=?", (normalized,)).fetchone()
+    return {"required": not bool(exists)}
+
+
+@app.post("/api/auth/google/start")
+def google_login_start(payload: GoogleLoginStartIn, response: Response, request: Request):
+    client_id, _, redirect_uri = google_oauth_config()
+    email = payload.email.strip().lower()
+    validate_email(email)
+    ip = request.client.host if request.client else "unknown"
+    ip_tag = hashlib.sha256(ip.encode()).hexdigest()[:24]
+    if consume_rate_limits(["google-login-start:" + ip_tag], 20, 900):
+        raise HTTPException(429, "Too many Google sign-in attempts. Try again later.")
+    admin_authorized = False
+    if is_configured_admin_email(email):
+        with db() as c:
+            existing = c.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
+        if not existing:
+            bootstrap = os.getenv("MCAS_ADMIN_BOOTSTRAP_TOKEN", "")
+            if len(bootstrap) < 32 or not hmac.compare_digest(bootstrap, payload.admin_bootstrap_token):
+                raise HTTPException(403, "A valid administrator bootstrap token is required to create the configured administrator account.")
+            admin_authorized = True
+    state = secrets.token_urlsafe(32)
+    with db() as c:
+        c.execute("DELETE FROM google_login_states WHERE expires_at<?", (int(time.time()),))
+        c.execute(
+            "INSERT INTO google_login_states(state_hash,admin_bootstrap_authorized,expires_at,created_at) VALUES(?,?,?,?)",
+            (token_hash(state), int(admin_authorized), int(time.time()) + 600, now()),
+        )
+    response.set_cookie("mcas_google_state", state, max_age=600, httponly=True,
+                        secure=IS_PROD, samesite="lax", path="/")
+    params = urllib.parse.urlencode({
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state,
+        "prompt": "select_account",
+    })
+    return {"authorization_url": "https://accounts.google.com/o/oauth2/v2/auth?" + params}
+
+
+@app.get("/api/auth/google/callback")
+def google_login_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+    if error:
+        return RedirectResponse("/?google=cancelled", status_code=303)
+    cookie_state = request.cookies.get("mcas_google_state", "") if request else ""
+    if not code or not state or not cookie_state or not hmac.compare_digest(state, cookie_state):
+        raise HTTPException(400, "Google sign-in state is invalid or expired. Start again.")
+    with db() as c:
+        state_row = c.execute(
+            "SELECT * FROM google_login_states WHERE state_hash=? AND expires_at>?",
+            (token_hash(state), int(time.time())),
+        ).fetchone()
+        if not state_row:
+            raise HTTPException(400, "Google sign-in state was already used or expired. Start again.")
+        c.execute("DELETE FROM google_login_states WHERE state_hash=?", (token_hash(state),))
+    client_id, client_secret, redirect_uri = google_oauth_config()
+    token_body = urllib.parse.urlencode({
+        "code": code, "client_id": client_id, "client_secret": client_secret,
+        "redirect_uri": redirect_uri, "grant_type": "authorization_code",
+    }).encode()
+    try:
+        token_request = urllib.request.Request(
+            "https://oauth2.googleapis.com/token", data=token_body,
+            headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(token_request, timeout=10) as result:
+            token_data = json.loads(result.read(32768).decode("utf-8"))
+        access_token = str(token_data.get("access_token") or "")
+        if not access_token:
+            raise ValueError("Google did not return an access token.")
+        profile_request = urllib.request.Request(
+            "https://openidconnect.googleapis.com/v1/userinfo",
+            headers={"Authorization": "Bearer " + access_token, "Accept": "application/json"},
+        )
+        with urllib.request.urlopen(profile_request, timeout=10) as result:
+            profile = json.loads(result.read(32768).decode("utf-8"))
+    except Exception:
+        SECURITY_LOGGER.warning("Google OAuth exchange or userinfo lookup failed.")
+        raise HTTPException(502, "Google sign-in could not be completed. Try again.")
+    email = str(profile.get("email") or "").strip().lower()
+    subject = str(profile.get("sub") or "").strip()
+    verified_email = profile.get("email_verified") is True
+    if not subject or not verified_email:
+        raise HTTPException(403, "Google did not return a verified email identity.")
+    try:
+        validate_email(email)
+    except HTTPException:
+        raise HTTPException(403, "Google returned an invalid account email.")
+    is_admin = is_configured_admin_email(email)
+    uid = None
+    with db() as c:
+        row = c.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
+        if row:
+            uid = row["id"]
+            c.execute("UPDATE users SET email_verified=1,email_verified_at=COALESCE(email_verified_at,?) WHERE id=?", (now(), uid))
+            audit(c, uid, "account.google_login")
+        else:
+            if is_admin and not int(state_row["admin_bootstrap_authorized"]):
+                raise HTTPException(403, "The configured administrator account must be created through the administrator bootstrap flow.")
+            uid = secrets.token_urlsafe(18)
+            c.execute(
+                "INSERT INTO users(id,email,password_hash,created_at,email_verified,email_verified_at) VALUES(?,?,?,?,1,?)",
+                (uid, email, password_hash(secrets.token_urlsafe(48)), now(), now()),
+            )
+            audit(c, uid, "account.created_google")
+        if is_admin and ADMIN_MFA_REQUIRED:
+            user_row = c.execute("SELECT admin_totp_secret FROM users WHERE id=?", (uid,)).fetchone()
+            if user_row and user_row["admin_totp_secret"]:
+                challenge = secrets.token_urlsafe(32)
+                c.execute("DELETE FROM mfa_login_challenges WHERE expires_at<?", (int(time.time()),))
+                c.execute(
+                    "INSERT INTO mfa_login_challenges(token_hash,user_id,expires_at,attempts) VALUES(?,?,?,0)",
+                    (mfa_challenge_hash(challenge), uid, int(time.time()) + 300),
+                )
+                audit(c, uid, "admin.mfa_challenge_issued")
+                redirect = RedirectResponse("/?google_mfa=1", status_code=303)
+                redirect.set_cookie("mcas_mfa_challenge", challenge, max_age=300, httponly=True,
+                                    secure=IS_PROD, samesite="strict", path="/")
+                redirect.delete_cookie("mcas_google_state", path="/")
+                return redirect
+        c.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
+        session = secrets.token_urlsafe(36)
+        c.execute("INSERT INTO sessions VALUES(?,?,?)",
+                  (token_hash(session), uid, int(time.time()) + SESSION_SECONDS))
+        audit(c, uid, "account.login_google")
+    redirect = RedirectResponse("/", status_code=303)
+    redirect.set_cookie(COOKIE, session, max_age=SESSION_SECONDS, httponly=True,
+                        secure=IS_PROD, samesite="lax", path="/")
+    set_csrf(redirect)
+    redirect.delete_cookie("mcas_google_state", path="/")
+    return redirect
 
 
 @app.post("/api/auth/register", status_code=201)
@@ -1090,6 +1328,75 @@ def logout(request: Request, response: Response):
 def me(user=Depends(current_user)):
     return {**user, "email_verified": bool(user.get("email_verified")), "is_admin": user_is_admin(user)}
 
+@app.get("/api/quality/validation")
+def list_quality_validation(user=Depends(current_user)):
+    """Return only the signed-in workspace's prospect validation samples."""
+    with db() as c:
+        rows = c.execute(
+            "SELECT * FROM prospect_validation_samples WHERE user_id=? ORDER BY created_at DESC",
+            (user["id"],),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+@app.get("/api/quality/metrics")
+def prospect_quality_metrics(user=Depends(current_user)):
+    """Compute descriptive metrics from this workspace's independently reviewed samples."""
+    with db() as c:
+        rows = c.execute(
+            "SELECT * FROM prospect_validation_samples WHERE user_id=? ORDER BY created_at DESC",
+            (user["id"],),
+        ).fetchall()
+    return build_quality_metrics(dict(row) for row in rows)
+
+
+@app.post("/api/quality/validation/{sample_id}")
+def review_quality_validation(sample_id: str, payload: ValidationReviewIn, user=Depends(current_user)):
+    if not payload.reviewer_evidence.strip():
+        raise HTTPException(422, "Provide an independent source or evidence description for this review.")
+    if payload.ground_truth_identity != "exists" and (
+        payload.ground_truth_website_presence != "unknown"
+        or payload.ground_truth_website_state != "not_assessed"
+        or payload.ground_truth_email_correct is not None
+        or payload.ground_truth_phone_correct is not None
+    ):
+        raise HTTPException(422, "Only label website and contact accuracy after independently confirming that the business exists.")
+    if payload.ground_truth_website_presence == "no_website_found" and payload.ground_truth_website_state != "not_assessed":
+        raise HTTPException(422, "A no-website-found label cannot also have a website status. Use website found or unknown.")
+    stamp = now()
+    with db() as c:
+        row = c.execute(
+            "SELECT id FROM prospect_validation_samples WHERE id=? AND user_id=?",
+            (sample_id, user["id"]),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Validation sample not found in this workspace.")
+        c.execute(
+            """UPDATE prospect_validation_samples SET
+               ground_truth_identity=?,ground_truth_website_presence=?,ground_truth_website_state=?,
+               ground_truth_email_correct=?,ground_truth_phone_correct=?,
+               reviewer_evidence=?,reviewer_notes=?,reviewed_at=?,updated_at=?
+               WHERE id=? AND user_id=?""",
+            (
+                payload.ground_truth_identity, payload.ground_truth_website_presence,
+                payload.ground_truth_website_state,
+                None if payload.ground_truth_email_correct is None else int(payload.ground_truth_email_correct),
+                None if payload.ground_truth_phone_correct is None else int(payload.ground_truth_phone_correct),
+                payload.reviewer_evidence.strip(), payload.reviewer_notes.strip(), stamp, stamp,
+                sample_id, user["id"],
+            ),
+        )
+        audit(c, user["id"], "quality.validation_reviewed", {
+            "sample_id": sample_id,
+            "identity_labelled": payload.ground_truth_identity != "unknown",
+            "website_presence_labelled": payload.ground_truth_website_presence != "unknown",
+            "website_status_labelled": payload.ground_truth_website_state != "not_assessed",
+            "email_checked": payload.ground_truth_email_correct is not None,
+            "phone_checked": payload.ground_truth_phone_correct is not None,
+        })
+    return {"ok": True, "reviewed_at": stamp}
+
+
 @app.get("/api/leads")
 def list_leads(user=Depends(current_user)):
     with db() as c:
@@ -1115,10 +1422,22 @@ def update_lead(lead_id: str, payload: LeadIn, user=Depends(current_user)):
     validate_email(payload.contact_email)
     with db() as c:
         cur = c.execute("""UPDATE leads SET name=?,website=?,market=?,evidence=?,status=?,contact_email=?,
-            contact_phone=?,source_url=?,do_not_contact=?,updated_at=? WHERE id=? AND user_id=?""",
+            contact_phone=?,source_url=?,do_not_contact=?,
+            website_presence=CASE
+                WHEN ? IS NOT NULL AND ? != '' THEN 'website_found'
+                WHEN research_origin='serper_places' THEN
+                    CASE WHEN website_presence='website_found' THEN 'unknown' ELSE website_presence END
+                ELSE 'unknown' END,
+            verification_status=CASE
+                WHEN research_origin='serper_places' AND ?='Verified' AND verification_status!='verified'
+                    THEN 'manual_reviewed' ELSE verification_status END,
+            verified_at=CASE
+                WHEN research_origin='serper_places' AND ?='Verified' AND verification_status!='verified'
+                    THEN ? ELSE verified_at END,
+            updated_at=? WHERE id=? AND user_id=?""",
             (payload.name.strip(), payload.website, payload.market, payload.evidence, payload.status,
              payload.contact_email, payload.contact_phone, payload.source_url, int(payload.do_not_contact),
-             now(), lead_id, user["id"]))
+             payload.website, payload.website, payload.status, payload.status, now(), now(), lead_id, user["id"]))
         if not cur.rowcount:
             raise HTTPException(404, "Prospect not found")
         audit(c, user["id"], "lead.updated", {"lead_id": lead_id})
@@ -1148,6 +1467,8 @@ def save_draft(payload: DraftIn, user=Depends(current_user)):
             lead = owned_lead(c, payload.lead_id, user["id"])
             if int(lead["do_not_contact"] or 0) and payload.kind.lower() in {"cold email", "follow-up", "outreach"}:
                 raise HTTPException(403, "This prospect is marked do-not-contact; outreach drafts are blocked.")
+            if lead["research_origin"] == "serper_places" and not int(lead["pitch_eligible"] or 0):
+                raise HTTPException(409, "This research prospect is verified but not pitch-ready. MCAS has not confirmed a concrete website issue.")
         c.execute("""INSERT INTO drafts(id,user_id,lead_id,kind,subject,body,state,created_at,to_email)
             VALUES(?,?,?,?,?,?,?,?,?)""",
             (did, user["id"], payload.lead_id, payload.kind, payload.subject, payload.body,
@@ -1205,7 +1526,9 @@ def save_proposal(payload: ProposalIn, user=Depends(current_user)):
     pid = secrets.token_urlsafe(15)
     with db() as c:
         if payload.lead_id:
-            owned_lead(c, payload.lead_id, user["id"])
+            lead = owned_lead(c, payload.lead_id, user["id"])
+            if lead["research_origin"] == "serper_places" and not int(lead["pitch_eligible"] or 0):
+                raise HTTPException(409, "This research prospect is verified but not pitch-ready. A concrete website issue has not been confirmed.")
         stamp = now()
         c.execute("INSERT INTO proposals VALUES(?,?,?,?,?,?,?,?)",
                   (pid, user["id"], payload.lead_id, payload.title, payload.content, payload.state, stamp, stamp))
@@ -1274,7 +1597,7 @@ def safe_site_fetch(initial_url):
             raise HTTPException(400, "HTTPS-to-HTTP redirects are blocked")
         ip = resolve_public(p.hostname)
         conn_cls = PinnedHTTPS if p.scheme == "https" else PinnedHTTP
-        conn = conn_cls(p.hostname, ip, port, 8)
+        conn = conn_cls(p.hostname, ip, port, 5)
         path = urllib.parse.urlunparse(("", "", p.path or "/", p.params, p.query, ""))
         try:
             conn.request("GET", path, headers={"Host": p.hostname, "User-Agent": "MCAS-SiteAudit/1.0",
@@ -1309,10 +1632,12 @@ def safe_site_fetch(initial_url):
             has_h1 = bool(re.search(r"<h1\b", html, re.I))
             has_form = bool(re.search(r"<form\b", html, re.I))
             title = re.sub(r"\s+", " ", match.group(1)).strip()[:180] if match else None
+            advanced = analyze_document(html, headers, url)
             return {"url": url, "http_status": status, "content_type": ctype, "title": title,
                     "has_viewport_meta": viewport, "has_meta_description": description,
                     "has_h1": has_h1, "has_form": has_form,
-                    "note": "Lightweight public-page check only; not a full SEO, accessibility, security or conversion audit."}
+                    "advanced_audit": advanced,
+                    "note": "Bounded static HTML and response-header audit. Not a browser performance test or penetration test."}
         except HTTPException:
             conn.close()
             raise
@@ -1592,17 +1917,25 @@ def make_outreach_copy(name: str, location: str, website_state: str, audit: dict
     )
     return subject, body
 
+
 @app.post("/api/research/run")
 def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
+    """Discover and automatically verify a bounded set of local business prospects."""
     location = payload.location.strip()
     if not location or not re.search(r"[A-Za-z0-9]", location):
         raise HTTPException(422, "Enter a town, city or named administrative area.")
+
     query = serper_query_for(payload)
-    cache_key = query.casefold()
+    # Hard cap limits both Serper spend and worst-case verification latency.
+    candidate_budget = min(8, max(1, payload.max_results))
+    cache_key = "places:" + query.casefold() + ":" + str(candidate_budget)
     cached = _SERPER_CACHE.get(cache_key)
     places = cached[1] if cached and time.time() - cached[0] < _SERPER_CACHE_TTL else None
+    places_cache_hit = places is not None
+    places_search_count = 0 if places_cache_hit else 1
+
     if places is None:
-        request_payload = {"q": query}
+        request_payload = {"q": query, "num": candidate_budget}
         gl = os.getenv("SERPER_GL", "").strip()
         hl = os.getenv("SERPER_HL", "en").strip()
         if gl:
@@ -1610,221 +1943,409 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
         if hl:
             request_payload["hl"] = hl
         data = serper_request("places", request_payload)
-        places = data.get("places") or []
-        # When Places has no records, use Serper's ordinary web results as a fallback.
-        # These are saved as unverified source links, never assumed to be official websites.
-        if not places:
-            web_data = serper_request("search", {"q": query, "num": min(10, payload.max_results)})
-            places = [{
-                "title": item.get("title"),
-                "link": item.get("link"),
-                "description": item.get("snippet"),
-                "_source_type": "web",
-            } for item in web_data.get("organic", [])
-              if isinstance(item, dict) and isinstance(item.get("title"), str)
-              and isinstance(item.get("link"), str)
-              and item.get("link", "").startswith(("https://", "http://"))]
+        places = [item for item in (data.get("places") or []) if isinstance(item, dict)]
         _SERPER_CACHE[cache_key] = (time.time(), places)
 
-    discovered = []
-    saved_count = 0
-    seen_names = set()
-    for place in places:
-        if len(discovered) >= payload.max_results:
-            break
-        if not isinstance(place, dict):
+    unique_places = []
+    seen = set()
+    for place in places[:candidate_budget]:
+        name = str(place.get("title") or place.get("name") or "").strip()[:120]
+        address = str(place.get("address") or "").strip()[:500]
+        if not name:
             continue
-        name = str(place.get("title") or place.get("name") or "").strip()
-        if not name or name.casefold() in seen_names:
+        dedupe_key = re.sub(r"[^a-z0-9]+", " ", name.casefold()).strip() + "|" + re.sub(
+            r"[^a-z0-9]+", " ", address.casefold()
+        ).strip()
+        if dedupe_key in seen:
             continue
-        seen_names.add(name.casefold())
+        seen.add(dedupe_key)
+        unique_places.append(place)
 
-        address = str(place.get("address") or "").strip()
-        category = str(place.get("category") or place.get("type") or "").strip()
+    def verify_one(place):
+        name = str(place.get("title") or place.get("name") or "").strip()[:120]
+        address = str(place.get("address") or "").strip()[:500]
         website_value = place.get("website") or place.get("websiteUrl")
-        website = None
-        website_audit = {}
+        website = str(website_value).strip() if isinstance(website_value, str) and website_value.strip() else None
+        if website and not re.match(r"^https?://", website, re.I):
+            website = "https://" + website
+        source_url = serper_source_url(place, name, address)
+        website_audit = None
         website_state = "not_listed"
-        if isinstance(website_value, str) and website_value.strip():
-            website = website_value.strip()
-            if not re.match(r"^https?://", website, re.I):
-                website = "https://" + website
+        web_results = []
+        web_search_attempted = False
+        web_search_error = None
+        website_checks = 0
+        confirmed_unavailable_checks = 0
+
+        # First use the provider-listed website. It is fetched through the
+        # existing DNS-pinned SSRF-safe client; redirects are revalidated.
+        if website:
+            website_checks += 1
             try:
                 website_audit = safe_site_fetch(website)
                 status = int(website_audit.get("http_status") or 0)
-                if status in {404, 410, 500, 502, 503, 504}:
-                    website_state = "broken"
+                if status in {404, 410}:
+                    website_checks += 1
+                    try:
+                        second = safe_site_fetch(website)
+                        second_status = int(second.get("http_status") or 0)
+                        if second_status in {404, 410}:
+                            confirmed_unavailable_checks = 2
+                            website_audit["second_check_http_status"] = second_status
+                            website_state = "broken"
+                        else:
+                            website_audit["second_check_http_status"] = second_status
+                            website_state = "needs_review"
+                    except Exception as exc:
+                        website_audit["second_check_error"] = str(getattr(exc, "detail", exc))[:180]
+                        website_state = "needs_review"
+                elif 200 <= status < 400:
+                    from backend.prospect_verification import verified_website_problem_findings
+                    findings = verified_website_problem_findings(website_audit)
+                    website_audit["verified_problem_findings"] = findings
+                    website_state = "needs_improvement" if findings else "working"
                 elif status in {401, 403, 429}:
                     website_state = "access_restricted"
-                elif 200 <= status < 400:
-                    website_state = "needs_improvement" if (
-                        website_audit.get("has_viewport_meta") is False or
-                        website_audit.get("has_meta_description") is False or
-                        website_audit.get("title") is None
-                    ) else "working"
                 else:
                     website_state = "needs_review"
-            except HTTPException:
+            except Exception as exc:
+                website_audit = {
+                    "url": website,
+                    "http_status": None,
+                    "error": str(getattr(exc, "detail", exc))[:180],
+                    "note": "Website could not be checked safely; this is not proof that it is broken.",
+                }
                 website_state = "needs_review"
 
-        phone_value = place.get("phoneNumber") or place.get("phone")
-        phone = str(phone_value).strip() if phone_value else None
-        email_value = place.get("email")
-        email = str(email_value).strip() if email_value and re.fullmatch(
-            r"[^\s@]+@[^\s@]+\.[^\s@]+", str(email_value).strip()
-        ) else None
-        source_url = serper_source_url(place, name, address)
-        tags = serper_business_tags(payload.industry, category)
+        # A matching page title plus a distinctive business token in the
+        # domain can verify the first-party website. Otherwise, corroborate
+        # through one bounded independent search for this business.
+        preliminary = verify_candidate(
+            place, location, [], website=website,
+            website_audit=website_audit or {}, source_url=source_url,
+        ) if website_audit else {"verified": False}
+        needs_search = (
+            not preliminary.get("verified")
+            or (website_state == "needs_review" and not website_audit)
+            or not website
+        )
+        if needs_search:
+            web_search_attempted = True
+            search_query = '"' + name.replace('"', " ") + '" "' + (address or location).replace('"', " ") + '"'
+            try:
+                web_data = serper_request("search", {"q": search_query[:350], "num": 8})
+                web_results = [
+                    item for item in (web_data.get("organic") or [])
+                    if isinstance(item, dict)
+                ][:8]
+            except Exception as exc:
+                web_search_error = str(getattr(exc, "detail", exc))[:180]
+
+        # If Places omitted the website, only adopt a likely first-party URL
+        # when the independent result title, locality and domain all match.
+        if not website and web_results:
+            website = find_business_website_candidate(name, location, address, web_results)
+            if website:
+                website_checks += 1
+                try:
+                    website_audit = safe_site_fetch(website)
+                    status = int(website_audit.get("http_status") or 0)
+                    if status in {404, 410}:
+                        website_checks += 1
+                        try:
+                            second = safe_site_fetch(website)
+                            second_status = int(second.get("http_status") or 0)
+                            if second_status in {404, 410}:
+                                confirmed_unavailable_checks = 2
+                                website_audit["second_check_http_status"] = second_status
+                                website_state = "broken"
+                            else:
+                                website_audit["second_check_http_status"] = second_status
+                                website_state = "needs_review"
+                        except Exception as exc:
+                            website_audit["second_check_error"] = str(getattr(exc, "detail", exc))[:180]
+                            website_state = "needs_review"
+                    elif 200 <= status < 400:
+                        from backend.prospect_verification import verified_website_problem_findings
+                        findings = verified_website_problem_findings(website_audit)
+                        website_audit["verified_problem_findings"] = findings
+                        website_state = "needs_improvement" if findings else "working"
+                    elif status in {401, 403, 429}:
+                        website_state = "access_restricted"
+                    else:
+                        website_state = "needs_review"
+                except Exception as exc:
+                    website_audit = {
+                        "url": website, "http_status": None,
+                        "error": str(getattr(exc, "detail", exc))[:180],
+                        "note": "Website could not be checked safely; not classified as broken.",
+                    }
+                    website_state = "needs_review"
+
+        verification = verify_candidate(
+            place, location, web_results, website=website,
+            website_audit=website_audit or {}, source_url=source_url,
+        )
+        if website_state == "broken":
+            website_audit = website_audit or {}
+            website_audit["confirmed_unavailable_checks"] = confirmed_unavailable_checks
+        search_completed = web_search_attempted and web_search_error is None
+        website_presence = website_presence_category(
+            website, verification, search_completed=search_completed
+        )
+        if website and not (
+            verification.get("website_identity_match")
+            or verification.get("website_domain_corroborated")
+        ):
+            website_presence = "unknown"
+
+        # A missing website listing is never treated as proof of absence.
+        if not website and verification.get("verified") and search_completed:
+            website_state = "not_listed"
+        elif not website:
+            website_state = "needs_review" if web_search_error else "not_listed"
+
+        tags = serper_business_tags(
+            payload.industry, str(place.get("category") or place.get("type") or "")
+        )
         if address:
             tags["addr:street"] = address
         strategy = business_strategy(tags)
-        score, score_reasons = opportunity_score(tags, website_state, website_audit, email, phone)
-
-        facts = [
-            "Discovered through Serper Places for the search: " + query + ".",
-            "This is an unverified discovery record; confirm the business is operating and the details are current.",
-            "Research priority score: " + str(score) + "/100. This is a sorting aid, not evidence of buying intent.",
+        pitch_eligible, opportunity_reason = qualify_website_opportunity(
+            verification, website_state, website_audit or {}
+        )
+        score, score_reasons = opportunity_score(
+            tags, website_state, website_audit or {},
+            place.get("email") if verification.get("email_corroborated") else None,
+            place.get("phoneNumber") if verification.get("phone_corroborated") else None,
+        )
+        evidence_lines = [
+            "Discovered from Serper Places for query: " + query + ".",
+            "Identity verification: " + verification.get("status", "not_verified") + ".",
+            "Evidence score: " + str(verification.get("evidence_score", 0)) + "/100; this is a rule-based evidence index, not a probability.",
+            "Website state: " + website_state + ".",
+            "Website presence: " + website_presence + ".",
         ]
-        if category:
-            facts.append("Serper category: " + category + ".")
-        if address:
-            facts.append("Public listing address: " + address + ".")
-        if phone:
-            facts.append("Public listing phone: " + phone + ".")
-        if place.get("rating") is not None:
-            facts.append("Provider-listed rating: " + str(place.get("rating")) +
-                         ((" from " + str(place.get("ratingCount")) + " reviews") if place.get("ratingCount") is not None else "") + ".")
-        if website_state == "not_listed":
-            facts.append("Serper did not return an official website URL. This does not prove the business has no website; verify independently.")
-        elif website_state == "broken":
-            facts.append("The listed website returned HTTP " + str(website_audit.get("http_status")) + " during this limited check.")
-        elif website_state == "needs_improvement":
-            findings = []
-            if website_audit.get("has_viewport_meta") is False:
-                findings.append("mobile viewport metadata not detected")
-            if website_audit.get("has_meta_description") is False:
-                findings.append("meta description not detected")
-            if website_audit.get("title") is None:
-                findings.append("page title not detected")
-            facts.append("Limited page check: " + ", ".join(findings) + ". This is not a full website audit.")
-        elif website_state == "access_restricted":
-            facts.append("The website restricted this automated check; no broken-site conclusion was made.")
-        elif website_state == "needs_review":
-            facts.append("The website could not be reliably checked; do not describe it as broken.")
-        elif website_audit:
-            facts.append("Website responded with HTTP " + str(website_audit.get("http_status")) + ".")
-        if place.get("_source_type") == "web":
-            facts.append("This entry came from a Serper web result because Places returned no records. Its source link is not assumed to be the business's official website.")
-        evidence = " ".join(facts) + " Source: " + source_url
-        if website_audit.get("url"):
-            evidence += " Website checked: " + website_audit["url"] + " (limited technical observations only)."
+        evidence_lines.extend(verification.get("reasons") or [])
+        if web_search_error:
+            evidence_lines.append("Independent web corroboration unavailable: " + web_search_error)
+        if website_audit and website_audit.get("error"):
+            evidence_lines.append("Website check issue: " + website_audit["error"])
+        evidence = " ".join(evidence_lines)
+        evidence_bundle = {
+            "verification": verification,
+            "website_audit": website_audit,
+            "website_state": website_state,
+            "website_presence": website_presence,
+            "web_search_attempted": web_search_attempted,
+            "web_search_error": web_search_error,
+            "website_checks": website_checks,
+            "confirmed_unavailable_checks": confirmed_unavailable_checks,
+            "checked_at": now(),
+            "method": "Places + first-party page check + bounded independent corroboration",
+        }
+        return {
+            "place": place, "name": name, "address": address, "website": website,
+            "source_url": source_url, "verification": verification,
+            "website_audit": website_audit, "website_state": website_state,
+            "website_presence": website_presence, "pitch_eligible": pitch_eligible,
+            "opportunity_reason": opportunity_reason, "opportunity_score": score,
+            "score_reasons": score_reasons, "evidence": evidence,
+            "evidence_bundle": evidence_bundle, "strategy": strategy,
+            "web_search_attempted": web_search_attempted,
+            "website_checks": website_checks,
+        }
+
+    # Run bounded network checks concurrently. Each candidate can trigger at
+    # most one independent web query and two checks of a suspected broken URL.
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        verified_records = list(executor.map(verify_one, unique_places))
+
+    discovered = []
+    saved_count = duplicate_count = verified_count = pitch_ready_count = 0
+    independent_search_count = website_check_count = 0
+    sample_ids = []
+    for item in verified_records:
+        place = item["place"]
+        name = item["name"]
+        address = item["address"]
+        website = item["website"]
+        verification = item["verification"]
+        is_verified = bool(verification.get("verified"))
+        website_presence = item["website_presence"]
+        website_state = item["website_state"]
+        source_url = item["source_url"]
+        category = str(place.get("category") or place.get("type") or "").strip()[:160]
+        phone_value = place.get("phoneNumber") or place.get("phone")
+        email_value = place.get("email")
+        phone = str(phone_value).strip()[:50] if phone_value else None
+        email = str(email_value).strip()[:254] if email_value and re.fullmatch(
+            r"[^\s@]+@[^\s@]+\.[^\s@]+", str(email_value).strip()
+        ) else None
+        verified_phone = phone if verification.get("phone_corroborated") else None
+        verified_email = email if verification.get("email_corroborated") else None
+        stamp = now()
+        evidence_bundle = item["evidence_bundle"]
+        evidence_json = json.dumps(evidence_bundle, ensure_ascii=False)[:16000]
+        sample_id = secrets.token_urlsafe(18)
+        sample_ids.append(sample_id)
+        independent_search_count += int(item["web_search_attempted"])
+        website_check_count += int(item["website_checks"])
+        lead_id = None
+        duplicate = False
+        preserved_existing_verification = False
 
         with db() as c:
             existing = c.execute(
-                "SELECT id FROM leads WHERE user_id=? AND lower(name)=lower(?) AND lower(market)=lower(?)",
+                "SELECT * FROM leads WHERE user_id=? AND lower(name)=lower(?) AND lower(market)=lower(?)",
                 (user["id"], name, location),
             ).fetchone()
             if existing:
-                discovered.append({
-                    "name": name, "lead_id": existing["id"], "duplicate": True,
-                    "website": website, "website_state": website_state, "evidence": evidence,
-                    "source_url": source_url, "recommendation": strategy["type"],
-                    "pages": strategy["pages"], "opportunity_score": score,
-                    "score_reasons": score_reasons, "contact_email": email,
-                    "contact_phone": phone, "website_audit": website_audit,
-                    "draft_created": False, "proposal_created": False,
-                })
-                continue
-
-            lead_id = secrets.token_urlsafe(15)
-            stamp = now()
-            c.execute(
-                """INSERT INTO leads(id,user_id,name,website,market,evidence,status,score,created_at,updated_at,
-                   contact_email,contact_phone,source_url,do_not_contact) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0)""",
-                (lead_id, user["id"], name, website, location, evidence, "Unverified", score, stamp, stamp,
-                 email, phone, source_url),
-            )
-            title = "Website opportunity plan — " + name
-            proposal = (
-                "WEBSITE OPPORTUNITY PLAN\n\nBusiness: " + name + "\nLocation: " + location +
-                "\nDiscovery source: Serper Places / Google Maps result (" + source_url + ")\n\n"
-                "1. DISCOVERY OBSERVATIONS (VERIFY WITH BUSINESS)\n" + evidence + "\n\n"
-                "2. RECOMMENDED DIRECTION\n" + strategy["type"] + "\n\n"
-                "3. SUGGESTED PAGES\n- " + "\n- ".join(strategy["pages"]) + "\n\n"
-                "4. SUGGESTED FEATURES\n- " + "\n- ".join(strategy["features"]) + "\n\n"
-                "5. IMPLEMENTATION ROADMAP\n- " + "\n- ".join(strategy["roadmap"]) + "\n\n"
-                "6. SCOPE TO CONFIRM WITH THE CLIENT\nContent, brand assets, domain, hosting, budget, delivery timeline, "
-                "maintenance, integrations and who will update the site.\n\n"
-                "7. COMMERCIALS\nPrice and dates to be agreed after discovery. Do not invent a quote or promise results.\n\n"
-                "IMPORTANT: Search listings can be incomplete or out of date. A missing website URL is not proof that "
-                "the business has no website. Verify the business identity and all observations before sharing this proposal."
-            )
-            proposal_id = secrets.token_urlsafe(15)
-            c.execute("INSERT INTO proposals VALUES(?,?,?,?,?,?,?,?)",
-                      (proposal_id, user["id"], lead_id, title, proposal, "draft", stamp, stamp))
-            subject, body = make_outreach_copy(
-                name, location, website_state, website_audit, strategy, email
-            )
-            draft_id = secrets.token_urlsafe(15)
-            c.execute(
-                """INSERT INTO drafts(id,user_id,lead_id,kind,subject,body,state,created_at,to_email)
-                   VALUES(?,?,?,?,?,?,?,?,?)""",
-                (draft_id, user["id"], lead_id, "Cold email", subject, body, "pending_approval", stamp, email),
-            )
-            audit(c, user["id"], "research.prospect_prepared", {
-                "lead_id": lead_id, "website_state": website_state,
-                "draft_id": draft_id, "proposal_id": proposal_id, "provider": "Serper",
+                lead_id = existing["id"]
+                duplicate = True
+                duplicate_count += 1
+                preserved_existing_verification = existing["verification_status"] in {"verified", "manual_reviewed"}
+                final_verified = preserved_existing_verification or is_verified
+                final_status = existing["verification_status"] if preserved_existing_verification else (
+                    "verified" if is_verified else "pending_manual_review"
+                )
+                final_score = max(int(existing["verification_score"] or 0), int(verification.get("evidence_score") or 0)) if preserved_existing_verification else int(verification.get("evidence_score") or 0)
+                final_evidence = existing["verification_evidence"] if preserved_existing_verification else evidence_json
+                final_website = existing["website"] or website
+                final_presence = existing["website_presence"] if preserved_existing_verification and existing["website_presence"] != "unknown" else website_presence
+                final_pitch = bool(existing["pitch_eligible"]) or item["pitch_eligible"] if preserved_existing_verification else item["pitch_eligible"]
+                c.execute(
+                    """UPDATE leads SET website=?,evidence=?,verification_status=?,verification_score=?,
+                       verification_evidence=?,pitch_eligible=?,opportunity_reason=?,verified_at=?,
+                       website_presence=?,contact_phone=COALESCE(contact_phone,?),
+                       contact_email=COALESCE(contact_email,?),updated_at=?
+                       WHERE id=? AND user_id=?""",
+                    (
+                        final_website, item["evidence"], final_status, final_score, final_evidence,
+                        int(final_pitch), item["opportunity_reason"],
+                        existing["verified_at"] or stamp if final_verified else None,
+                        final_presence, verified_phone, verified_email, stamp, lead_id, user["id"],
+                    ),
+                )
+            else:
+                lead_id = secrets.token_urlsafe(15)
+                c.execute(
+                    """INSERT INTO leads(
+                        id,user_id,name,website,market,evidence,status,score,created_at,updated_at,
+                        contact_email,contact_phone,source_url,do_not_contact,research_origin,
+                        verification_status,verification_score,verification_evidence,
+                        pitch_eligible,opportunity_reason,verified_at,website_presence
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,?)""",
+                    (
+                        lead_id, user["id"], name, website, location, item["evidence"],
+                        "Verified" if is_verified else "Unverified",
+                        int(item["opportunity_score"]), stamp, stamp, verified_email, verified_phone,
+                        source_url, "serper_places",
+                        "verified" if is_verified else "pending_manual_review",
+                        int(verification.get("evidence_score") or 0), evidence_json,
+                        int(item["pitch_eligible"]), item["opportunity_reason"],
+                        stamp if is_verified else None, website_presence,
+                    ),
+                )
+                saved_count += 1
+            audit(c, user["id"], "research.candidate_verified" if is_verified else "research.candidate_unverified", {
+                "lead_id": lead_id, "verification_score": verification.get("evidence_score", 0),
+                "website_state": website_state, "website_presence": website_presence,
+                "pitch_eligible": bool(item["pitch_eligible"]),
             })
-            saved_count += 1
+            c.execute(
+                """INSERT INTO prospect_validation_samples(
+                    id,user_id,lead_id,business_name,industry,location,
+                    predicted_identity_verified,predicted_website_presence,predicted_website_state,
+                    predicted_contact_email,predicted_contact_phone,source_url,website_url,
+                    prediction_evidence,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    sample_id, user["id"], lead_id, name, payload.industry, location,
+                    int(is_verified), website_presence,
+                    website_state if website_state in {"working", "broken", "needs_improvement", "access_restricted"} else "unknown",
+                    email, phone, source_url, website, evidence_json, stamp, stamp,
+                ),
+            )
 
-        gmail_draft_created = False
-        gmail_draft_error = None
-        if email:
-            with db() as c:
-                gmail_connected = bool(c.execute(
-                    "SELECT 1 FROM integrations WHERE user_id=? AND provider='gmail'", (user["id"],)
-                ).fetchone())
-            if gmail_connected:
-                try:
-                    create_gmail_draft_for_user(draft_id, user["id"])
-                    gmail_draft_created = True
-                except HTTPException as exc:
-                    gmail_draft_error = str(exc.detail)
-
+        final_verified = preserved_existing_verification or is_verified
+        if final_verified:
+            verified_count += 1
+        if item["pitch_eligible"]:
+            pitch_ready_count += 1
         discovered.append({
-            "name": name, "lead_id": lead_id, "duplicate": False,
-            "website": website, "website_state": website_state, "evidence": evidence,
-            "source_url": source_url, "contact_email": email, "contact_phone": phone,
-            "recommendation": strategy["type"], "pages": strategy["pages"],
-            "opportunity_score": score, "score_reasons": score_reasons,
-            "website_audit": website_audit, "draft_created": True, "proposal_created": True,
-            "gmail_draft_created": gmail_draft_created, "gmail_draft_error": gmail_draft_error,
+            "name": name, "lead_id": lead_id, "duplicate": duplicate,
+            "saved": True, "saved_as_candidate": not final_verified,
+            "verified": final_verified,
+            "verification": verification,
+            "verification_status": "verified" if final_verified else "pending_manual_review",
+            "verification_score": int(verification.get("evidence_score") or 0),
+            "verification_reasons": verification.get("reasons") or [],
+            "website": website, "website_state": website_state,
+            "website_presence": website_presence, "website_audit": item["website_audit"],
+            "validation_sample_id": sample_id, "evidence": item["evidence"],
+            "source_url": source_url, "contact_email": email,
+            "contact_email_corroborated": bool(verification.get("email_corroborated")),
+            "contact_phone": phone,
+            "contact_phone_corroborated": bool(verification.get("phone_corroborated")),
+            "recommendation": item["strategy"]["type"], "pages": item["strategy"]["pages"],
+            "opportunity_score": item["opportunity_score"],
+            "score_reasons": item["score_reasons"],
+            "pitch_eligible": bool(item["pitch_eligible"]),
+            "opportunity_reason": item["opportunity_reason"],
+            "draft_created": False, "proposal_created": False, "gmail_draft_created": False,
             "rating": place.get("rating"), "rating_count": place.get("ratingCount"),
         })
 
     with db() as c:
         audit(c, user["id"], "research.run", {
-            "location": location, "industry": payload.industry,
-            "query": query[:160], "provider": "Serper",
-            "results": len(discovered), "saved": saved_count,
+            "location": location, "industry": payload.industry, "query": query[:160],
+            "provider": "Serper Places + bounded evidence verification",
+            "candidates": len(discovered), "new_candidates_saved": saved_count,
+            "duplicates": duplicate_count, "verified_businesses": verified_count,
+            "places_searches": places_search_count,
+            "candidate_budget": candidate_budget,
+            "independent_web_searches": independent_search_count,
+            "website_checks": website_check_count,
+            "pitch_ready": pitch_ready_count,
         })
-    discovered.sort(key=lambda item: item.get("opportunity_score", 0), reverse=True)
-    state_counts = {}
-    for item in discovered:
-        state_counts[item["website_state"]] = state_counts.get(item["website_state"], 0) + 1
-    ranked = sorted((x.get("opportunity_score", 0) for x in discovered), reverse=True)
+
+    warnings = []
+    if not discovered:
+        warnings.append("Serper Places returned no usable business records. Try a more specific category or a nearby town.")
+    if any(not x["verified"] for x in discovered):
+        warnings.append("Some candidates did not meet the automatic identity-evidence threshold. They are saved as Unverified and must not be pitched as confirmed businesses.")
+    if any(x["website_state"] in {"needs_review", "access_restricted"} for x in discovered):
+        warnings.append("Some website checks were inconclusive or access-restricted. MCAS does not label these websites as broken.")
     return {
         "location": location, "resolved_location": location, "query": query,
-        "industry": payload.industry, "provider": "Serper Places",
+        "industry": payload.industry, "provider": "Serper Places + evidence verification",
         "results": discovered,
+        "research_limits": {
+            "max_candidates": candidate_budget, "candidate_budget": candidate_budget,
+            "places_searches": places_search_count, "places_cache_hit": places_cache_hit,
+            "independent_web_searches": independent_search_count,
+            "website_checks": website_check_count, "verification_workers": 4,
+        },
         "summary": {
-            "reviewed": len(discovered), "new_prospects_saved": saved_count,
-            "website_states": state_counts,
-            "highest_opportunity_score": ranked[0] if ranked else 0,
+            "reviewed": len(discovered), "verified_businesses": verified_count,
+            "pending_manual_review": len(discovered) - verified_count,
+            "rejected_unverified_candidates": 0, "new_prospects_saved": saved_count,
+            "duplicate_candidates": duplicate_count, "pitch_ready": pitch_ready_count,
+            "returned_candidates": len(discovered), "max_candidates": candidate_budget,
         },
         "saved": saved_count, "source": "Serper Places",
-        "attribution": "Business discovery powered by Serper Places.",
-        "warning": "Serper results can be incomplete or out of date. Verify business identity, website, address and contact details before marking a prospect verified or contacting them. MCAS only creates drafts; it never sends email.",
+        "attribution": "Identity is auto-verified only when the evidence threshold is met; inconclusive candidates remain Unverified.",
+        "discovery_warnings": warnings,
+        "warning": (
+            "MCAS checks each candidate's listed website safely, then runs at most one independent public web search "
+            "when needed. A first-party website must have a matching title and distinctive domain token, or independent "
+            "corroboration must meet the multi-source threshold. A website is marked broken only after two 404/410 checks. "
+            "Access restrictions, timeouts and server errors are inconclusive, not proof of failure. A missing website URL "
+            "is reported only as not found in this bounded search, never as proof that no website exists. Evidence scores "
+            "are rule-based indicators, not statistical probabilities. Verify contact permission and current trading before outreach. "
+            "Gmail remains draft-only; this research run does not read inbox messages or send email."
+        ),
     }
 
 
@@ -1834,6 +2355,8 @@ def create_builder_prompt(lead_id: str, user=Depends(current_user)):
         lead = owned_lead(c, lead_id, user["id"])
         if lead["status"] != "Won":
             raise HTTPException(409, "Mark the prospect as accepted before generating a website-builder prompt.")
+        if lead["research_origin"] == "serper_places" and not int(lead["pitch_eligible"] or 0):
+            raise HTTPException(409, "This research prospect has no verified website opportunity. Confirm scope with the business before preparing a build prompt.")
     tags = {}
     notes = (lead["evidence"] or "").lower()
     market = lead["market"] or "the target location"
@@ -1874,13 +2397,165 @@ def create_builder_prompt(lead_id: str, user=Depends(current_user)):
     return {"lead_id": lead_id, "business": lead["name"], "prompt": prompt,
             "note": "Client acceptance is recorded, but confirm the final scope, content, budget and delivery terms before starting build work."}
 
+def normalise_public_website_url(value: object) -> str:
+    raw = str(value or "").strip()[:2048]
+    if not raw:
+        raise HTTPException(422, "Provide a public website URL.")
+    if not re.match(r"^https?://", raw, re.I):
+        raw = "https://" + raw
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        raise HTTPException(422, "Enter a public website domain or HTTP/HTTPS URL without credentials.")
+    return raw
+
+
+def build_admin_feature_test_plan(feature: str, audit_result: dict) -> list[str]:
+    """Create a human-executed acceptance checklist; never run AI-generated code."""
+    text_value = feature.strip()
+    plan = [
+        "Open the staging website in a private browser session and confirm the feature is visible only to the intended role.",
+        "Complete the primary user journey using test data; confirm the expected result and visible confirmation state.",
+        "Test invalid, empty, duplicate and boundary inputs; confirm safe validation and useful error messages.",
+        "Test keyboard-only navigation, labels, focus order and a narrow mobile viewport.",
+        "Confirm the feature does not expose secrets, private records or another customer's workspace data.",
+        "Check browser console and server logs for errors; record the exact URL, browser, timestamp and reproduction steps.",
+        "Repeat the test after refresh and sign-out/sign-in to check persistence and permission enforcement.",
+    ]
+    advanced = audit_result.get("advanced_audit") or {}
+    if (advanced.get("scores") or {}).get("mobile", 100) < 100:
+        plan.append("Manually inspect mobile layout and responsive behaviour; static audit detected mobile-related review items.")
+    if (advanced.get("scores") or {}).get("accessibility", 100) < 100:
+        plan.append("Run keyboard and screen-reader checks; static audit detected accessibility review items.")
+    if (advanced.get("scores") or {}).get("transport_security_headers", 100) < 100:
+        plan.append("Review response security headers with the hosting/security team; missing headers are not proof of an exploitable vulnerability.")
+    return plan[:12]
+
+
 @app.post("/api/audit-website")
 def audit_website(payload: dict, user=Depends(current_user)):
-    raw = str(payload.get("url", ""))[:2048].strip()
+    raw = normalise_public_website_url(payload.get("url", ""))
     result = safe_site_fetch(raw)
     result["checked_at"] = now()
+    from backend.prospect_verification import verified_website_problem_findings
+    result["website_problem_findings"] = verified_website_problem_findings(result)
+    result["audit_scope"] = "Bounded static homepage HTML and response-header inspection. JavaScript-rendered states and interactions may not be visible."
     with db() as c:
-        audit(c, user["id"], "website.audit", {"url": result.get("url"), "status": result.get("http_status")})
+        audit(c, user["id"], "website.audit", {
+            "url": result.get("url"), "status": result.get("http_status"),
+            "overall_score": (result.get("advanced_audit") or {}).get("overall_score"),
+        })
+    return result
+
+
+@app.post("/api/admin/test-lab/run")
+def admin_feature_test_lab(payload: dict, user=Depends(current_user)):
+    require_admin(user)
+    feature = str(payload.get("feature") or "").strip()[:2000]
+    if len(feature) < 12:
+        raise HTTPException(422, "Describe the AI-suggested feature or behaviour to test (at least 12 characters).")
+    raw = normalise_public_website_url(payload.get("url", ""))
+    result = safe_site_fetch(raw)
+    result["checked_at"] = now()
+    from backend.prospect_verification import verified_website_problem_findings
+    result["website_problem_findings"] = verified_website_problem_findings(result)
+    plan = build_admin_feature_test_plan(feature, result)
+    with db() as c:
+        audit(c, user["id"], "admin.test_lab.run", {
+            "url": result.get("url"), "feature_length": len(feature),
+            "http_status": result.get("http_status"),
+            "overall_score": (result.get("advanced_audit") or {}).get("overall_score"),
+        })
+    return {
+        "feature": feature,
+        "staging_url": result.get("url"),
+        "http_status": result.get("http_status"),
+        "audit": result.get("advanced_audit"),
+        "observed_findings": result.get("website_problem_findings") or [],
+        "manual_test_plan": plan,
+        "execution_boundary": "This lab performs a safe, read-only static website inspection and creates a manual acceptance checklist. It does not execute generated code, modify the target website, submit forms, authenticate to the target, or prove dynamic feature behaviour.",
+        "checked_at": result["checked_at"],
+    }
+
+
+@app.post("/api/competitor-intelligence")
+def competitor_intelligence(payload: CompetitorIn, user=Depends(current_user)):
+    with db() as c:
+        lead = owned_lead(c, payload.lead_id, user["id"])
+    market = str(lead["market"] or "").strip()
+    if not market:
+        raise HTTPException(422, "The selected prospect needs a market/location before competitor research.")
+    category = payload.industry.replace("_", " ")
+    query = category + " businesses in " + market
+    data = serper_request("places", {"q": query, "gl": os.getenv("SERPER_GL", "ke"), "hl": os.getenv("SERPER_HL", "en")})
+    places = data.get("places") or []
+    target_url = str(lead["website"] or "").strip()
+    if target_url and not re.match(r"^https?://", target_url, re.I):
+        target_url = "https://" + target_url
+    target_host = (urllib.parse.urlparse(target_url).hostname or "").lower().removeprefix("www.")
+    target_audit = {}
+    target_website_state = "not_listed"
+    if target_url:
+        try:
+            target_audit = safe_site_fetch(target_url)
+            target_code = int(target_audit.get("http_status") or 0)
+            target_website_state = "responding" if 200 <= target_code < 400 else ("restricted" if target_code in {401,403,429} else "needs_review")
+        except HTTPException:
+            target_website_state = "needs_review"
+    competitors = []
+    seen = set()
+    for place in places:
+        if not isinstance(place, dict) or len(competitors) >= payload.max_results:
+            continue
+        name = str(place.get("title") or place.get("name") or "").strip()
+        if not name or name.casefold() == str(lead["name"]).casefold() or name.casefold() in seen:
+            continue
+        seen.add(name.casefold())
+        raw_website = place.get("website") or place.get("websiteUrl")
+        website = str(raw_website).strip() if raw_website else ""
+        if website and not re.match(r"^https?://", website, re.I):
+            website = "https://" + website
+        audit_result = {}
+        website_state = "not_listed"
+        if website:
+            try:
+                audit_result = safe_site_fetch(website)
+                code = int(audit_result.get("http_status") or 0)
+                website_state = "responding" if 200 <= code < 400 else ("restricted" if code in {401,403,429} else "needs_review")
+            except HTTPException:
+                website_state = "needs_review"
+        competitor_host = (urllib.parse.urlparse(website).hostname or "").lower().removeprefix("www.")
+        competitors.append({
+            "name": name, "category": place.get("category") or place.get("type"),
+            "address": place.get("address"), "website": website or None,
+            "website_state": website_state,
+            "same_domain_as_target": bool(target_host and competitor_host and target_host == competitor_host),
+            "rating": place.get("rating"), "rating_count": place.get("ratingCount"),
+            "source": "Serper Places", "website_audit": audit_result.get("advanced_audit"),
+            "source_url": serper_source_url(place, name, str(place.get("address") or "")),
+        })
+    result = {
+        "target": {"lead_id": payload.lead_id, "name": lead["name"], "market": market, "website": lead["website"],
+                   "website_state": target_website_state,
+                   "website_audit": target_audit.get("advanced_audit")},
+        "query": query, "competitors": competitors,
+        "comparison": {
+            "competitors_found": len(competitors),
+            "with_listed_websites": sum(1 for x in competitors if x["website"]),
+            "without_listed_websites": sum(1 for x in competitors if not x["website"]),
+            "responding_websites": sum(1 for x in competitors if x["website_state"] == "responding"),
+        },
+        "limitations": [
+            "Search-provider place listings are candidate competitors, not proof of direct commercial competition.",
+            "Ratings and business details may be incomplete or stale; verify them independently.",
+            "Website audits are bounded static-page observations, not full browser, SEO-ranking, malware or penetration tests.",
+            "No prospect was contacted and no email was sent.",
+        ],
+        "checked_at": now(),
+    }
+    with db() as c:
+        audit(c, user["id"], "competitor.intelligence", {
+            "lead_id": payload.lead_id, "industry": payload.industry, "count": len(competitors),
+        })
     return result
 
 def assistant_system_prompt(task: str) -> str:
@@ -1917,10 +2592,14 @@ def assistant_system_prompt(task: str) -> str:
         )
     if task == "email":
         return shared + (
-            "TASK: write a first-contact business email that is specific to the supplied verified evidence. "
-            "If evidence is incomplete, say so rather than claiming a problem. Use a relevant subject and a "
-            "natural, respectful call to action. Include a polite opt-out sentence. Output the subject and body "
-            "clearly, without unsupported claims."
+            "TASK: write a persuasive, highly personalised first-contact business email that is specific to the supplied verified evidence. "
+            "Start with a concise subject line that is relevant, not clickbait. Open with a genuine business-specific observation; "
+            "explain one concrete, evidence-backed website issue and its likely customer/business consequence without exaggerating. "
+            "Connect the issue to a practical improvement the sender can deliver. Explain the value in plain language, avoid generic praise, "
+            "and finish with one low-friction, respectful call to action (for example, permission to send a short outline or arrange a brief call). "
+            "If no verified website problem exists, do not invent one: say the observation is preliminary and offer a general improvement discussion. "
+            "Do not claim the recipient has lost sales, customers or revenue unless supplied evidence proves it. "
+            "Include a polite opt-out sentence. Keep it around 100–160 words. Output a clearly labelled subject and email body only."
         )
     return shared + (
         "TASK: prepare a useful, structured proposal based only on supplied requirements and context. "
@@ -2041,6 +2720,8 @@ def ai_assistant(payload: AIIn, request: Request, user=Depends(current_user)):
         lead = owned_lead(c, payload.lead_id, user["id"])
         if payload.task == "email" and int(lead["do_not_contact"] or 0):
             raise HTTPException(403, "This prospect is marked do-not-contact; outreach drafting is blocked.")
+        if payload.task == "email" and lead["research_origin"] == "serper_places" and not int(lead["pitch_eligible"] or 0):
+            raise HTTPException(409, "This research prospect is verified but not pitch-ready. MCAS has not confirmed a concrete website issue.")
     system = assistant_system_prompt(payload.task)
     if payload.task == "reply" and not payload.incoming.strip():
         raise HTTPException(422, "Paste the customer's message before generating a reply.")
@@ -2528,9 +3209,9 @@ def admin_mfa_setup(payload: AdminMfaSetupIn, user=Depends(current_user)):
     if len(bootstrap) < 32 or not hmac.compare_digest(bootstrap, payload.bootstrap_token):
         raise HTTPException(403, "A valid server-side administrator bootstrap token is required for first-time MFA enrollment.")
     with db() as c:
-        row = c.execute("SELECT password_hash,admin_totp_secret FROM users WHERE id=?", (user["id"],)).fetchone()
-        if not row or not verify_password(payload.password, row["password_hash"]):
-            raise HTTPException(401, "Re-enter your MCAS password to begin administrator MFA setup.")
+        row = c.execute("SELECT admin_totp_secret FROM users WHERE id=?", (user["id"],)).fetchone()
+        if not row:
+            raise HTTPException(404, "Administrator account not found.")
         if row["admin_totp_secret"]:
             raise HTTPException(409, "Administrator MFA is already enabled.")
         secret = generate_totp_secret()
@@ -2671,8 +3352,16 @@ def admin_security_status(user=Depends(current_user)):
          "detail": "MCAS does not encrypt its SQLite database file. Configure encrypted storage or a managed database with encryption at rest."},
         {"name": "Encrypted backups and restore test", "status": "external_action",
          "detail": "Configure encrypted off-site backups and regularly verify a restore with the hosting provider."},
-        {"name": "Customer email verification", "status": "not_implemented",
-         "detail": "Customer registration does not verify email ownership in this release."},
+        {"name": "Customer email verification", "status": "configured",
+         "detail": "New registrations require a single-use, expiring email verification token; legacy accounts were migrated as verified."},
+        {"name": "Customer MFA", "status": "not_implemented",
+         "detail": "Authenticator MFA is enforced for configured administrators only; customer accounts do not yet have MFA."},
+        {"name": "Account recovery", "status": "not_implemented",
+         "detail": "A secure self-service password reset and recovery workflow is not implemented yet."},
+        {"name": "Website audit scope", "status": "limited",
+         "detail": "Static HTML and response-header observations only. No browser performance, malware, vulnerability exploitation or penetration testing."},
+        {"name": "Competitor intelligence", "status": "limited",
+         "detail": "Candidate local businesses are sourced from Serper Places; direct competitor status is not independently verified."},
         {"name": "GitHub branch protection", "status": "external_action",
          "detail": "Enable required CI and CodeQL checks and restrict direct pushes to main in GitHub repository settings."},
     ]
@@ -3087,8 +3776,8 @@ def admin_maintenance(user=Depends(current_user)):
          )},
         {"name": "AI feedback improvement analysis", "status": "configured" if os.getenv("AI_API_BASE_URL") and os.getenv("AI_API_KEY") and os.getenv("AI_MODEL") else "not_configured",
          "detail": "Only explicitly opted-in non-security feedback is eligible. The system is capped at " + str(ai_monthly_limit) + " analysis attempts per UTC month."},
-        {"name": "Customer email verification", "status": "not_implemented",
-         "detail": "Customer registration does not verify email ownership in this release."},
+        {"name": "Google sign-in", "status": "configured" if os.getenv("GOOGLE_OAUTH_CLIENT_ID") and os.getenv("GOOGLE_OAUTH_CLIENT_SECRET") and os.getenv("GOOGLE_OAUTH_REDIRECT_URI") else "not_implemented",
+         "detail": "Customer sign-in uses Google OpenID Connect and accepts only a Google-verified email. The OAuth callback and exact redirect URI must be configured in Google Cloud Console."},
         {"name": "Database encryption at rest", "status": "external_action",
          "detail": "MCAS does not encrypt the SQLite database file. Configure encrypted storage or a managed database with encryption at rest."},
         {"name": "Encrypted off-site backups", "status": "external_action",

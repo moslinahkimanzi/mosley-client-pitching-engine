@@ -1,49 +1,58 @@
 (()=>{'use strict';
 const $=id=>document.getElementById(id);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state={csrf:'',user:null,leads:[],drafts:[],followups:[],proposals:[],metrics:{},gmail:null,config:{search:false,ai:false},updates:null,feedback:[],maintenance:null,improvements:[],onboarding:null,authMode:'login'};
+const state={csrf:'',user:null,leads:[],drafts:[],followups:[],proposals:[],metrics:{},gmail:null,config:{search:false,ai:false},updates:null,feedback:[],maintenance:null,improvements:[],onboarding:null,qualitySamples:[],qualityMetrics:null,authMode:'login'};
 function toast(msg,error=false){$('toast').textContent=msg;$('toast').className='notice'+(error?' error':'');}
 function note(id,msg,error=false){$(id).textContent=msg;$(id).className='notice'+(error?' error':'');}
 function cookie(name){const item=document.cookie.split('; ').find(x=>x.startsWith(name+'='));return item?decodeURIComponent(item.split('=').slice(1).join('=')):'';}
 async function refreshCsrf(){const r=await fetch('/api/auth/csrf',{credentials:'same-origin'});if(!r.ok)throw new Error('Unable to initialise security token');const j=await r.json();state.csrf=j.csrf_token||cookie('mcas_csrf');}
 async function api(path,opts={}){const method=(opts.method||'GET').toUpperCase();const headers={'Accept':'application/json',...(opts.headers||{})};if(opts.body!==undefined)headers['Content-Type']='application/json';if(['POST','PATCH','DELETE','PUT'].includes(method)){state.csrf=cookie('mcas_csrf')||state.csrf;headers['X-CSRF-Token']=state.csrf;}const r=await fetch(path,{...opts,method,headers,credentials:'same-origin'});const type=r.headers.get('content-type')||'';const data=type.includes('application/json')?await r.json():await r.text();if(!r.ok)throw new Error(data.detail||data.message||data||('Request failed ('+r.status+')'));return data;}
-function showAuth(){ $('app').classList.add('hide');$('auth').classList.remove('hide');$('mfaChallengeForm').classList.add('hide');if(pendingEmailVerificationToken){$('authForm').classList.add('hide');$('authTabs').classList.add('hide');$('emailVerificationPanel').classList.remove('hide');}else{$('authForm').classList.remove('hide');$('authTabs').classList.remove('hide');$('emailVerificationPanel').classList.add('hide');}}
+let googleMfaPending=false;
+function showAuth(){
+ $('app').classList.add('hide');$('auth').classList.remove('hide');
+ $('authForm').classList.toggle('hide',googleMfaPending);
+ $('mfaChallengeForm').classList.toggle('hide',!googleMfaPending);
+}
 function updateAdminNavigation(){const allowed=state.user?.is_admin===true;$('settingsNavGroup').classList.toggle('hide',!allowed);$('settingsNav').classList.toggle('hide',!allowed);}
 function showApp(){ $('auth').classList.add('hide');$('app').classList.remove('hide');$('signedEmail').textContent=state.user.email||'';updateAdminNavigation();}
-function page(name){if(['security','admin-maintenance','ai-improvement-centre'].includes(name)&&!state.user?.is_admin){toast('Settings are private and available only to the configured administrator.',true);name='overview';}document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id===name));document.querySelectorAll('[data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===name));if(name==='prospects')renderLeads();if(name==='studio')renderDrafts();if(name==='followups')renderFollowups();if(name==='proposals')renderProposals();if(name==='updates'){loadUpdates();loadMyFeedback();}if(name==='admin-maintenance')loadAdminMaintenance();if(name==='ai-improvement-centre')loadImprovementReviews();}
+function page(name){if(['security','admin-maintenance','ai-improvement-centre'].includes(name)&&!state.user?.is_admin){toast('Settings are private and available only to the configured administrator.',true);name='overview';}document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id===name));document.querySelectorAll('[data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===name));if(name==='prospects')renderLeads();if(name==='quality-validation')loadQualityValidation();if(name==='studio')renderDrafts();if(name==='followups')renderFollowups();if(name==='proposals')renderProposals();if(name==='updates'){loadUpdates();loadMyFeedback();}if(name==='admin-maintenance')loadAdminMaintenance();if(name==='ai-improvement-centre')loadImprovementReviews();}
 document.querySelectorAll('[data-page]').forEach(b=>b.addEventListener('click',()=>page(b.dataset.page)));
 document.querySelectorAll('[data-go]').forEach(b=>b.addEventListener('click',()=>page(b.dataset.go)));
-let pendingEmailVerificationToken='';
-function setAuthMode(mode){state.authMode=mode;$('loginTab').classList.toggle('active',mode==='login');$('registerTab').classList.toggle('active',mode==='register');$('authSubmit').textContent=mode==='login'?'Sign in securely':'Create account';$('authPassword').autocomplete=mode==='login'?'current-password':'new-password';$('authPassword').minLength=mode==='login'?1:12;$('authAdminBootstrapWrap').classList.toggle('hide',mode!=='register');$('authForm').classList.remove('hide');$('mfaChallengeForm').classList.add('hide');$('emailVerificationPanel').classList.add('hide');$('authTabs').classList.remove('hide');note('authNotice','');}
-function showEmailVerification(token,email,message){pendingEmailVerificationToken=token||'';$('authForm').classList.add('hide');$('mfaChallengeForm').classList.add('hide');$('authTabs').classList.add('hide');$('emailVerificationPanel').classList.remove('hide');$('resendVerificationEmail').value=email||$('authEmail').value.trim();$('confirmEmailVerification').classList.toggle('hide',!pendingEmailVerificationToken);note('emailVerificationNotice',message||'Check your inbox for the verification link. It expires in 24 hours.');}
-$('loginTab').addEventListener('click',()=>setAuthMode('login'));$('registerTab').addEventListener('click',()=>setAuthMode('register'));
+let bootstrapCheckTimer=null;
+$('authEmail').addEventListener('input',()=>{
+ clearTimeout(bootstrapCheckTimer);
+ $('authAdminBootstrapWrap').classList.add('hide');
+ $('authAdminBootstrap').required=false;
+ const email=$('authEmail').value.trim();
+ if(!email.includes('@'))return;
+ bootstrapCheckTimer=setTimeout(async()=>{
+  try{
+   const data=await api('/api/auth/google/bootstrap-required?email='+encodeURIComponent(email));
+   const required=data.required===true;
+   $('authAdminBootstrapWrap').classList.toggle('hide',!required);
+   $('authAdminBootstrap').required=required;
+  }catch(_){$('authAdminBootstrapWrap').classList.add('hide');}
+ },250);
+});
 $('authForm').addEventListener('submit',async e=>{
  e.preventDefault();const btn=$('authSubmit');btn.disabled=true;
  try{
   await refreshCsrf();
-  const endpoint=state.authMode==='login'?'/api/auth/login':'/api/auth/register';
-  const payload={email:$('authEmail').value.trim(),password:$('authPassword').value};
-  if(state.authMode==='register')payload.admin_bootstrap_token=$('authAdminBootstrap').value;
-  const data=await api(endpoint,{method:'POST',body:JSON.stringify(payload)});
-  if(data.email_verification_required){
-   $('authPassword').value='';
-   if(data.development_verification_url){const url=new URL(data.development_verification_url,location.origin);showEmailVerification(url.searchParams.get('verify_token'),data.email,'Development mode: MCAS could not confirm email delivery. Use the local verification button below to activate this test account. Check the server terminal for SMTP diagnostics.');}
-   else if(data.email_sent===true){showEmailVerification('',data.email,'The SMTP server accepted the verification message. This confirms handoff to the mail provider, not final inbox delivery. Check Inbox, Spam and Promotions; delivery can be delayed.');}
-    else showEmailVerification('',data.email,data.message||'MCAS could not confirm that the verification email was accepted by the SMTP server. Check the server configuration and logs, then request another link.');
-   return;
+  const email=$('authEmail').value.trim();
+  const bootstrapState=await api('/api/auth/google/bootstrap-required?email='+encodeURIComponent(email));
+  if(bootstrapState.required===true&&!$('authAdminBootstrap').value.trim()){
+   $('authAdminBootstrapWrap').classList.remove('hide');
+   $('authAdminBootstrap').required=true;
+   throw new Error('Enter the administrator bootstrap token to create the configured admin account.');
   }
-  if(data.mfa_required){
-   $('authForm').classList.add('hide');$('mfaChallengeForm').classList.remove('hide');
-   $('mfaLoginNotice').textContent=data.message||'Enter your authenticator code.';
-   $('mfaLoginCode').focus();return;
-  }
-  await refreshCsrf();state.user=await api('/api/auth/me');showApp();await loadAll();
- }catch(err){note('authNotice',err.message,true);if(state.authMode==='login'&&/verify your email/i.test(err.message)){showEmailVerification('', $('authEmail').value.trim(),err.message);}}
- finally{btn.disabled=false;}
+  const data=await api('/api/auth/google/start',{method:'POST',body:JSON.stringify({
+   email,
+   admin_bootstrap_token:$('authAdminBootstrap').value
+  })});
+  if(!data.authorization_url||!data.authorization_url.startsWith('https://accounts.google.com/'))throw new Error('Google returned an invalid sign-in destination.');
+  location.assign(data.authorization_url);
+ }catch(err){note('authNotice',err.message,true);btn.disabled=false;}
 });
-$('confirmEmailVerification').addEventListener('click',async()=>{const btn=$('confirmEmailVerification');btn.disabled=true;try{await refreshCsrf();const result=await api('/api/auth/verify-email/confirm',{method:'POST',body:JSON.stringify({token:pendingEmailVerificationToken})});pendingEmailVerificationToken='';note('emailVerificationNotice',result.message+' You can now sign in.');btn.classList.add('hide');$('authTabs').classList.remove('hide');setAuthMode('login');$('authEmail').value=result.email||$('resendVerificationEmail').value;$('authPassword').focus();}catch(e){note('emailVerificationNotice',e.message,true);}finally{btn.disabled=false;}});
-$('resendVerificationForm').addEventListener('submit',async e=>{e.preventDefault();const btn=e.submitter;btn.disabled=true;try{await refreshCsrf();const result=await api('/api/auth/resend-verification',{method:'POST',body:JSON.stringify({email:$('resendVerificationEmail').value.trim()})});if(result.development_verification_url){const url=new URL(result.development_verification_url,location.origin);showEmailVerification(url.searchParams.get('verify_token'),$('resendVerificationEmail').value,'Development mode: use the local verification button to activate this account.');}else note('emailVerificationNotice',result.message);}catch(err){note('emailVerificationNotice',err.message,true);}finally{btn.disabled=false;}});
-$('verificationBackToLogin').addEventListener('click',()=>{pendingEmailVerificationToken='';history.replaceState({},'',location.pathname);setAuthMode('login');});
 $('mfaChallengeForm').addEventListener('submit',async e=>{
  e.preventDefault();const btn=$('mfaLoginSubmit');btn.disabled=true;
  try{
@@ -123,7 +132,7 @@ $('refreshSecurityGuardianBtn').addEventListener('click',loadSecurityGuardian);
 $('adminMfaSetupForm').addEventListener('submit',async e=>{
  e.preventDefault();const button=$('adminMfaStartBtn');button.disabled=true;
  try{
-  const data=await api('/api/admin/mfa/setup',{method:'POST',body:JSON.stringify({password:$('adminMfaPassword').value,bootstrap_token:$('adminMfaBootstrap').value})});
+  const data=await api('/api/admin/mfa/setup',{method:'POST',body:JSON.stringify({bootstrap_token:$('adminMfaBootstrap').value})});
   $('adminMfaSecret').textContent=data.secret;$('adminMfaSetupResult').classList.remove('hide');
   note('adminMfaNotice',data.message);
  }catch(err){note('adminMfaNotice',err.message,true);}
@@ -194,6 +203,24 @@ function renderAdminMaintenance(){
  $('adminFeedbackList').innerHTML=(data.feedback||[]).map(item=>'<div class="item" data-feedback-card="'+esc(item.id)+'"><div class="itemtop"><strong>'+esc(item.title)+'</strong><span class="badge">'+esc(feedbackStatusLabel(item.status))+'</span></div><p>'+esc(item.category)+' · '+esc(item.customer_email)+' · '+esc(item.created_at)+'</p><p>'+esc(item.message)+'</p><div class="field"><label>Review status</label><select data-feedback-status><option value="received" '+(item.status==='received'?'selected':'')+'>Received</option><option value="reviewing" '+(item.status==='reviewing'?'selected':'')+'>Under review</option><option value="planned" '+(item.status==='planned'?'selected':'')+'>Planned</option><option value="in_progress" '+(item.status==='in_progress'?'selected':'')+'>In progress</option><option value="completed" '+(item.status==='completed'?'selected':'')+'>Completed</option><option value="declined" '+(item.status==='declined'?'selected':'')+'>Not planned</option></select></div><div class="field"><label>Reply / internal note (visible to this customer)</label><textarea data-feedback-note maxlength="1000">'+esc(item.admin_note||'')+'</textarea></div><button data-feedback-save="'+esc(item.id)+'" class="primary">Save review</button></div>').join('')||'<div class="empty">No customer feedback has been submitted.</div>';
 }
 $('refreshMaintenanceBtn').addEventListener('click',loadAdminMaintenance);
+
+$('runAdminFeatureTest').addEventListener('click',async()=>{
+ const button=$('runAdminFeatureTest'),feature=$('adminTestFeature').value.trim(),url=$('adminTestUrl').value.trim();
+ if(feature.length<12)return note('adminFeatureTestNotice','Describe the feature and expected behaviour (at least 12 characters).',true);
+ if(!url)return note('adminFeatureTestNotice','Enter a staging website URL.',true);
+ button.disabled=true;$('adminFeatureTestResult').innerHTML='';
+ note('adminFeatureTestNotice','Running a read-only staging-site inspection…');
+ try{
+  const data=await api('/api/admin/test-lab/run',{method:'POST',body:JSON.stringify({feature,url})});
+  const findings=(data.observed_findings||[]).map(x=>'<div class="item"><b>'+esc(x.title)+'</b><p>'+esc(x.evidence)+'</p></div>').join('');
+  const plan=(data.manual_test_plan||[]).map(x=>'<li>'+esc(x)+'</li>').join('');
+  const audit=data.audit||{};
+  $('adminFeatureTestResult').innerHTML='<div class="good"><b>Staging response: HTTP '+esc(data.http_status)+'</b><p>'+esc(data.staging_url)+' · Static audit score: '+esc(audit.overall_score??'N/A')+'/100</p></div><div class="item"><h3>Feature under test</h3><p>'+esc(data.feature)+'</p></div><h3>Observed website findings</h3>'+(findings||'<div class="empty">No supported technical findings were detected by this limited check.</div>')+'<div class="item"><h3>Manual acceptance checklist</h3><ol>'+plan+'</ol></div><div class="warning">'+esc(data.execution_boundary)+'</div>';
+  note('adminFeatureTestNotice','Inspection complete. Execute each acceptance check manually in staging and record evidence before approving a release.');
+ }catch(e){note('adminFeatureTestNotice',e.message,true);}
+ finally{button.disabled=false;}
+});
+
 $('improvementReviewList').addEventListener('click',async e=>{
  const rollbackButton=e.target.closest('[data-improvement-rollback]');
  if(rollbackButton){
@@ -288,7 +315,7 @@ function renderMetrics(){const m=state.metrics;$('mLeads').textContent=m.leads||
 $('recentLeads').innerHTML=state.leads.slice(0,5).map(l=>'<div class="row"><span><b>'+esc(l.name)+'</b><br><span class="tiny">'+esc(l.market||'')+'</span></span><span class="badge">'+esc(l.status)+'</span></div>').join('')||'<div class="empty">No prospects yet. Add your first lead.</div>';}
 function renderSelects(){
  const options=state.leads.map(l=>'<option value="'+esc(l.id)+'">'+esc(l.name)+'</option>').join('');
- ['emailLead','replyLead','proposalLead','followLead','advisorLead'].forEach(id=>{
+ ['emailLead','replyLead','proposalLead','followLead','advisorLead','competitorLead'].forEach(id=>{
   const el=$(id);if(!el)return;
   const old=el.value;
   el.innerHTML='<option value="">'+(state.leads.length?'Select a saved prospect…':'No saved prospects — add one in Prospects')+'</option>'+options;
@@ -321,17 +348,86 @@ function openAdvisorProspectPicker(){
  renderAdvisorProspectPicker();
  if(search)search.focus();
 }
-function renderLeads(){const q=($('leadFilter')?.value||'').toLowerCase(),st=$('leadFilterStatus')?.value||'';const items=state.leads.filter(l=>(!st||l.status===st)&&[l.name,l.market,l.evidence,l.contact_email].join(' ').toLowerCase().includes(q));$('leadList').innerHTML=items.map(l=>'<div class="item"><div class="itemtop"><strong>'+esc(l.name)+'</strong><span class="badge '+(l.do_not_contact?'red':l.status==='Verified'?'green':'')+'">'+esc(l.do_not_contact?'DO NOT CONTACT':l.status)+'</span></div><p>'+esc(l.market||'')+' · '+esc(l.website||'No website recorded')+'</p><p>'+esc(l.evidence||'No evidence recorded.')+'</p><p>'+esc(l.contact_email||'No contact email')+(l.source_url?' · <a href="'+safeLink(l.source_url)+'" target="_blank" rel="noopener noreferrer">Source</a>':'')+'</p><div class="itemactions"><button data-verify="'+esc(l.id)+'">Mark verified</button>'+(l.status!=='Won'?'<button data-win="'+esc(l.id)+'">Client accepted</button>':'<span class="badge green">Client accepted</span>')+(l.status==='Won'?'<button class="primary" data-builder-prompt="'+esc(l.id)+'">Generate AI-builder prompt</button>':'')+'<button data-dnc="'+esc(l.id)+'">'+(l.do_not_contact?'Remove DNC':'Do not contact')+'</button><button class="danger" data-delete-lead="'+esc(l.id)+'">Delete</button></div></div>').join('')||'<div class="empty">No prospects match this filter.</div>';renderSelects();}
+function pct(value){return value===null||value===undefined?'—':(Number(value)*100).toFixed(1)+'%';}
+function renderQualityMetrics(data){
+ const m=data?.overall||{},id=m.identity_verification||{},web=m.website_presence||{},status=m.website_status||{},contacts=m.contact_data||{};
+ $('qualitySamples').textContent=m.samples||0;
+ $('qualityIdentityLabelled').textContent=m.labelled_identity_samples||0;
+ $('qualityWebsiteLabelled').textContent=m.labelled_website_presence_samples||0;
+ $('qualityPrecision').textContent=pct(id.precision);
+ $('qualityOverall').innerHTML='<div class="row"><span>Identity verification accuracy</span><b>'+pct(id.accuracy)+'</b></div><div class="row"><span>Identity precision</span><b>'+pct(id.precision)+'</b></div><div class="row"><span>Identity recall</span><b>'+pct(id.recall)+'</b></div><div class="row"><span>Identity false-positive rate</span><b>'+pct(id.false_positive_rate)+'</b></div><div class="row"><span>Identity false-negative rate</span><b>'+pct(id.false_negative_rate)+'</b></div><div class="row"><span>Identity TP / FP / FN / TN</span><b>'+[id.true_positive,id.false_positive,id.false_negative,id.true_negative].join(' / ')+'</b></div><div class="row"><span>Website presence accuracy</span><b>'+pct(web.accuracy)+'</b></div><div class="row"><span>Website status accuracy</span><b>'+pct(status.accuracy)+' ('+status.compared+' compared)</b></div><div class="row"><span>Email accuracy</span><b>'+pct(contacts.email?.accuracy)+' ('+contacts.email?.reviewed+' reviewed)</b></div><div class="row"><span>Phone accuracy</span><b>'+pct(contacts.phone?.accuracy)+' ('+contacts.phone?.reviewed+' reviewed)</b></div><div class="row"><span>Unscored identity predictions</span><b>'+id.unscored_predictions+'</b></div><p class="tiny">'+esc(m.measurement_note||'')+'</p>';
+ const strata=(rows,key)=>rows?.map(x=>'<div class="item"><div class="itemtop"><strong>'+esc(x[key])+'</strong><span class="badge">'+x.samples+' samples</span></div><p>Identity precision: '+pct(x.identity_verification?.precision)+' · Recall: '+pct(x.identity_verification?.recall)+' · False positives: '+x.identity_verification?.false_positive+' · False negatives: '+x.identity_verification?.false_negative+'</p><p>Website presence accuracy: '+pct(x.website_presence?.accuracy)+' · Website status accuracy: '+pct(x.website_status?.accuracy)+'</p><p>Email accuracy: '+pct(x.contact_data?.email?.accuracy)+' · Phone accuracy: '+pct(x.contact_data?.phone?.accuracy)+'</p></div>').join('')||'';
+ $('qualityByIndustry').innerHTML=strata(data?.by_industry,'industry')||'<div class="empty">No industry samples yet.</div>';
+ $('qualityByLocation').innerHTML=strata(data?.by_location,'location')||'<div class="empty">No location samples yet.</div>';
+}
+function renderQualitySamples(){
+ const industry=$('qualityIndustryFilter')?.value||'',location=($('qualityLocationFilter')?.value||'').trim().toLowerCase(),review=$('qualityReviewFilter')?.value||'all';
+ const rows=state.qualitySamples.filter(x=>(!industry||x.industry===industry)&&(!location||x.location.toLowerCase().includes(location))&&(review==='all'||(review==='reviewed'?!!x.reviewed_at:!x.reviewed_at)));
+ $('qualitySampleList').innerHTML=rows.map(x=>{
+  const opt=(values,current)=>values.map(v=>'<option value="'+v+'" '+(current===v?'selected':'')+'>'+v.replaceAll('_',' ')+'</option>').join('');
+  const bool=(value)=>'<option value="" '+(value===null?'selected':'')+'>Not checked</option><option value="true" '+(value===1?'selected':'')+'>Correct</option><option value="false" '+(value===0?'selected':'')+'>Incorrect</option>';
+  const sourceLink=x.source_url?'<a href="'+safeLink(x.source_url)+'" target="_blank" rel="noopener noreferrer">Original listing</a>':'No listing URL';
+  const websiteLink=x.website_url?'<a href="'+safeLink(x.website_url)+'" target="_blank" rel="noopener noreferrer">Listed website</a>':'No website URL captured';
+  let snapshot={};try{snapshot=JSON.parse(x.prediction_evidence||'{}');}catch{}
+  const reasonText=(snapshot.verification?.reasons||[]).join(' ');
+  return '<article class="item" data-quality-sample="'+esc(x.id)+'"><div class="itemtop"><strong>'+esc(x.business_name)+'</strong><span class="badge">'+esc(x.industry)+' · '+esc(x.location)+'</span></div><p>MCAS prediction: identity '+(x.predicted_identity_verified?'verified':'not verified')+' · website '+esc(x.predicted_website_presence.replaceAll('_',' '))+' · status '+esc(x.predicted_website_state)+'</p><p>Captured evidence: '+sourceLink+' · '+websiteLink+'</p><p>Listed contact: email '+esc(x.predicted_contact_email||'not listed')+' · phone '+esc(x.predicted_contact_phone||'not listed')+'</p>'+(reasonText?'<p class="tiny">MCAS verification notes: '+esc(reasonText)+'</p>':'')+'<div class="cols"><div class="field"><label>Ground-truth business identity</label><select data-truth="identity">'+opt(['unknown','exists','does_not_exist'],x.ground_truth_identity)+'</select></div><div class="field"><label>Ground-truth website presence</label><select data-truth="presence">'+opt(['unknown','website_found','no_website_found'],x.ground_truth_website_presence)+'</select></div></div><div class="cols"><div class="field"><label>Ground-truth website status</label><select data-truth="website-state">'+opt(['not_assessed','working','broken','needs_improvement','access_restricted'],x.ground_truth_website_state)+'</select></div><div class="field"><label>Listed email accuracy</label><select data-truth="email">'+bool(x.ground_truth_email_correct)+'</select></div><div class="field"><label>Listed phone accuracy</label><select data-truth="phone">'+bool(x.ground_truth_phone_correct)+'</select></div></div><div class="field"><label>Independent validation evidence (required)</label><textarea data-truth="evidence" maxlength="4000" placeholder="Source URL, what was checked, date checked, and why this establishes the ground truth.">'+esc(x.reviewer_evidence||'')+'</textarea></div><div class="field"><label>Reviewer notes (optional)</label><textarea data-truth="notes" maxlength="2000">'+esc(x.reviewer_notes||'')+'</textarea></div><div class="itemactions"><span class="tiny">'+(x.reviewed_at?'Last reviewed: '+esc(x.reviewed_at):'Not independently reviewed')+'</span><button class="primary" data-save-quality="'+esc(x.id)+'">Save ground-truth review</button></div></article>';
+ }).join('')||'<div class="empty">No samples match these filters.</div>';
+}
+async function loadQualityValidation(){
+ try{const [samples,metrics]=await Promise.all([api('/api/quality/validation'),api('/api/quality/metrics')]);state.qualitySamples=samples;state.qualityMetrics=metrics;renderQualityMetrics(metrics);renderQualitySamples();}
+ catch(e){toast('Unable to load validation data: '+e.message,true);}
+}
+$('refreshQualityBtn')?.addEventListener('click',loadQualityValidation);
+['qualityIndustryFilter','qualityLocationFilter','qualityReviewFilter'].forEach(id=>$(id)?.addEventListener('input',renderQualitySamples));
+$('qualitySampleList')?.addEventListener('click',async e=>{
+ const button=e.target.closest('[data-save-quality]');if(!button)return;
+ const card=button.closest('[data-quality-sample]');if(!card)return;
+ const value=name=>card.querySelector('[data-truth="'+name+'"]')?.value??'';
+ const boolValue=name=>value(name)===''?null:value(name)==='true';
+ const evidence=value('evidence').trim();if(evidence.length<10){toast('Add independent source evidence of at least 10 characters.',true);return;}
+ button.disabled=true;
+ try{
+  await api('/api/quality/validation/'+encodeURIComponent(button.dataset.saveQuality),{method:'POST',body:JSON.stringify({
+   ground_truth_identity:value('identity'),ground_truth_website_presence:value('presence'),
+   ground_truth_website_state:value('website-state'),ground_truth_email_correct:boolValue('email'),
+   ground_truth_phone_correct:boolValue('phone'),reviewer_evidence:evidence,reviewer_notes:value('notes')
+  })});
+  await loadQualityValidation();toast('Ground-truth review saved. Quality metrics recalculated.');
+ }catch(err){toast(err.message,true);}finally{button.disabled=false;}
+});
+function renderLeads(){
+ const q=($('leadFilter')?.value||'').toLowerCase(),st=$('leadFilterStatus')?.value||'',website=$('leadFilterWebsite')?.value||'';
+ const items=state.leads.filter(l=>(!st||l.status===st)&&(!website||((l.website_presence||'unknown')===website))&&[l.name,l.market,l.evidence,l.contact_email].join(' ').toLowerCase().includes(q));
+ $('leadList').innerHTML=items.map(l=>{
+  const autoVerified=l.research_origin==='serper_places'&&l.verification_status==='verified';
+  const manualVerified=l.status==='Verified'&&!autoVerified;
+  const verificationTag=autoVerified?'<span class="badge green">AUTO-VERIFIED · '+esc(l.verification_score)+'/100 evidence</span>':(manualVerified?'<span class="badge green">MANUALLY REVIEWED</span>':'');
+  const pitchTag=l.research_origin==='serper_places'?(l.pitch_eligible?'<span class="badge green">PITCH-ELIGIBLE</span>':'<span class="badge amber">NO VERIFIED WEBSITE OPPORTUNITY</span>'):'';
+  const presence=l.website_presence==='website_found'?'<span class="badge green">WEBSITE FOUND</span>':l.website_presence==='no_website_found'?'<span class="badge amber">NO WEBSITE FOUND IN BOUNDED SEARCH</span>':'<span class="badge">WEBSITE STATUS UNKNOWN</span>';
+  let verificationBundle={};try{verificationBundle=JSON.parse(l.verification_evidence||'{}')}catch{}
+  const websiteState=verificationBundle.website_state||'not_checked';
+  const websiteStateLabels={working:'Working · basic response checks passed',broken:'Broken · two 404/410 checks confirmed',needs_improvement:'Needs improvement · homepage metadata gaps',access_restricted:'Access restricted · condition inconclusive',needs_review:'Needs review · check inconclusive',not_listed:'No website found in bounded search',not_checked:'Not checked'};
+  const websiteStateBadge='<span class="badge '+(websiteState==='working'?'green':websiteState==='broken'?'red':websiteState==='needs_improvement'?'amber':'')+'">'+esc(websiteStateLabels[websiteState]||websiteState)+'</span>';
+  const verificationDetails=(verificationBundle.verification?.reasons||[]).map(x=>esc(x)).join(' · ');
+  const checkedAt=verificationBundle.checked_at?'<p class="tiny">Evidence checked: '+esc(verificationBundle.checked_at)+'</p>':'';
+  const auditStatus=verificationBundle.website_audit?.http_status?'<p class="tiny">Website HTTP status: '+esc(verificationBundle.website_audit.http_status)+'. '+esc(verificationBundle.website_audit.note||'')+'</p>':'';
+  const concreteProblems=(verificationBundle.website_audit?.verified_problem_findings||[]).map(x=>'<li>'+esc(x.title)+': '+esc(x.evidence)+'</li>').join('');
+  const problemEvidence=concreteProblems?'<div class="warning"><b>Concrete homepage observations (verify manually before pitching):</b><ul>'+concreteProblems+'</ul></div>':'';
+  const verifyAction=(autoVerified||manualVerified)?'':'<button data-verify="'+esc(l.id)+'">Mark verified</button>';
+  return '<div class="item"><div class="itemtop"><strong>'+esc(l.name)+'</strong><span class="badge '+(l.do_not_contact?'red':l.status==='Verified'?'green':'')+'">'+esc(l.do_not_contact?'DO NOT CONTACT':l.status)+'</span></div>'+presence+websiteStateBadge+verificationTag+pitchTag+'<p>'+esc(l.market||'')+' · '+esc(l.website||'No website recorded')+'</p><p>'+esc(l.evidence||'No evidence recorded.')+'</p>'+(verificationDetails?'<p class="tiny"><b>Verification evidence:</b> '+verificationDetails+'</p>':'')+auditStatus+problemEvidence+checkedAt+'<p>'+esc(l.contact_email||'No corroborated contact email')+(l.source_url?' · <a href="'+safeLink(l.source_url)+'" target="_blank" rel="noopener noreferrer">Source</a>':'')+'</p><div class="itemactions">'+verifyAction+(l.status!=='Won'?'<button data-win="'+esc(l.id)+'">Client accepted</button>':'<span class="badge green">Client accepted</span>')+(l.status==='Won'?'<button class="primary" data-builder-prompt="'+esc(l.id)+'">Generate AI-builder prompt</button>':'')+'<button data-dnc="'+esc(l.id)+'">'+(l.do_not_contact?'Remove DNC':'Do not contact')+'</button><button class="danger" data-delete-lead="'+esc(l.id)+'">Delete</button></div></div>';
+ }).join('')||'<div class="empty">No prospects match this filter.</div>';
+ renderSelects();
+}
 function safeLink(raw){try{const u=new URL(raw,location.origin);return ['http:','https:'].includes(u.protocol)?esc(u.href):'#';}catch{return '#';}}
 function renderDrafts(){$('draftList').innerHTML=state.drafts.map(d=>{const gmailAction=d.gmail_draft_id?'<span class="badge green">IN GMAIL DRAFTS</span>':(state.gmail?.connected&&d.to_email?'<button class="primary" data-gmail="'+esc(d.id)+'">Create Gmail draft</button>':'');return '<div class="item"><div class="itemtop"><strong>'+esc(d.subject)+'</strong><span class="badge amber">PENDING APPROVAL</span></div><p>'+esc(d.kind)+' · '+esc(d.to_email||'No recipient')+' · '+esc(d.created_at||'')+'</p><p>'+esc(d.body.slice(0,260))+(d.body.length>260?'…':'')+'</p><div class="itemactions">'+gmailAction+'<button class="danger" data-delete-draft="'+esc(d.id)+'">Delete</button></div></div>';}).join('')||'<div class="empty">No drafts saved yet.</div>';}
 function renderFollowups(){$('followList').innerHTML=state.followups.map(f=>'<div class="item"><div class="itemtop"><strong>'+esc(f.title)+'</strong><span class="badge">'+esc(f.state)+'</span></div><p>'+esc(f.lead_name)+' · '+esc(f.due_at||'No due date')+'</p><p>'+esc(f.notes)+'</p>'+(f.state==='open'?'<div class="itemactions"><button data-follow-done="'+esc(f.id)+'">Mark complete</button></div>':'')+'</div>').join('')||'<div class="empty">No follow-up tasks yet.</div>';}
 function renderProposals(){$('proposalList').innerHTML=state.proposals.map(p=>'<div class="item"><div class="itemtop"><strong>'+esc(p.title)+'</strong><span class="badge">'+esc(p.state)+'</span></div><p>'+esc(p.content.slice(0,300))+'…</p></div>').join('')||'<div class="empty">No proposals saved yet.</div>';}
-$('leadFilter').addEventListener('input',renderLeads);$('leadFilterStatus').addEventListener('change',renderLeads);
+$('leadFilter').addEventListener('input',renderLeads);$('leadFilterStatus').addEventListener('change',renderLeads);$('leadFilterWebsite')?.addEventListener('change',renderLeads);
 $('leadForm').addEventListener('submit',async e=>{e.preventDefault();const data={name:$('leadName').value.trim(),website:$('leadWebsite').value.trim()||null,market:$('leadMarket').value.trim(),contact_email:$('leadEmail').value.trim()||null,contact_phone:$('leadPhone').value.trim()||null,source_url:$('leadSource').value.trim()||null,evidence:$('leadEvidence').value.trim(),status:$('leadStatus').value,do_not_contact:$('leadDnc').checked};try{await api('/api/leads',{method:'POST',body:JSON.stringify(data)});e.target.reset();$('leadMarket').value='Kenya';await loadAll();note('leadNotice','Prospect saved to your private workspace.');}catch(err){note('leadNotice',err.message,true);}});
 $('leadList').addEventListener('click',async e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.builderPrompt){try{note('builderPromptNotice','Generating website-builder prompt…');const d=await api('/api/leads/'+encodeURIComponent(b.dataset.builderPrompt)+'/builder-prompt',{method:'POST'});$('builderPromptText').value=d.prompt;$('builderPromptPanel').classList.remove('hide');note('builderPromptNotice',d.note);$('builderPromptPanel').scrollIntoView({behavior:'smooth',block:'nearest'});}catch(err){note('builderPromptNotice',err.message,true);}return;}const id=b.dataset.verify||b.dataset.win||b.dataset.dnc||b.dataset.deleteLead;if(!id)return;const l=state.leads.find(x=>x.id===id);if(!l)return;try{if(b.dataset.deleteLead){if(!confirm('Delete this prospect and related follow-up tasks?'))return;await api('/api/leads/'+encodeURIComponent(id),{method:'DELETE'});}else{const payload={name:l.name,website:l.website,market:l.market,evidence:l.evidence,status:b.dataset.win?'Won':b.dataset.verify?'Verified':l.status,contact_email:l.contact_email,contact_phone:l.contact_phone,source_url:l.source_url,do_not_contact:b.dataset.dnc?!l.do_not_contact:!!l.do_not_contact};await api('/api/leads/'+encodeURIComponent(id),{method:'PATCH',body:JSON.stringify(payload)});}await loadAll();}catch(err){toast(err.message,true);}});
 
 function websiteStateText(value){
- const labels={not_listed:"No website returned (not confirmed)",broken:"Listed website returned an error",needs_improvement:"Limited technical issues detected",working:"Website responded and basic checks passed",access_restricted:"Website blocked the check",needs_review:"Website could not be safely verified"};
+ const labels={not_checked:"Website not checked yet",not_listed:"No website URL returned by provider (not confirmed)",broken:"Listed website returned an error",needs_improvement:"Limited technical issues detected",working:"Website responded and basic checks passed",access_restricted:"Website blocked the check",needs_review:"Website could not be safely verified"};
  return labels[value]||"Needs manual verification";
 }
 $('startResearchBtn').addEventListener('click',async()=>{
@@ -345,21 +441,29 @@ $('startResearchBtn').addEventListener('click',async()=>{
    location,industry:$('researchIndustry').value,keywords:$('researchKeywords').value.trim(),
    max_results:Number($('researchLimit').value)
   })});
-  $('researchRunResults').innerHTML=d.results.map(x=>{
+  // Render every discovered candidate in one flat list.
+  const researchItems=Array.isArray(d.results)?d.results:[];
+  $('researchRunResults').innerHTML=researchItems.map(x=>{
    const label=websiteStateText(x.website_state);
-   const scoreLine=Number.isFinite(Number(x.opportunity_score))?'<p><b>Opportunity priority:</b> '+esc(x.opportunity_score)+'/100 <span class="tiny">(evidence-based sorting, not buying intent)</span></p>':'';
+   const verificationBadge=x.verified?'<span class="badge green">IDENTITY VERIFIED · '+esc(x.verification_score)+'/100 evidence</span>':(x.saved_as_candidate?'<span class="badge amber">PLACES CANDIDATE · MANUAL REVIEW REQUIRED</span>':(x.verification_status==='verification_unavailable'?'<span class="badge amber">VERIFICATION UNAVAILABLE · NOT SAVED</span>':'<span class="badge amber">NOT VERIFIED · NOT SAVED</span>'));
+   const verificationDetails=(x.verification_reasons||[]).length?'<p><b>Verification checks:</b> '+esc(x.verification_reasons.join(' '))+'</p>':'';
+   const verificationSources=(x.verification?.sources||[]).filter(v=>v.url&&(v.url.startsWith('https://')||v.url.startsWith('http://'))).map(v=>'<li>'+esc(v.label||v.type)+': <a href="'+safeLink(v.url)+'" target="_blank" rel="noopener noreferrer">'+esc(v.domain||v.url)+'</a></li>').join('');
+   const sourceEvidence=verificationSources?'<p><b>Verification evidence sources:</b></p><ul>'+verificationSources+'</ul>':'';
+   const pitchBadge=x.pitch_eligible?'<span class="badge green">WEBSITE OPPORTUNITY QUALIFIED</span>':'<span class="badge amber">NO VERIFIED PITCH OPPORTUNITY</span>';
+   const scoreLine=x.verified&&Number.isFinite(Number(x.opportunity_score))?'<p><b>Opportunity priority:</b> '+esc(x.opportunity_score)+'/100 <span class="tiny">(evidence-based sorting, not buying intent)</span></p>':'';
    const audit=x.website_audit?'<p><b>Quick check:</b> HTTP '+esc(x.website_audit.http_status??"unknown")+' · mobile viewport: '+esc(x.website_audit.has_viewport_meta===true?"detected":x.website_audit.has_viewport_meta===false?"not detected":"not checked")+' · meta description: '+esc(x.website_audit.has_meta_description===true?"detected":x.website_audit.has_meta_description===false?"not detected":"not checked")+' · H1: '+esc(x.website_audit.has_h1===true?"detected":x.website_audit.has_h1===false?"not detected":"not checked")+'</p>':'';
    const reasons=(x.score_reasons||[]).length?'<p class="tiny">Priority signals: '+esc(x.score_reasons.join("; "))+'</p>':'';
    const source='<a href="'+safeLink(x.source_url)+'" target="_blank" rel="noopener noreferrer">Serper / Google Maps result</a>';
-   const website=x.website?'<p>Website: <a href="'+safeLink(x.website)+'" target="_blank" rel="noopener noreferrer">'+esc(x.website)+'</a></p>':'<p>Serper did not return an official website link. Verify independently.</p>';
+   const website=x.website?'<p>Website: <a href="'+safeLink(x.website)+'" target="_blank" rel="noopener noreferrer">'+esc(x.website)+'</a></p>':'<p>No website link was returned. MCAS does not treat this as proof that the business has no website.</p>';
    const contactEmail=x.contact_email?'<a href="mailto:'+esc(x.contact_email)+'">'+esc(x.contact_email)+'</a>':'No public email listed';
    const contactPhone=x.contact_phone?'<a href="tel:'+encodeURIComponent(x.contact_phone)+'">'+esc(x.contact_phone)+'</a>':'No public phone listed';
-   const contact='<p><b>Public contact:</b> '+contactEmail+' · '+contactPhone+'</p>';
+   const contact='<p><b>Provider-listed contact (not independently verified):</b> '+contactEmail+' · '+contactPhone+'</p>'+(x.contact_email_corroborated?'<p class="tiny">Email also appeared in an independent matching public source.</p>':'');
    const pages=(x.pages||[]).map(v=>'<li>'+esc(v)+'</li>').join('');
-   const delivery=x.duplicate?'Already saved in your CRM; no duplicate proposal or email draft was created.':(x.gmail_draft_created?'Proposal, MCAS draft and Gmail draft created; nothing was sent.':(x.contact_email?'Proposal and MCAS draft saved. Gmail draft was not created: '+esc(x.gmail_draft_error||'check the Gmail connection in Integrations.'):'Proposal and MCAS draft saved. No public email was listed, so add a recipient after verification.'));
-   return '<div class="item"><div class="itemtop"><strong>'+esc(x.name)+'</strong><span class="badge '+(x.website_state==='broken'||x.website_state==='needs_improvement'?'amber':'')+'">'+esc(label)+'</span></div>'+scoreLine+reasons+website+contact+audit+'<p>'+esc(x.evidence||'No additional evidence returned.')+'</p><p><b>Recommended:</b> '+esc(x.recommendation||'Manual review')+'</p><ul>'+pages+'</ul><p>'+source+'</p><p class="tiny">'+delivery+'</p></div>';
-  }).join('')||'<div class="empty">No matching business records were found. Try a nearby administrative area or a broader category.</div>';
-  const summary=d.summary||{};note('researchRunNotice','Research finished in '+(d.resolved_location||d.location)+'. '+d.saved+' new prospects saved; '+d.results.length+' records reviewed. Highest priority score: '+(summary.highest_opportunity_score??'—')+'/100. '+d.attribution+' '+d.warning);
+   const delivery=!x.verified?(x.saved_as_candidate?'Saved to your prospects as Unverified. Confirm the business identity and check its website before outreach. No proposal or email draft was created.':'Not saved: independent public evidence did not meet MCAS verification rules. No proposal or outreach draft was created.'):(x.duplicate?'Already saved in your CRM; no duplicate proposal or email draft was created.':(!x.pitch_eligible?'Saved as a verified business, but no concrete website issue was confirmed. No proposal or outreach draft was created.':(x.gmail_draft_created?'Proposal, MCAS draft and Gmail draft created; nothing was sent.':(x.contact_email?'Proposal and MCAS draft saved. Gmail draft was not created: '+esc(x.gmail_draft_error||'check the Gmail connection in Integrations.'):'Proposal and MCAS draft saved. No public email was listed; recipient must be confirmed before outreach.'))));
+   return '<div class="item"><div class="itemtop"><strong>'+esc(x.name)+'</strong><span class="badge '+(x.website_state==='broken'||x.website_state==='needs_improvement'?'amber':'')+'">'+esc(label)+'</span></div>'+verificationBadge+pitchBadge+verificationDetails+sourceEvidence+scoreLine+reasons+website+contact+audit+'<p>'+esc(x.evidence||'No additional evidence returned.')+'</p>'+(x.recommendation?'<p><b>Recommended:</b> '+esc(x.recommendation)+'</p><ul>'+pages+'</ul>':'')+'<p>'+source+'</p><p class="tiny">'+delivery+'</p></div>';
+  }).join('')||'<div class="empty">No business candidates were returned by the discovery provider. Check the research query, location, Serper account and server logs.</div>';
+  const summary=d.summary||{}, limits=d.research_limits||{};
+  note('researchRunNotice','Research finished in '+(d.resolved_location||d.location)+'. Businesses discovered: '+(summary.returned_candidates||0)+'. New unverified prospects saved: '+(summary.new_prospects_saved||0)+'. Existing records: '+(summary.duplicate_candidates||0)+'. Places requests: '+(limits.places_searches??'unknown')+(limits.places_cache_hit?' (cached)':'')+'. Additional web searches: 0. Website checks: 0. Candidates require manual verification before any pitch. '+d.warning);
   await loadAll();
  }catch(e){$('researchRunResults').innerHTML='<div class="empty">No research results were saved. '+esc(e.message)+'</div>';note('researchRunNotice',e.message,true);}
  finally{btn.disabled=false;}
@@ -368,13 +472,32 @@ $('copyBuilderPrompt').addEventListener('click',async()=>{try{await navigator.cl
 $('searchBtn').addEventListener('click',async()=>{const q=$('researchQuery').value.trim();if(!q)return note('researchNotice','Enter a search query.',true);$('searchBtn').disabled=true;note('researchNotice','Searching public web results…');try{const d=await api('/api/research/search?q='+encodeURIComponent(q));$('researchResults').innerHTML=d.results.map(x=>'<div class="item"><strong>'+esc(x.title||'Untitled result')+'</strong><p>'+esc(x.description||'')+'</p><p><a href="'+safeLink(x.url)+'" target="_blank" rel="noopener noreferrer">'+esc(x.url)+'</a></p><div class="itemactions"><button data-save-result="'+esc(encodeURIComponent(JSON.stringify(x)))+'">Save as prospect</button></div></div>').join('')||'<div class="empty">No results returned.</div>';note('researchNotice',d.warning);}catch(e){note('researchNotice',e.message,true);}finally{$('searchBtn').disabled=false;}});
 $('researchResults').addEventListener('click',async e=>{const b=e.target.closest('[data-save-result]');if(!b)return;try{const x=JSON.parse(decodeURIComponent(b.dataset.saveResult));const host=new URL(x.url).hostname;await api('/api/leads',{method:'POST',body:JSON.stringify({name:x.title||host,website:null,market:'Unspecified',evidence:'Discovered in search result: '+(x.description||'Description not supplied')+'. Verify the business identity, website and claims before outreach.',source_url:x.url,status:'Unverified'})});await loadAll();note('researchNotice','Saved as an unverified prospect. Please check the source before contacting.');}catch(e){note('researchNotice','Could not save this result: '+e.message,true);}});
 $('auditBtn').addEventListener('click',async()=>{const url=$('auditUrl').value.trim();if(!url)return note('auditResult','Enter a public website URL.',true);$('auditBtn').disabled=true;note('auditResult','Checking website…');try{const d=await api('/api/audit-website',{method:'POST',body:JSON.stringify({url})});note('auditResult','HTTP '+d.http_status+' · Title: '+(d.title||'Not detected')+' · Mobile viewport tag: '+(d.has_viewport_meta===null?'Not checked':d.has_viewport_meta?'Found':'Not found')+' · '+d.note);}catch(e){note('auditResult',e.message,true);}finally{$('auditBtn').disabled=false;}});
+async function copyField(fieldId,noteId,label){
+ const field=$(fieldId);if(!field||!field.value.trim())return note(noteId,'Generate or enter the text first.',true);
+ try{await navigator.clipboard.writeText(field.value);note(noteId,label+' copied to your clipboard.');}
+ catch(_){field.focus();field.select();note(noteId,'Clipboard access was blocked. The text is selected; press Ctrl+C to copy it.');}
+}
 function selectedLead(id){return state.leads.find(l=>l.id===id);}
 function emailText(l){const name=l.name,evidence=(l.evidence||'').trim(),checked=evidence&&!/not checked|unknown|not verified|not yet verified/i.test(evidence),service=$('service').value.trim()||'professional, mobile-friendly websites';const evidenceLine=checked?'I noted this from the information available: '+evidence+' I have not treated this as a full audit.':'I came across your public business listing while researching '+(l.market||'your area')+'. I have not confirmed a specific website problem, so I do not want to make assumptions.';return 'Hello '+name+' team,\n\n'+evidenceLine+'\n\nI help businesses make it easier for customers to understand their services and get in touch through '+service+'. A practical starting point could be clear service information, a mobile-friendly layout and a simple enquiry path, shaped around what your team actually needs.\n\nWould a brief 10–15 minute conversation next week be useful? I can share a few relevant ideas first, with no obligation.\n\nBest regards,\n'+$('signature').value.trim()+'\n\nIf you would prefer not to receive another message from me, just reply and I will not contact you again.';}
+$('copyEmail').addEventListener('click',async()=>{
+ const subject=$('emailSubject').value.trim(),body=$('emailBody').value.trim();
+ if(!body)return note('emailNotice','Generate or enter an email first.',true);
+ const text=(subject?'Subject: '+subject+'\n\n':'')+body;
+ try{await navigator.clipboard.writeText(text);note('emailNotice','Email subject and body copied to your clipboard.');}
+ catch(_){$('emailBody').focus();$('emailBody').select();note('emailNotice','Clipboard access was blocked. The body is selected; press Ctrl+C to copy it.');}
+});
 $('genEmail').addEventListener('click',()=>{const l=selectedLead($('emailLead').value);if(!l)return note('emailNotice','Add a prospect first.',true);if(l.do_not_contact)return note('emailNotice','This prospect is marked do-not-contact. Outreach is blocked.',true);$('emailTo').value=l.contact_email||'';$('emailSubject').value='A website idea for '+l.name;$('emailBody').value=emailText(l);note('emailNotice','Draft generated from your recorded evidence. Verify before use.');});
-async function aiDraft(task){const l=selectedLead(task==='reply'?$('replyLead').value:task==='proposal'?$('proposalLead').value:$('emailLead').value);if(!l)return note(task==='reply'?'replyNotice':task==='proposal'?'proposalNotice':'emailNotice','Select a prospect first.',true);if(l.do_not_contact&&task!=='reply')return note(task==='proposal'?'proposalNotice':'emailNotice','Prospect is marked do-not-contact; outreach draft blocked.',true);try{const incoming=task==='reply'?$('incoming').value.trim():'';const service=task==='reply'?$('replyService').value:$('service').value;const d=await api('/api/assistant/draft',{method:'POST',body:JSON.stringify({lead_id:l.id,task,prospect_name:l.name,market:l.market||'',service:service||'website services',evidence:l.evidence||'',incoming})});if(task==='email'){$('emailBody').value=d.draft;$('emailSubject').value='A website idea for '+l.name;note('emailNotice',d.warning);}if(task==='reply'){$('replyBody').value=d.draft;note('replyNotice','AI reply generated. Review and edit it, then choose Save edited reply as new draft. Nothing was saved or sent automatically.');}if(task==='proposal'){$('proposalContent').value=d.draft;note('proposalNotice',d.warning);}}catch(e){note(task==='reply'?'replyNotice':task==='proposal'?'proposalNotice':'emailNotice',e.message,true);}}
+async function aiDraft(task){const l=selectedLead(task==='reply'?$('replyLead').value:task==='proposal'?$('proposalLead').value:$('emailLead').value);if(!l)return note(task==='reply'?'replyNotice':task==='proposal'?'proposalNotice':'emailNotice','Select a prospect first.',true);if(l.do_not_contact&&task!=='reply')return note(task==='proposal'?'proposalNotice':'emailNotice','Prospect is marked do-not-contact; outreach draft blocked.',true);try{const incoming=task==='reply'?$('incoming').value.trim():'';const service=task==='reply'?$('replyService').value:$('service').value;const d=await api('/api/assistant/draft',{method:'POST',body:JSON.stringify({lead_id:l.id,task,prospect_name:l.name,market:l.market||'',service:service||'website services',evidence:l.evidence||'',incoming})});if(task==='email'){
+ const generated=String(d.draft||'');
+ const parsed=generated.match(/^\s*Subject:\s*(.+?)\s*(?:\r?\n)+\s*(?:Email body:|Body:)\s*([\s\S]*)$/i);
+ $('emailSubject').value=parsed?parsed[1].trim():'A website idea for '+l.name;
+ $('emailBody').value=parsed?parsed[2].trim():generated;
+ note('emailNotice',d.warning);
+}if(task==='reply'){$('replyBody').value=d.draft;note('replyNotice','AI reply generated. Review and edit it, then choose Save edited reply as new draft. Nothing was saved or sent automatically.');}if(task==='proposal'){$('proposalContent').value=d.draft;note('proposalNotice',d.warning);}}catch(e){note(task==='reply'?'replyNotice':task==='proposal'?'proposalNotice':'emailNotice',e.message,true);}}
 $('aiEmail').addEventListener('click',()=>aiDraft('email'));$('aiProposal').addEventListener('click',()=>aiDraft('proposal'));
 async function saveDraft(kind,subject,body,to,leadId,noteId,autoGmail=false){try{const saved=await api('/api/drafts',{method:'POST',body:JSON.stringify({kind,subject,body,to_email:to||null,lead_id:leadId||null})});if(autoGmail&&state.gmail?.connected&&to){try{const synced=await api('/api/drafts/'+encodeURIComponent(saved.id)+'/gmail',{method:'POST'});await loadAll();note(noteId,'Saved in MCAS and created in your connected Gmail Drafts. '+(synced.message||'Nothing was sent.'));}catch(gmailError){await loadAll();note(noteId,'Saved in MCAS, but Gmail draft creation failed: '+gmailError.message+'. You can retry from the saved draft list. Nothing was sent.',true);}return;}await loadAll();if(autoGmail&&!to){note(noteId,'Saved in MCAS. Add and verify the recipient email, then create the Gmail draft from the saved draft list. Nothing was sent.');}else if(autoGmail&&!state.gmail?.connected){note(noteId,'Saved in MCAS. Connect your Gmail account in Integrations to create drafts in Gmail. Nothing was sent.');}else{note(noteId,'Saved as pending approval. No email was sent.');}}catch(e){note(noteId,e.message,true);}}
 $('saveEmail').addEventListener('click',()=>{const id=$('emailLead').value;const l=selectedLead(id);if(l?.do_not_contact)return note('emailNotice','Do-not-contact is active; cannot save an outreach email.',true);if(!$('emailBody').value.trim())return note('emailNotice','Write a message first.',true);saveDraft('Cold email',$('emailSubject').value||'Website enquiry',$('emailBody').value,$('emailTo').value,id,'emailNotice',true);});
+$('copyReply').addEventListener('click',()=>copyField('replyBody','replyNotice','Reply draft'));
 $('genReply').addEventListener('click',()=>aiDraft('reply'));
 $('saveReply').addEventListener('click',()=>{if(!$('replyBody').value.trim())return note('replyNotice','Generate a reply first.',true);saveDraft('Client reply','Reply draft',$('replyBody').value,$('replyTo').value,$('replyLead').value,'replyNotice');});
 $('genProposal').addEventListener('click',()=>{const l=selectedLead($('proposalLead').value);if(!l)return note('proposalNotice','Add a prospect first.',true);const title=$('proposalTitle').value||'Website project proposal for '+l.name;$('proposalTitle').value=title;$('proposalContent').value='PROJECT PROPOSAL\n'+title+'\n\nPrepared for: '+l.name+'\nMarket: '+(l.market||'Not specified')+'\n\n1. CURRENT CONTEXT\n'+(l.evidence||'The client requirements and current website condition must be confirmed before scope is finalised.')+'\n\n2. PROPOSED APPROACH\n• Discovery and confirmation of business goals\n• Information architecture and page structure\n• Responsive design and implementation\n• Contact / enquiry flow and essential integrations\n• Quality assurance, handover and launch support\n\n3. DELIVERABLES\nList the agreed pages, features, integrations, content responsibilities and handover items here.\n\n4. TIMELINE\n'+($('proposalTimeline').value||'To be agreed after scope confirmation')+'\n\n5. INVESTMENT\n'+($('proposalBudget').value||'Quotation to be confirmed after scope')+'\n\n6. ASSUMPTIONS AND EXCLUSIONS\nConfirm hosting, domain, third-party subscriptions, copywriting, maintenance and change requests in writing.\n\n7. NEXT STEPS\nApprove the final scope and written quotation before work begins.\n\nPrepared by: '+$('signature').value;note('proposalNotice','Editable proposal structure generated. Confirm scope and pricing before sharing.');});
@@ -386,7 +509,7 @@ $('proposalList').addEventListener('click',()=>{});
 $('gmailConnect').addEventListener('click',()=>{location.href='/api/integrations/gmail/start';});
 $('gmailDisconnect').addEventListener('click',async()=>{try{await api('/api/integrations/gmail',{method:'DELETE'});await loadAll();note('gmailNotice','Gmail disconnected.');}catch(e){note('gmailNotice',e.message,true);}});
 $('downloadExport').addEventListener('click',()=>{const pack={exported_at:new Date().toISOString(),leads:state.leads,drafts:state.drafts,followups:state.followups,proposals:state.proposals};const blob=new Blob([JSON.stringify(pack,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='mcas-workspace-export.json';a.click();URL.revokeObjectURL(a.href);note('exportNotice','Workspace export downloaded. Protect this file; it contains customer information.');});
-function queryFlags(){const u=new URL(location.href);const status=u.searchParams.get('gmail');if(status==='connected')note('gmailNotice','Google account connected. It matches your MCAS sign-in email.');else if(status==='cancelled')note('gmailNotice','Gmail connection was cancelled.');else if(status==='email_mismatch')note('gmailNotice','The Google account you selected does not match the email address you use to sign in to MCAS. No new Gmail connection was saved. Choose the matching Google account.',true);else if(status==='email_unverified')note('gmailNotice','Google did not confirm the selected account email. No Gmail connection was saved.',true);if(status){u.searchParams.delete('gmail');history.replaceState({},'',u.pathname);}const verifyToken=u.searchParams.get('verify_token');if(verifyToken){history.replaceState({},'',u.pathname);showEmailVerification(verifyToken,'','Your verification link is valid. Click Confirm email address below to activate your account. Opening the link alone does not complete verification.');}}
+function queryFlags(){const u=new URL(location.href);const status=u.searchParams.get('gmail');if(status==='connected')note('gmailNotice','Google account connected. It matches your MCAS sign-in email.');else if(status==='cancelled')note('gmailNotice','Gmail connection was cancelled.');else if(status==='email_mismatch')note('gmailNotice','The Google account you selected does not match the email address you use to sign in to MCAS. No new Gmail connection was saved. Choose the matching Google account.',true);else if(status==='email_unverified')note('gmailNotice','Google did not confirm the selected account email. No new Gmail connection was saved.',true);if(status){u.searchParams.delete('gmail');history.replaceState({},'',u.pathname);}if(u.searchParams.get('google')==='cancelled')note('authNotice','Google sign-in was cancelled. You can try again.');googleMfaPending=u.searchParams.get('google_mfa')==='1';if(googleMfaPending){u.searchParams.delete('google_mfa');history.replaceState({},'',u.pathname);$('mfaChallengeForm').classList.remove('hide');$('authForm').classList.add('hide');$('mfaLoginNotice').textContent='Google identity confirmed. Complete your administrator authenticator check.';}}
 
 const advisorProfiles={
  professional:{type:'Professional services website',pages:['Home with a clear value proposition','Services / expertise pages','About and credentials','Case studies or testimonials (with permission)','Contact / consultation request'],features:['Clear enquiry form with spam protection','Service-specific calls to action','Trust signals: credentials, team and verified testimonials','Search-friendly service and location pages'],quality:['Credible, restrained visual design','Fast mobile-first layouts','Accessible typography and contrast','Clear service descriptions and next steps']},
@@ -560,6 +683,8 @@ function advisorPrice(data,lead){
  return item;
 }
 function moneyKES(n){return 'KES '+Number(n).toLocaleString('en-KE');}
+const MCAS_KES_PER_USD=130;
+function moneyUSDFromKES(n){return '$'+(Number(n)/MCAS_KES_PER_USD).toLocaleString('en-US',{minimumFractionDigits:0,maximumFractionDigits:0});}
 function buildAdvisorPrompt(data,lead,price){
  const name=lead?.name||'BUSINESS NAME TO CONFIRM';
  const market=lead?.market||'Location to confirm';
@@ -614,7 +739,7 @@ function buildAdvisorPrompt(data,lead,price){
  '- A concise handover note covering how the owner edits content, connects the domain, configures hosting, forms, analytics and any third-party integrations.',
  '',
  'SCOPE AND COMMERCIAL NOTE',
- 'The MCAS estimate for the likely website category is '+price.label+': '+moneyKES(price.low)+'–'+moneyKES(price.high)+' as an indicative Kenya-market build range. This is not a budget instruction or a quote for the AI builder. Do not display this estimate on the public website unless the business owner specifically requests it.',
+ 'The indicative project estimate is '+moneyUSDFromKES(price.low)+'–'+moneyUSDFromKES(price.high)+' USD (approximately '+moneyKES(price.low)+'–'+moneyKES(price.high)+'). Planning conversion assumption: KES '+MCAS_KES_PER_USD+' per USD; confirm the current exchange rate before quoting. This is an indicative Kenya-market estimate, not a fixed quotation or a promise. Do not display this estimate on the public website unless the business owner specifically requests it.',
  '',
  'Before building, state any essential missing information as questions or placeholders. Then create the full website. Prioritise clarity, trust, accessibility, mobile usability, maintainability and a useful customer journey.'
  ].join('\n');
@@ -634,14 +759,15 @@ function generateAdvisorPlan(){
  '<div class="item"><h3>Core website requirements</h3><ul>'+universalHtml+'</ul></div>'+
  '<div class="item"><h3>Design direction and quality standard</h3><ul>'+data.quality.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul></div>'+
  '<div class="warning"><b>Before build:</b> Confirm business facts, page content, owner access, integrations, data collected, domain, hosting, maintenance and acceptance criteria with the business. Do not publish placeholder claims or fake testimonials.</div>';
- let marketNote='Published Kenyan 2026 price guides vary substantially by scope: simple business sites commonly appear around KES 15,000–40,000; fuller company sites around KES 35,000–120,000; e-commerce commonly around KES 50,000–250,000; and custom portals around KES 120,000–500,000+. MCAS uses these as broad planning bands, not a guaranteed market price.';
- $('advisorPricingOutput').innerHTML='<div class="item"><span class="badge green">Indicative Kenya-market project value</span><h3>'+esc(price.label)+'</h3><div class="metric">'+moneyKES(price.low)+' – '+moneyKES(price.high)+'</div><p>'+esc(price.scope)+'</p><p class="tiny">'+esc(marketNote)+'</p></div>'+
+ let marketNote='The USD values are converted from broad Kenya-market planning bands using an illustrative KES 130 per USD assumption, not a live exchange-rate feed. Confirm the exchange rate, client requirements, local market and final scope before making a quote.';
+ const priceHtml='<div class="item"><span class="badge green">Indicative website project estimate · USD</span><h3>'+esc(price.label)+'</h3><div class="metric">'+moneyUSDFromKES(price.low)+' – '+moneyUSDFromKES(price.high)+'</div><p class="tiny">Approximate KES equivalent: '+moneyKES(price.low)+' – '+moneyKES(price.high)+'. Assumed rate: KES '+MCAS_KES_PER_USD+' per USD; verify live FX before quoting.</p><p>'+esc(price.scope)+'</p><p class="tiny">'+esc(marketNote)+'</p></div>';
+ $('advisorPricingOutput').innerHTML=priceHtml+
  '<div class="item"><h3>Possible recurring costs (budget separately)</h3><p>Domain and hosting: approximately KES 3,500–15,000 per year. Optional maintenance: approximately KES 5,000–25,000 per month, depending on provider and scope.</p><p class="tiny">Indicative published guide figures; renewals, traffic, email, premium plugins, payment fees, content production and taxes may be additional.</p></div>'+
  '<div class="item"><h3>Pricing references (Kenya, 2026)</h3><p><a href="https://wfw.co.ke/blog/how-much-does-a-website-cost-in-kenya" target="_blank" rel="noopener noreferrer">Wallflower Agency — business, company and e-commerce price guide (13 September 2026)</a></p><p><a href="https://www.thabititechnologies.com/blog/website-cost-in-kenya" target="_blank" rel="noopener noreferrer">Thabiti Technologies — website types and custom system ranges (4 October 2026)</a></p><p><a href="https://digital4africa.com/website-cost-kenya/" target="_blank" rel="noopener noreferrer">Digital4Africa — website and running-cost guide (October 2026)</a></p><p><a href="https://edgecom.co.ke/website-cost-kenya" target="_blank" rel="noopener noreferrer">Edgecom — published starting prices and VAT notes (October 2026)</a></p></div>'+
  '<div class="warning"><b>Estimate only:</b> Actual value depends on the final page count, design, copywriting, integrations, e-commerce/booking workflow, data migration, hosting, support and developer experience. Confirm scope before quoting. Some published prices exclude VAT; check tax treatment and third-party charges separately.</div>';
  $('advisorPromptText').value=buildAdvisorPrompt(data,lead,price);
  $('advisorPromptPanel').classList.remove('hide');
- note('advisorNotice','Full plan, evidence-led diagnosis, Kenya pricing estimate and AI-builder prompt generated. Review the evidence and scope before using the prompt.');
+ note('advisorNotice','Full plan, evidence-led diagnosis, indicative USD estimate and AI-builder prompt generated. The FX conversion is an assumption, not a live rate. Review evidence and scope before quoting.');
 }
 $('advisorLead').addEventListener('change',()=>{renderAdvisorProspectPicker();updateAdvisorProspect();});
 $('advisorLeadPickerButton').addEventListener('click',()=>{const menu=$('advisorLeadPickerMenu');if(menu.classList.contains('hide'))openAdvisorProspectPicker();else closeAdvisorProspectPicker();});
@@ -674,5 +800,135 @@ $('advisorCopyPrompt').addEventListener('click',async()=>{
 });
 
 
+
+
 queryFlags();boot();
+})();
+
+
+// Standalone audit/competitor controls. These deliberately do not depend on
+// the main app closure's private $, api, note or esc bindings.
+(()=>{
+ 'use strict';
+ const byId=id=>document.getElementById(id);
+ const htmlEscape=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+ const showNotice=(id,message,isError=false)=>{
+  const element=byId(id);
+  if(!element)return;
+  element.textContent=message;
+  element.className='notice'+(isError?' error':'');
+ };
+ const readCookie=name=>{
+  const part=document.cookie.split('; ').find(item=>item.startsWith(name+'='));
+  if(!part)return '';
+  try{return decodeURIComponent(part.slice(name.length+1));}catch(_){return part.slice(name.length+1);}
+ };
+ const parseResponse=async response=>{
+  const type=response.headers.get('content-type')||'';
+  if(type.includes('application/json'))return await response.json();
+  return await response.text();
+ };
+ const postJson=async(path,payload)=>{
+  const csrfResponse=await fetch('/api/auth/csrf',{credentials:'same-origin',cache:'no-store'});
+  const csrfData=await parseResponse(csrfResponse);
+  if(!csrfResponse.ok)throw new Error('Could not initialise the MCAS security token. Refresh the page and sign in again.');
+  const csrf=readCookie('mcas_csrf')||(csrfData&&csrfData.csrf_token)||'';
+  if(!csrf)throw new Error('MCAS security token is missing. Refresh the page and sign in again.');
+  const response=await fetch(path,{
+   method:'POST',
+   credentials:'same-origin',
+   headers:{'Accept':'application/json','Content-Type':'application/json','X-CSRF-Token':csrf},
+   body:JSON.stringify(payload)
+  });
+  const data=await parseResponse(response);
+  if(!response.ok){
+   const message=(data&&typeof data==='object'&&(data.detail||data.message))||data;
+   throw new Error(typeof message==='string'?message:'Request failed ('+response.status+').');
+  }
+  if(!data||typeof data!=='object')throw new Error('MCAS returned an unexpected response.');
+  return data;
+ };
+ const safePublicHttpUrl=value=>{
+  try{
+   const url=new URL(String(value));
+   return ['http:','https:'].includes(url.protocol)?url.href:'#';
+  }catch(_){return '#';}
+ };
+ const renderAuditResult=data=>{
+  const root=byId('advancedAuditResult');
+  if(!root)return;
+  const audit=data.advanced_audit||{};
+  const scores=audit.scores||{};
+  const scoreRows=Object.entries(scores).map(([key,value])=>
+   '<div class="row"><span>'+htmlEscape(String(key).replace(/_/g,' '))+'</span><b>'+htmlEscape(value)+'/100</b></div>'
+  ).join('');
+  const findings=(audit.findings||[]).map(item=>
+   '<div class="item"><div class="itemtop"><strong>'+htmlEscape(item.title)+'</strong><span class="badge">'+htmlEscape(item.priority)+'</span></div><p>'+htmlEscape(String(item.category||'').replace(/_/g,' '))+' · '+htmlEscape(item.evidence)+'</p></div>'
+  ).join('');
+  const limitations=(audit.limitations||[]).map(item=>'<li>'+htmlEscape(item)+'</li>').join('');
+  root.innerHTML='<div class="good"><b>Overall static audit score: '+htmlEscape(audit.overall_score??'N/A')+'/100</b><p>HTTP '+htmlEscape(data.http_status)+' · '+htmlEscape(data.url)+'</p></div>'+
+   scoreRows+'<h3>Findings for manual review</h3>'+
+   (findings||'<div class="empty">No review findings were detected by this limited check.</div>')+
+   '<h3>Important limitations</h3><ul>'+limitations+'</ul>';
+ };
+ byId('runAdvancedAudit')?.addEventListener('click',async()=>{
+  const button=byId('runAdvancedAudit');
+  const input=byId('advancedAuditUrl');
+  const url=input?.value.trim()||'';
+  if(!url)return showNotice('advancedAuditNotice','Enter a public website URL.',true);
+  button.disabled=true;
+  showNotice('advancedAuditNotice','Checking public page safely…');
+  try{
+   const result=await postJson('/api/audit-website',{url});
+   renderAuditResult(result);
+   showNotice('advancedAuditNotice','Audit completed. Findings are observations for manual verification, not confirmed vulnerabilities.');
+  }catch(error){
+   showNotice('advancedAuditNotice',error.message||'The audit request failed.',true);
+  }finally{
+   button.disabled=false;
+  }
+ });
+ byId('runCompetitorIntel')?.addEventListener('click',async()=>{
+  const button=byId('runCompetitorIntel');
+  const leadId=byId('competitorLead')?.value||'';
+  if(!leadId)return showNotice('competitorNotice','Select a saved prospect first.',true);
+  button.disabled=true;
+  showNotice('competitorNotice','Searching public business listings and checking candidate websites…');
+  try{
+   const data=await postJson('/api/competitor-intelligence',{
+    lead_id:leadId,
+    industry:byId('competitorIndustry')?.value||'restaurant',
+    max_results:Number(byId('competitorLimit')?.value||5)
+   });
+   const summary=data.comparison||{};
+   const items=data.competitors||[];
+   const target=data.target||{};
+   const targetScore=target.website_audit?.overall_score;
+   const cards=items.map(item=>
+    '<div class="item"><div class="itemtop"><strong>'+htmlEscape(item.name)+'</strong><span class="badge">'+htmlEscape(item.website_state)+'</span></div>'+
+    '<p>'+htmlEscape(item.category||'Category unconfirmed')+' · '+htmlEscape(item.address||'Address unavailable')+'</p>'+
+    '<p>'+htmlEscape(item.website||'No website URL returned by provider')+'</p>'+
+    '<p>Rating: '+htmlEscape(item.rating??'Not listed')+' ('+htmlEscape(item.rating_count??0)+' reviews shown by provider)</p>'+
+    '<p><a href="'+htmlEscape(safePublicHttpUrl(item.source_url||''))+'" target="_blank" rel="noopener noreferrer">View discovery source</a></p></div>'
+   ).join('');
+   const limitations=(data.limitations||[]).map(htmlEscape).join('<br>');
+   const root=byId('competitorResult');
+   if(root){
+    root.innerHTML='<div class="good"><b>'+htmlEscape(summary.competitors_found||0)+' candidate competitors found</b>'+
+     '<p>Target website: '+htmlEscape(target.website_state||'not listed')+
+     (targetScore!==undefined?' · static audit '+htmlEscape(targetScore)+'/100':'')+'</p>'+
+     '<p>Websites listed: '+htmlEscape(summary.with_listed_websites||0)+
+     ' · No website listed: '+htmlEscape(summary.without_listed_websites||0)+
+     ' · Responding: '+htmlEscape(summary.responding_websites||0)+'</p></div>'+
+     (cards||'<div class="empty">No candidate competitors were returned for this query.</div>')+
+     (limitations?'<p class="tiny">'+limitations+'</p>':'');
+   }
+   showNotice('competitorNotice','Research complete. Treat matches and provider data as unverified candidates.');
+  }catch(error){
+   showNotice('competitorNotice',error.message||'Competitor research failed.',true);
+  }finally{
+   button.disabled=false;
+  }
+ });
+ console.info('[MCAS] Standalone audit and competitor controls initialised.');
 })();
