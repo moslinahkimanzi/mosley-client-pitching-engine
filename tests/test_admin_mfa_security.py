@@ -41,6 +41,13 @@ class AdminSecurityTest(unittest.TestCase):
         self.mfa_required_patch = patch("backend.app.ADMIN_MFA_REQUIRED", True)
         self.mfa_required_patch.start()
         self.addCleanup(self.mfa_required_patch.stop)
+        # Keep unit tests deterministic and never send to real addresses from .env.
+        self.email_sender_patch = patch("backend.app.send_email_verification_message", return_value=False)
+        self.email_sender_patch.start()
+        self.addCleanup(self.email_sender_patch.stop)
+        self.production_mode_patch = patch("backend.app.IS_PROD", False)
+        self.production_mode_patch.start()
+        self.addCleanup(self.production_mode_patch.stop)
 
     def csrf(self, client):
         return client.get("/api/auth/csrf").json()["csrf_token"]
