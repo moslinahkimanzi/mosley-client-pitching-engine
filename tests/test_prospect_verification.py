@@ -3,6 +3,7 @@ import unittest
 from backend.prospect_verification import (
     name_match_score,
     qualify_website_opportunity,
+    verified_website_problem_findings,
     verify_candidate,
 )
 
@@ -126,6 +127,36 @@ class ProspectVerificationTests(unittest.TestCase):
         self.assertTrue(eligible)
         self.assertEqual(reason, "identity_linked_website_returned_404_or_410_twice")
 
+
+    def test_only_concrete_supported_findings_are_used_for_opportunity(self):
+        audit = {
+            "advanced_audit": {
+                "findings": [
+                    {"title": "Meta description", "category": "seo", "evidence": "No meta description detected."},
+                    {"title": "Cookie security flags", "category": "trust", "evidence": "Cookie flags cannot be assessed."},
+                    {"title": "HSTS", "category": "transport_security_headers", "evidence": "HSTS header not observed."},
+                ]
+            }
+        }
+        findings = verified_website_problem_findings(audit)
+        self.assertEqual([x["title"] for x in findings], ["Meta description"])
+        verification = {"status": "verified", "website_identity_match": True}
+        eligible, reason = qualify_website_opportunity(verification, "needs_improvement", audit)
+        self.assertTrue(eligible)
+        self.assertEqual(reason, "verified_first_party_homepage_technical_observations")
+
+    def test_generic_security_header_observation_alone_is_not_sales_opportunity(self):
+        audit = {
+            "advanced_audit": {
+                "findings": [
+                    {"title": "HSTS", "category": "transport_security_headers", "evidence": "HSTS header not observed."}
+                ]
+            }
+        }
+        verification = {"status": "verified", "website_identity_match": True}
+        eligible, _ = qualify_website_opportunity(verification, "needs_improvement", audit)
+        self.assertFalse(eligible)
+
     def test_metadata_gap_requires_website_identity_match(self):
         verification = {"status": "verified", "website_identity_match": False}
         audit = {"has_viewport_meta": False}
@@ -134,7 +165,7 @@ class ProspectVerificationTests(unittest.TestCase):
         verification["website_identity_match"] = True
         eligible, reason = qualify_website_opportunity(verification, "needs_improvement", audit)
         self.assertTrue(eligible)
-        self.assertEqual(reason, "confirmed_homepage_metadata_gaps")
+        self.assertEqual(reason, "verified_first_party_homepage_technical_observations")
 
 
 if __name__ == "__main__":
