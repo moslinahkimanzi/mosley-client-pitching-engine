@@ -182,6 +182,10 @@ def verify_candidate(
         reasons.append("The listed website's page title matches the business name.")
     if website and website_host and _is_acceptable_source_host(website_host):
         score += 5
+    website_domain_corroborated = bool(website_host and website_host in matched_hosts)
+    if website_domain_corroborated:
+        reasons.append("An independent matching public result references the listed website domain.")
+
     all_public_text = " ".join(combined_source_text)
     listed_phone = _phone_digits(place.get("phoneNumber") or place.get("phone"))
     phone_corroborated = bool(
@@ -238,6 +242,7 @@ def verify_candidate(
         "reasons": reasons,
         "sources": sources,
         "website_identity_match": website_identity_match,
+        "website_domain_corroborated": website_domain_corroborated,
         "phone_corroborated": phone_corroborated,
         "email_corroborated": email_corroborated,
         "closed": is_closed,
@@ -259,8 +264,10 @@ def qualify_website_opportunity(
     website_audit = website_audit or {}
     if verification.get("status") != "verified":
         return False, "business_identity_not_verified"
-    if website_state == "broken" and int(website_audit.get("confirmed_unavailable_checks") or 0) >= 2:
-        return True, "listed_website_returned_404_or_410_twice"
+    if (website_state == "broken"
+            and int(website_audit.get("confirmed_unavailable_checks") or 0) >= 2
+            and (verification.get("website_identity_match") or verification.get("website_domain_corroborated"))):
+        return True, "identity_linked_website_returned_404_or_410_twice"
     if website_state == "needs_improvement" and verification.get("website_identity_match"):
         missing = [
             key for key in ("has_viewport_meta", "has_meta_description")
