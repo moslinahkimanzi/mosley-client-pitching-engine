@@ -1755,9 +1755,10 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
         "local " + query,
     ]
     places = []
+    discovery_warnings = []
     gl = os.getenv("SERPER_GL", "").strip()
     hl = os.getenv("SERPER_HL", "en").strip()
-    for discovery_query in discovery_queries:
+    for query_index, discovery_query in enumerate(discovery_queries):
         cache_key = discovery_query.casefold()
         cached = _SERPER_CACHE.get(cache_key)
         candidates = cached[1] if cached and time.time() - cached[0] < _SERPER_CACHE_TTL else None
@@ -1767,7 +1768,13 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                 request_payload["gl"] = gl
             if hl:
                 request_payload["hl"] = hl
-            data = serper_request("places", request_payload)
+            try:
+                data = serper_request("places", request_payload)
+            except HTTPException as exc:
+                if query_index == 0:
+                    raise
+                discovery_warnings.append(str(exc.detail))
+                continue
             candidates = [item for item in (data.get("places") or []) if isinstance(item, dict)]
             _SERPER_CACHE[cache_key] = (time.time(), candidates)
         places.extend(candidates)
@@ -2181,7 +2188,8 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
         },
         "saved": saved_count, "source": "Serper Places + Serper web corroboration",
         "attribution": "Identity verification requires a structured Places listing plus matching public evidence.",
-        "warning": "Verified means evidence-based identity matching only. It does not prove current trading, contact details are deliverable, marketing is permitted, or the business wants a website. If independent search is unavailable, candidates are withheld rather than treated as verified. MCAS creates drafts only for verified businesses with a concrete website issue; drafts are never sent automatically.",
+        "discovery_warnings": discovery_warnings,
+        "warning": "Verified means evidence-based identity matching only. It does not prove current trading, contact details are deliverable, marketing is permitted, or the business wants a website. If independent search is unavailable, candidates are withheld rather than treated as verified. MCAS creates drafts only for verified businesses with a concrete website issue; drafts are never sent automatically. Discovery uses up to three Places searches (maximum 60 candidates) plus one independent web corroboration query per candidate, so API usage can be materially higher than a single search.",
     }
 
 @app.post("/api/leads/{lead_id}/builder-prompt")
