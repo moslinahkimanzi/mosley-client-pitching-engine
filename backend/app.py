@@ -235,6 +235,9 @@ def init_db():
             predicted_website_state TEXT NOT NULL,
             predicted_contact_email TEXT,
             predicted_contact_phone TEXT,
+            source_url TEXT,
+            website_url TEXT,
+            prediction_evidence TEXT NOT NULL DEFAULT '{}',
             ground_truth_identity TEXT NOT NULL DEFAULT 'unknown',
             ground_truth_website_presence TEXT NOT NULL DEFAULT 'unknown',
             ground_truth_website_state TEXT NOT NULL DEFAULT 'not_assessed',
@@ -373,6 +376,9 @@ def init_db():
         add_column(c, "leads", "opportunity_reason", "TEXT NOT NULL DEFAULT ''")
         add_column(c, "leads", "verified_at", "TEXT")
         add_column(c, "leads", "website_presence", "TEXT NOT NULL DEFAULT 'unknown'")
+        add_column(c, "prospect_validation_samples", "source_url", "TEXT")
+        add_column(c, "prospect_validation_samples", "website_url", "TEXT")
+        add_column(c, "prospect_validation_samples", "prediction_evidence", "TEXT NOT NULL DEFAULT '{}'")
         add_column(c, "drafts", "to_email", "TEXT")
         add_column(c, "drafts", "gmail_draft_id", "TEXT")
         add_column(c, "integrations", "account_email", "TEXT")
@@ -1852,13 +1858,16 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                 """INSERT INTO prospect_validation_samples(
                     id,user_id,business_name,industry,location,
                     predicted_identity_verified,predicted_website_presence,predicted_website_state,
-                    predicted_contact_email,predicted_contact_phone,created_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    predicted_contact_email,predicted_contact_phone,source_url,website_url,
+                    prediction_evidence,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     sample_id, user["id"], name, payload.industry, location,
                     int(bool(verification["verified"])), website_presence,
                     website_state if website_state in {"working","broken","needs_improvement","access_restricted"} else "unknown",
-                    email, phone, now(), now(),
+                    email, phone, source_url, website,
+                    json.dumps({"evidence": evidence, "verification": verification, "website_audit": website_audit}, ensure_ascii=False)[:16000],
+                    now(), now(),
                 ),
             )
         if address:
