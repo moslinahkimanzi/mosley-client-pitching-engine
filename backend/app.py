@@ -35,8 +35,10 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
 
 from backend.advanced_audit import analyze_document
-from backend.prospect_verification import verify_candidate, qualify_website_opportunity
-from backend.quality_metrics import build_quality_metrics, website_presence_category
+from backend.prospect_verification import (verify_candidate, qualify_website_opportunity,
+    find_business_website_candidate)
+from backend.quality_metrics import (build_quality_metrics, website_presence_category,
+    classify_research_group, select_balanced_research_results)
 
 try:
     from cryptography.fernet import Fernet, InvalidToken
@@ -1745,34 +1747,57 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
         raise HTTPException(422, "Enter a town, city or named administrative area.")
 
     query = serper_query_for(payload)
-    cache_key = query.casefold()
-    cached = _SERPER_CACHE.get(cache_key)
-    places = cached[1] if cached and time.time() - cached[0] < _SERPER_CACHE_TTL else None
-    if places is None:
-        request_payload = {"q": query}
-        gl = os.getenv("SERPER_GL", "").strip()
-        hl = os.getenv("SERPER_HL", "en").strip()
-        if gl:
-            request_payload["gl"] = gl
-        if hl:
-            request_payload["hl"] = hl
-        data = serper_request("places", request_payload)
-        places = [item for item in (data.get("places") or []) if isinstance(item, dict)]
-        _SERPER_CACHE[cache_key] = (time.time(), places)
+    # Three bounded discovery variants broaden coverage without pretending that
+    # one top-ranked Places response is a complete directory of a location.
+    discovery_queries = [
+        query,
+        "independent " + query,
+        "local " + query,
+    ]
+    places = []
+    discovery_warnings = []
+    gl = os.getenv("SERPER_GL", "").strip()
+    hl = os.getenv("SERPER_HL", "en").strip()
+    for query_index, discovery_query in enumerate(discovery_queries):
+        cache_key = discovery_query.casefold()
+        cached = _SERPER_CACHE.get(cache_key)
+        candidates = cached[1] if cached and time.time() - cached[0] < _SERPER_CACHE_TTL else None
+        if candidates is None:
+            request_payload = {"q": discovery_query, "num": 20}
+            if gl:
+                request_payload["gl"] = gl
+            if hl:
+                request_payload["hl"] = hl
+            try:
+                data = serper_request("places", request_payload)
+            except HTTPException as exc:
+                if query_index == 0:
+                    raise
+                discovery_warnings.append(str(exc.detail))
+                continue
+            candidates = [item for item in (data.get("places") or []) if isinstance(item, dict)]
+            _SERPER_CACHE[cache_key] = (time.time(), candidates)
+        places.extend(candidates)
+    # Hard cap: a maximum of 60 Places candidates per run. Each candidate can
+    # also consume one independent web corroboration query.
+    places = places[:60]
 
     discovered = []
     saved_count = verified_count = rejected_count = pitch_ready_count = 0
     seen_names = set()
     corroboration_service_error = None
 
+    # Scan the bounded Places response instead of stopping after N total
+    # businesses. Equal-sized groups require evaluating enough candidates.
     for place in places:
-        if len(discovered) >= payload.max_results:
-            break
         name = str(place.get("title") or place.get("name") or "").strip()
-        if not name or name.casefold() in seen_names:
-            continue
-        seen_names.add(name.casefold())
         address = str(place.get("address") or "").strip()
+        dedupe_key = re.sub(r"[^a-z0-9]+", " ", name.casefold()).strip() + "|" + re.sub(
+            r"[^a-z0-9]+", " ", address.casefold()
+        ).strip()
+        if not name or dedupe_key in seen_names:
+            continue
+        seen_names.add(dedupe_key)
         category = str(place.get("category") or place.get("type") or "").strip()
         website_value = place.get("website") or place.get("websiteUrl")
         website = None
@@ -1837,6 +1862,48 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                 corroboration_service_error = corroboration_error
                 web_results = []
 
+        # Places can omit the official website even when one exists. Search
+        # corroboration results for a likely first-party domain before ever
+        # assigning the bounded "no website found" category.
+        if not website and not corroboration_error:
+            candidate_website = find_business_website_candidate(
+                name, location, address, web_results
+            )
+            if candidate_website:
+                try:
+                    candidate_audit = safe_site_fetch(candidate_website)
+                    candidate_status = int(candidate_audit.get("http_status") or 0)
+                    if candidate_status in {404, 410}:
+                        retry_audit = safe_site_fetch(candidate_website)
+                        candidate_audit["retry_http_status"] = retry_audit.get("http_status")
+                        if int(retry_audit.get("http_status") or 0) in {404, 410}:
+                            candidate_audit["confirmed_unavailable_checks"] = 2
+                            candidate_audit["website_candidate_source"] = "independent_search"
+                            website_state = "broken"
+                            website = candidate_website
+                            website_audit = candidate_audit
+                        else:
+                            website = candidate_website
+                            website_audit = retry_audit
+                            website_state = "needs_review"
+                    else:
+                        website = candidate_website
+                        website_audit = candidate_audit
+                        if 200 <= candidate_status < 400:
+                            website_state = "needs_improvement" if (
+                                candidate_audit.get("has_viewport_meta") is False or
+                                candidate_audit.get("has_meta_description") is False or
+                                candidate_audit.get("title") is None
+                            ) else "working"
+                        elif candidate_status in {401, 403, 429}:
+                            website_state = "access_restricted"
+                        else:
+                            website_state = "needs_review"
+                except HTTPException:
+                    website = candidate_website
+                    website_state = "needs_review"
+                    website_audit = {"url": candidate_website, "note": "First-party website candidate could not be checked safely."}
+
         verification = verify_candidate(
             place=place, location=location, web_results=web_results,
             website=website, website_audit=website_audit, source_url=source_url,
@@ -1853,6 +1920,9 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
         website_presence = website_presence_category(
             website, verification, search_completed=not bool(corroboration_error)
         )
+        research_group = classify_research_group(
+            verification, website_presence, website_state, website_audit
+        )
         if address:
             tags["addr:street"] = address
         strategy = business_strategy(tags)
@@ -1866,7 +1936,8 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             "Automated identity verification: " + verification["status"] + ". "
             "Evidence score: " + str(verification["evidence_score"]) +
             "/100; this is a rule-based evidence score, not a probability. "
-            "Website state: " + website_state + "."
+            "Website state: " + website_state + ". "
+            "Balanced research group: " + (research_group or "unclassified") + "."
         )
         if category:
             evidence += " Provider-listed category: " + category + "."
@@ -1909,7 +1980,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                     int(bool(verification["verified"])), website_presence,
                     website_state if website_state in {"working","broken","needs_improvement","access_restricted"} else "unknown",
                     email, phone, source_url, website,
-                    json.dumps({"evidence": evidence, "verification": verification, "website_audit": website_audit}, ensure_ascii=False)[:16000],
+                    json.dumps({"evidence": evidence, "verification": verification, "website_audit": website_audit, "research_group": research_group}, ensure_ascii=False)[:16000],
                     now(), now(),
                 ),
             )
@@ -1924,7 +1995,8 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                 "verification_reasons": verification["reasons"],
                 "verification_error": corroboration_error,
                 "website": website, "website_state": website_state,
-                "website_presence": website_presence, "validation_sample_id": sample_id,
+                "website_presence": website_presence, "research_group": research_group,
+                "validation_sample_id": sample_id,
                 "evidence": evidence, "source_url": source_url,
                 "opportunity_score": score, "score_reasons": score_reasons,
                 "pitch_eligible": False, "opportunity_reason": "business_identity_not_verified",
@@ -1953,7 +2025,8 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                     "verification_status": "verified",
                     "verification_score": verification["evidence_score"],
                     "website": website, "website_state": website_state,
-                    "website_presence": website_presence, "validation_sample_id": sample_id,
+                    "website_presence": website_presence, "research_group": research_group,
+                    "validation_sample_id": sample_id,
                     "evidence": evidence, "source_url": source_url,
                     "opportunity_score": score, "score_reasons": score_reasons,
                     "pitch_eligible": bool(existing["pitch_eligible"]),
@@ -2048,7 +2121,8 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             "verification_score": verification["evidence_score"],
             "verification_reasons": verification["reasons"],
             "website": website, "website_state": website_state,
-            "website_presence": website_presence, "validation_sample_id": sample_id,
+            "website_presence": website_presence, "research_group": research_group,
+            "validation_sample_id": sample_id,
             "evidence": evidence, "source_url": source_url,
             "contact_email": email, "contact_email_corroborated": verification["email_corroborated"],
             "contact_phone": phone, "contact_phone_corroborated": verification["phone_corroborated"],
@@ -2067,6 +2141,12 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             "location": location, "industry": payload.industry, "query": query[:160],
             "provider": "Serper", "results": len(discovered), "verified": verified_count,
             "rejected": rejected_count, "saved": saved_count, "pitch_ready": pitch_ready_count,
+            "target_per_group": payload.max_results,
+            "verified_group_counts": {
+                key: sum(1 for item in discovered
+                         if item.get("verified") and item.get("saved") and item.get("research_group") == key)
+                for key in ("website_found", "no_website_found", "broken_website")
+            },
         })
     discovered.sort(key=lambda item: (
         bool(item.get("verified")), bool(item.get("pitch_eligible")),
@@ -2076,22 +2156,46 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
     for item in discovered:
         state = item["website_state"]
         state_counts[state] = state_counts.get(state, 0) + 1
+    balanced = select_balanced_research_results(discovered, payload.max_results)
+    group_counts = {
+        key: sum(1 for item in discovered
+                if item.get("verified") and item.get("saved") and item.get("research_group") == key)
+        for key in ("website_found", "no_website_found", "broken_website")
+    }
     ranked = sorted((x.get("opportunity_score", 0) for x in discovered if x.get("verified")), reverse=True)
     return {
         "location": location, "resolved_location": location, "query": query,
         "industry": payload.industry,
         "provider": "Serper Places + independent Serper web corroboration",
         "results": discovered,
+        "balanced_results": balanced["balanced_results"],
+        "additional_results": balanced["additional_results"],
+        "balance": {
+            "requested_per_group": payload.max_results,
+            "balanced_per_group": balanced["balanced_per_group"],
+            "available_by_group": balanced["available_by_group"],
+            "shortfalls": balanced["shortfalls"],
+            "groups": {
+                "website_found": "Verified business with an identity-linked website that responded or was access-restricted",
+                "no_website_found": "Verified business for which no first-party website was found in the bounded search",
+                "broken_website": "Verified business with an identity-linked website returning HTTP 404/410 on two checks",
+            },
+            "note": "The same number is selected from each group. If evidence is insufficient, MCAS returns fewer from every group and reports the shortfall; it never fabricates or relabels prospects.",
+        },
         "summary": {
             "reviewed": len(discovered), "verified_businesses": verified_count,
             "rejected_unverified_candidates": rejected_count,
             "new_prospects_saved": saved_count, "pitch_ready": pitch_ready_count,
-            "website_states": state_counts,
+            "website_states": state_counts, "website_research_groups": group_counts,
+            "balanced_per_group": balanced["balanced_per_group"],
+            "balanced_total": len(balanced["balanced_results"]),
+            "additional_candidates": len(balanced["additional_results"]),
             "highest_opportunity_score": ranked[0] if ranked else 0,
         },
         "saved": saved_count, "source": "Serper Places + Serper web corroboration",
         "attribution": "Identity verification requires a structured Places listing plus matching public evidence.",
-        "warning": "Verified means evidence-based identity matching only. It does not prove current trading, contact details are deliverable, marketing is permitted, or the business wants a website. If independent search is unavailable, candidates are withheld rather than treated as verified. MCAS creates drafts only for verified businesses with a concrete website issue; drafts are never sent automatically.",
+        "discovery_warnings": discovery_warnings,
+        "warning": "Verified means evidence-based identity matching only. It does not prove current trading, contact details are deliverable, marketing is permitted, or the business wants a website. If independent search is unavailable, candidates are withheld rather than treated as verified. MCAS creates drafts only for verified businesses with a concrete website issue; drafts are never sent automatically. Discovery uses up to three Places searches (maximum 60 candidates) plus one independent web corroboration query per candidate, so API usage can be materially higher than a single search.",
     }
 
 @app.post("/api/leads/{lead_id}/builder-prompt")

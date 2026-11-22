@@ -85,6 +85,69 @@ def _location_tokens(location: str, address: str) -> set[str]:
     return location_tokens | address_tokens
 
 
+# These hosts can help corroborate that a business exists, but they are not
+# treated as the business's own website when searching for an official domain.
+_NON_WEBSITE_HOSTS = _NON_CORROBORATING_HOSTS + (
+    "yelp.com", "tripadvisor.com", "yellowpages.com", "foursquare.com",
+    "mapquest.com", "hotfrog.com", "booking.com", "expedia.com",
+    "opentable.com", "ubereats.com", "doordash.com", "glovoapp.com",
+    "justdial.com", "trustpilot.com", "zomato.com", "deliveroo.com",
+)
+
+
+def find_business_website_candidate(
+    business_name: str,
+    location: str,
+    address: str,
+    web_results: list[dict] | None = None,
+) -> str | None:
+    """Find a likely first-party domain in corroborating search results.
+
+    This is only a candidate URL. Callers must fetch it and validate the
+    returned page/domain before classifying the business as having a website.
+    Directory, booking, review and social platforms are deliberately excluded.
+    """
+    candidates = []
+    locality_tokens = _location_tokens(location, address)
+    for result in web_results or []:
+        if not isinstance(result, dict):
+            continue
+        link = result.get("link") or result.get("url")
+        host = _host(link)
+        if not link or not host:
+            continue
+        if any(host == blocked or host.endswith("." + blocked)
+               for blocked in _NON_WEBSITE_HOSTS):
+            continue
+        if any(marker in host for marker in ("directory", "listing", "review", "maps")):
+            continue
+        title = str(result.get("title") or "")
+        snippet = str(result.get("snippet") or result.get("description") or "")
+        match_text = title + " " + snippet
+        name_score = name_match_score(business_name, match_text)
+        locality_match = bool(locality_tokens & set(normalise_text(match_text).split()))
+        host_tokens = set(re.findall(r"[a-z0-9]+", host))
+        distinctive_name_tokens = {
+            token for token in _name_tokens(business_name)
+            if len(token) >= 4 and token not in {
+                "restaurant", "restaurants", "hotel", "hotels", "salon",
+                "cafe", "clinic", "medical", "school", "shop", "store",
+                "services", "service", "group", "company", "business",
+            }
+        }
+        # Require the domain itself to carry a distinctive business-name token.
+        # This intentionally abstains when a search result could be a directory,
+        # news article or unrelated third-party profile.
+        domain_name_match = bool(distinctive_name_tokens & host_tokens)
+        if name_score < 0.8 or not locality_match or not domain_name_match:
+            continue
+        candidates.append((name_score, len(snippet), str(link)))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return candidates[0][2]
+
+
 def _phone_digits(value: object) -> str:
     return re.sub(r"\D", "", str(value or ""))
 
