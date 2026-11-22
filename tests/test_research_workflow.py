@@ -104,6 +104,21 @@ class ResearchWorkflowTest(unittest.TestCase):
         self.assertEqual(client.get("/api/proposals").json(), [])
         self.assertEqual(client.get("/api/drafts").json(), [])
 
+        csrf = client.get("/api/auth/csrf").json()["csrf_token"]
+        blocked_draft = client.post(
+            "/api/drafts",
+            json={"lead_id": prospect["lead_id"], "kind": "Cold email", "subject": "Test", "body": "Test"},
+            headers={"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(blocked_draft.status_code, 409, blocked_draft.text)
+        csrf = client.get("/api/auth/csrf").json()["csrf_token"]
+        blocked_proposal = client.post(
+            "/api/proposals",
+            json={"lead_id": prospect["lead_id"], "title": "Test", "content": "Test"},
+            headers={"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(blocked_proposal.status_code, 409, blocked_proposal.text)
+
     def test_unverified_places_candidate_is_not_saved_or_pitched(self):
         client, csrf = self._registered_client()
         places_response = {
