@@ -296,7 +296,7 @@ def current_user(request: Request):
     if not token:
         raise HTTPException(401, "Sign in required")
     with db() as c:
-        row = c.execute("""SELECT users.id,users.email FROM sessions
+        row = c.execute("""SELECT users.id,users.email,users.google_subject FROM sessions
             JOIN users ON users.id=sessions.user_id
             WHERE token_hash=? AND expires_at>?""",
             (token_hash(token), int(time.time()))).fetchone()
@@ -305,12 +305,14 @@ def current_user(request: Request):
     return dict(row)
 
 def user_is_admin(user: dict) -> bool:
-    """Administrator identities are explicitly configured by the operator, never self-selected."""
+    """Only explicitly allowlisted identities with a verified Google link are admins in production."""
     allowed = {
         item.strip().lower()
         for item in os.getenv("MCAS_ADMIN_EMAILS", "").split(",")
         if item.strip()
     }
+    if IS_PROD and not user.get("google_subject"):
+        return False
     return str(user.get("email", "")).strip().lower() in allowed
 
 def require_admin(user: dict):
@@ -567,6 +569,8 @@ def validate_email(email: Optional[str]):
 
 @app.post("/api/auth/register", status_code=201)
 def register(payload: RegisterIn, response: Response):
+    if IS_PROD:
+        raise HTTPException(410, "Password registration is disabled. Use Google sign-in to create your MCAS account.")
     email = payload.email.strip().lower()
     validate_email(email)
     if len(set(payload.password)) < 5:
@@ -587,6 +591,8 @@ def register(payload: RegisterIn, response: Response):
 
 @app.post("/api/auth/login")
 def login(payload: LoginIn, response: Response, request: Request):
+    if IS_PROD:
+        raise HTTPException(410, "Password sign-in is disabled. Use Google sign-in to access your MCAS account.")
     normalized_email = payload.email.strip().lower()
     ip = request.client.host if request.client else "unknown"
     email_tag = hashlib.sha256(normalized_email.encode()).hexdigest()
@@ -621,7 +627,7 @@ def logout(request: Request, response: Response):
 
 @app.get("/api/auth/me")
 def me(user=Depends(current_user)):
-    return {**user, "is_admin": user_is_admin(user)}
+    return {"id": user["id"], "email": user["email"], "is_admin": user_is_admin(user)}
 
 @app.get("/api/leads")
 def list_leads(user=Depends(current_user)):
