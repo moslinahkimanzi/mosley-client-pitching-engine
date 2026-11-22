@@ -54,6 +54,8 @@ def verify_google_id_token(id_token: str, client_id: str, expected_nonce_hash: s
     except Exception as exc:
         raise ValueError("Google returned a malformed ID token") from exc
 
+    if not isinstance(header, dict) or not isinstance(claims, dict):
+        raise ValueError("Google ID token header or claims have an invalid format")
     if header.get("alg") != "RS256" or not header.get("kid"):
         raise ValueError("Google ID token used an unsupported signing algorithm")
     jwk = next((item for item in _google_jwks() if item.get("kid") == header.get("kid")
