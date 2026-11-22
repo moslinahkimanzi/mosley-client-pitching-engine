@@ -2141,6 +2141,12 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             "location": location, "industry": payload.industry, "query": query[:160],
             "provider": "Serper", "results": len(discovered), "verified": verified_count,
             "rejected": rejected_count, "saved": saved_count, "pitch_ready": pitch_ready_count,
+            "target_per_group": payload.max_results,
+            "verified_group_counts": {
+                key: sum(1 for item in discovered
+                         if item.get("verified") and item.get("saved") and item.get("research_group") == key)
+                for key in ("website_found", "no_website_found", "broken_website")
+            },
         })
     discovered.sort(key=lambda item: (
         bool(item.get("verified")), bool(item.get("pitch_eligible")),
