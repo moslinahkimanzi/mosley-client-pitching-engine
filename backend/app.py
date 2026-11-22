@@ -390,7 +390,7 @@ async def security_middleware(request: Request, call_next):
     response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
     if request.url.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
-    csp = "default-src 'self'; img-src 'self' data: https://*.googleusercontent.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self' https://accounts.google.com/gsi/client; connect-src 'self' https://accounts.google.com https://www.googleapis.com; frame-src https://accounts.google.com; base-uri 'self'; form-action 'self' https://accounts.google.com; frame-ancestors 'none'; object-src 'none'
+    csp = "default-src 'self'; img-src 'self' data: https://*.googleusercontent.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self' https://accounts.google.com/gsi/client; connect-src 'self' https://accounts.google.com https://www.googleapis.com; frame-src https://accounts.google.com; base-uri 'self'; form-action 'self' https://accounts.google.com; frame-ancestors 'none'; object-src 'none'"
     if IS_PROD:
         csp += "; upgrade-insecure-requests"
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
