@@ -23,8 +23,157 @@
 .advisor-prospect-option-meta{display:block;margin-top:2px;font-size:11px;color:var(--muted)}
 .advisor-prospect-empty{padding:12px;text-align:center;color:var(--muted);font-size:12px;border:1px dashed #30425d;border-radius:8px}
 .advisor-prospect-trigger:focus-visible,.advisor-prospect-option:focus-visible,.advisor-prospect-menu>input:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+
+/* Public customer landing page */
+#auth.marketing{max-width:none;width:100%;margin:0;padding:0}
+.marketing-shell{max-width:1180px;margin:0 auto;padding:0 28px}
+.marketing-nav{display:flex;align-items:center;justify-content:space-between;gap:22px;padding:22px 0}
+.marketing-brand{font-size:22px;font-weight:900;letter-spacing:.055em;color:var(--text);white-space:nowrap}
+.marketing-brand em{font-style:normal;color:var(--blue)}
+.marketing-links{display:flex;align-items:center;gap:25px;flex-wrap:wrap}
+.marketing-links a{color:#b9c9df;text-decoration:none;font-size:13px}
+.marketing-links a:hover{color:white}
+.marketing-nav-cta,.marketing-btn{display:inline-flex;align-items:center;justify-content:center;gap:9px;padding:12px 17px;border-radius:10px;text-decoration:none;font-weight:750;border:1px solid #477fc8;background:linear-gradient(135deg,#3477db,#2455a6);color:white;box-shadow:0 12px 25px #1b4e9630}
+.marketing-btn.secondary{background:#13223a;border-color:#354d6e;color:#e7f0ff;box-shadow:none}
+.marketing-hero{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(340px,.95fr);gap:42px;align-items:center;padding:74px 0 66px}
+.marketing-eyebrow{display:inline-flex;align-items:center;gap:8px;padding:7px 11px;border:1px solid #36577d;border-radius:100px;background:#12243d;color:#b8d5ff;font-size:11px;font-weight:750;letter-spacing:.08em;text-transform:uppercase}
+.marketing-eyebrow i{width:7px;height:7px;background:var(--green);border-radius:50%}
+.marketing-hero h1{max-width:720px;margin:19px 0 17px;font-size:clamp(38px,5.2vw,64px);line-height:1.04;letter-spacing:-.055em}
+.marketing-hero h1 span{color:#86b4ff}
+.marketing-lead{max-width:650px;color:#a9bbd4;font-size:17px;line-height:1.75}
+.marketing-actions{display:flex;gap:12px;flex-wrap:wrap;margin:27px 0 15px}
+.marketing-proofline{font-size:12px;color:#8599b5}
+.marketing-proofline strong{color:#c4d5eb}
+.marketing-board{border:1px solid #344d6d;border-radius:22px;padding:19px;background:linear-gradient(150deg,#182a45,#0e192b);box-shadow:0 30px 80px #0006;position:relative;overflow:hidden}
+.marketing-board:before{content:"";position:absolute;width:270px;height:270px;right:-120px;top:-140px;background:#477fc833;filter:blur(4px);border-radius:50%}
+.marketing-board-head{position:relative;display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:17px}
+.marketing-board-title{font-weight:800;font-size:14px}
+.marketing-board-label{font-size:10px;color:#9db1cb}
+.marketing-board-flow{position:relative;display:grid;gap:10px}
+.marketing-board-step{display:grid;grid-template-columns:38px minmax(0,1fr) auto;align-items:center;gap:11px;padding:13px;border:1px solid #2b405e;background:#0e1a2d;border-radius:12px}
+.marketing-step-icon{width:36px;height:36px;display:grid;place-items:center;border-radius:10px;background:#203b60;color:#a8cbff;font-size:17px}
+.marketing-step-copy strong{display:block;font-size:12px}
+.marketing-step-copy span{display:block;color:#8297b5;font-size:10px;margin-top:3px}
+.marketing-step-status{font-size:10px;color:#a9e7d2;white-space:nowrap}
+.marketing-board-foot{position:relative;border-top:1px solid #2a3e5b;margin-top:14px;padding-top:12px;color:#879cb8;font-size:10px}
+.marketing-section{padding:70px 0;border-top:1px solid #1c2b42}
+.marketing-section-head{max-width:760px;margin-bottom:28px}
+.marketing-section-kicker{font-size:11px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:#86b4ff}
+.marketing-section h2{font-size:clamp(27px,3.3vw,40px);line-height:1.15;letter-spacing:-.04em;margin:9px 0 12px}
+.marketing-section-head p{color:#99acc7;font-size:15px;line-height:1.7;margin:0}
+.marketing-feature-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.marketing-feature{padding:21px;border:1px solid #293e5b;border-radius:15px;background:linear-gradient(145deg,#14233a,#0f192a)}
+.marketing-feature-icon{width:39px;height:39px;display:grid;place-items:center;border-radius:11px;background:#203b60;color:#a9ceff;font-size:18px;margin-bottom:14px}
+.marketing-feature h3{font-size:15px;margin:0 0 8px}
+.marketing-feature p{color:#94a8c3;font-size:12px;line-height:1.75;margin:0}
+.marketing-steps{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.marketing-step-card{padding:18px;border-top:2px solid #477fc8;border-radius:12px;background:#101c2f}
+.marketing-step-number{font-size:11px;letter-spacing:.1em;color:#83b4ff;font-weight:800}
+.marketing-step-card h3{font-size:14px;margin:9px 0 7px}
+.marketing-step-card p{font-size:12px;color:#91a5c1;line-height:1.7;margin:0}
+.marketing-split{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.marketing-trust{padding:23px;border:1px solid #2a405e;background:#101c2f;border-radius:16px}
+.marketing-trust h3{font-size:16px;margin:0 0 10px}
+.marketing-trust p,.marketing-trust li{color:#99acc6;font-size:12px;line-height:1.8}
+.marketing-trust ul{padding-left:18px;margin:10px 0 0}
+.marketing-faq{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.marketing-faq details{padding:16px;border:1px solid #2b405d;background:#101c2f;border-radius:12px}
+.marketing-faq summary{font-size:13px;font-weight:750;cursor:pointer}
+.marketing-faq p{font-size:12px;line-height:1.75;color:#96a9c3;margin-bottom:0}
+.marketing-final{padding:38px;border:1px solid #385c85;border-radius:20px;background:radial-gradient(ellipse at 100% 0,#294e7c 0,transparent 55%),linear-gradient(135deg,#172b47,#101a2c);text-align:center}
+.marketing-final h2{margin:0 auto 12px;max-width:700px}
+.marketing-final p{color:#a6bad4;max-width:680px;margin:0 auto 20px;line-height:1.7}
+.marketing-final #googleSignInButton{display:flex;justify-content:center;min-height:46px;margin:18px auto 8px}
+.marketing-final #authNotice{max-width:560px;margin:10px auto}
+.marketing-footer{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:25px 0 32px;border-top:1px solid #1c2b42;color:#7f93af;font-size:11px}
+@media(max-width:900px){.marketing-hero{grid-template-columns:1fr;gap:27px;padding:48px 0}.marketing-board{max-width:650px}.marketing-feature-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.marketing-steps{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:620px){.marketing-shell{padding:0 17px}.marketing-nav{align-items:flex-start}.marketing-links{gap:12px;justify-content:flex-end}.marketing-links a:not(.marketing-nav-cta){display:none}.marketing-nav-cta{padding:9px 11px;font-size:11px}.marketing-hero h1{font-size:40px}.marketing-lead{font-size:15px}.marketing-feature-grid,.marketing-steps,.marketing-split,.marketing-faq{grid-template-columns:1fr}.marketing-section{padding:48px 0}.marketing-final{padding:24px 17px}.marketing-board-step{grid-template-columns:34px minmax(0,1fr)}.marketing-step-status{grid-column:2}}
 </style></head><body>
-<div id="auth" class="authwrap hide"><div class="authcard"><div class="authlogo">MOSLEY <em>MCAS</em></div><h1>Build better client relationships.</h1><p class="muted">Sign in securely with Google. Your first Google sign-in creates your MCAS workspace automatically.</p><div id="googleSignInButton" style="display:flex;justify-content:center;min-height:44px;margin:22px 0"></div><div id="authNotice" class="notice" role="status" aria-live="polite"></div><div class="footnote">Administrator maintenance is shown only when the verified Google email matches MCAS_ADMIN_EMAILS on the server. No password bootstrap tab or email-verification link is used.</div></div></div>
+<div id="auth" class="marketing hide">
+  <div class="marketing-shell">
+    <header class="marketing-nav">
+      <a class="marketing-brand" href="#" aria-label="Mosley MCAS home">MOSLEY <em>MCAS</em></a>
+      <nav class="marketing-links" aria-label="Public navigation">
+        <a href="#features">Platform</a><a href="#workflow">How it works</a><a href="#trust">Trust & control</a><a href="#faq">FAQ</a>
+        <a class="marketing-nav-cta" href="#get-started">Sign in / Get started</a>
+      </nav>
+    </header>
+    <main>
+      <section class="marketing-hero" aria-labelledby="marketingTitle">
+        <div>
+          <span class="marketing-eyebrow"><i></i> Evidence-first client acquisition</span>
+          <h1 id="marketingTitle">Find the opportunity. <span>Prove the need.</span> Start the right conversation.</h1>
+          <p class="marketing-lead">MCAS gives independent web professionals and small digital teams one workspace to research businesses, check public website signals, shape a practical offer and prepare personalised outreach for human review.</p>
+          <div class="marketing-actions">
+            <a class="marketing-btn" href="#get-started">Explore MCAS <span aria-hidden="true">→</span></a>
+            <a class="marketing-btn secondary" href="#features">See what it does</a>
+          </div>
+          <p class="marketing-proofline"><strong>Research → evidence → offer → reviewed outreach.</strong><br>Built to support your judgement, not replace it.</p>
+        </div>
+        <div class="marketing-board" aria-label="Illustration of the MCAS workflow">
+          <div class="marketing-board-head"><div><div class="marketing-board-title">The opportunity workflow</div><div class="marketing-board-label">One connected process, from discovery to draft</div></div><span class="badge green">Human-led</span></div>
+          <div class="marketing-board-flow">
+            <div class="marketing-board-step"><span class="marketing-step-icon">⌕</span><span class="marketing-step-copy"><strong>Discover relevant businesses</strong><span>Public listings and source links</span></span><span class="marketing-step-status">Research</span></div>
+            <div class="marketing-board-step"><span class="marketing-step-icon">⌁</span><span class="marketing-step-copy"><strong>Check the website evidence</strong><span>Reachability and selected technical signals</span></span><span class="marketing-step-status">Verify</span></div>
+            <div class="marketing-board-step"><span class="marketing-step-icon">✦</span><span class="marketing-step-copy"><strong>Build a scoped opportunity</strong><span>Website direction, pages and estimate</span></span><span class="marketing-step-status">Plan</span></div>
+            <div class="marketing-board-step"><span class="marketing-step-icon">✉</span><span class="marketing-step-copy"><strong>Prepare a message for review</strong><span>Save in MCAS or create a Gmail draft</span></span><span class="marketing-step-status">Approve</span></div>
+          </div>
+          <div class="marketing-board-foot">Illustrative workflow · No customer metrics or performance claims are implied.</div>
+        </div>
+      </section>
+      <section id="features" class="marketing-section">
+        <div class="marketing-section-head"><span class="marketing-section-kicker">A focused client-growth workspace</span><h2>More than a contact list. More than an audit report.</h2><p>MCAS connects prospect research to a defensible service opportunity, then helps you prepare the next step without pretending that search results are confirmed facts.</p></div>
+        <div class="marketing-feature-grid">
+          <article class="marketing-feature"><div class="marketing-feature-icon">◎</div><h3>Opportunity-led prospect research</h3><p>Search business categories and locations, keep the source attached, and organise candidates in a private prospect workspace. Discovery records remain unverified until you check them.</p></article>
+          <article class="marketing-feature"><div class="marketing-feature-icon">⌁</div><h3>Website evidence checks</h3><p>Review public reachability, HTTP responses, page metadata, mobile viewport signals, image text alternatives, form-label signals and selected security headers. Findings include limits and context.</p></article>
+          <article class="marketing-feature"><div class="marketing-feature-icon">✦</div><h3>Website opportunity planning</h3><p>Turn observed gaps or a missing listing link into a proposal for further discovery: recommended structure, useful features, build requirements and an indicative scope-based estimate.</p></article>
+          <article class="marketing-feature"><div class="marketing-feature-icon">▤</div><h3>Commercial preparation</h3><p>Prepare proposals, evidence-aware email drafts, reply suggestions and follow-up tasks in the same workspace. AI-generated text remains editable and must be checked by you.</p></article>
+          <article class="marketing-feature"><div class="marketing-feature-icon">✉</div><h3>Gmail drafts under your control</h3><p>Connect your own Gmail account to create a draft for you to inspect. MCAS does not read or monitor your inbox and does not contain an email-send action.</p></article>
+          <article class="marketing-feature"><div class="marketing-feature-icon">◇</div><h3>Evidence and confidence labels</h3><p>Separate a website that responded, a website that returned an error, a restricted check and a listing with no website URL. “Not listed” is never presented as proof that no website exists.</p></article>
+        </div>
+      </section>
+      <section id="workflow" class="marketing-section">
+        <div class="marketing-section-head"><span class="marketing-section-kicker">A repeatable workflow</span><h2>Move from research to a reviewed offer in four steps.</h2><p>Keep the investigation, commercial thinking and customer communication connected instead of juggling unrelated tools and notes.</p></div>
+        <div class="marketing-steps">
+          <article class="marketing-step-card"><span class="marketing-step-number">01 / DISCOVER</span><h3>Choose a market</h3><p>Set a location, business category and optional keyword. Review the returned public sources and save relevant prospects.</p></article>
+          <article class="marketing-step-card"><span class="marketing-step-number">02 / VERIFY</span><h3>Check before claiming</h3><p>Run a fresh website check, inspect the findings and correct incomplete prospect details. Do not treat a listing gap as a confirmed defect.</p></article>
+          <article class="marketing-step-card"><span class="marketing-step-number">03 / PACKAGE</span><h3>Define the service</h3><p>Use the website advisor and proposal workflow to outline pages, functionality, implementation scope and an indicative estimate.</p></article>
+          <article class="marketing-step-card"><span class="marketing-step-number">04 / REVIEW</span><h3>Prepare the conversation</h3><p>Edit the message, confirm its evidence and recipient, save it for approval, then create a Gmail draft when you choose.</p></article>
+        </div>
+      </section>
+      <section id="trust" class="marketing-section">
+        <div class="marketing-section-head"><span class="marketing-section-kicker">Designed around control</span><h2>Credibility comes from showing what was checked—and what was not.</h2><p>MCAS is designed to help you make better-informed decisions, not to manufacture certainty or send unsolicited messages behind your back.</p></div>
+        <div class="marketing-split">
+          <article class="marketing-trust"><h3>Evidence before outreach</h3><ul><li>Source links are retained with prospect research.</li><li>Website status is based on the response observed during a check.</li><li>Restricted or unavailable checks are not labelled as broken.</li><li>AI content is a draft, not proof of a claim.</li></ul></article>
+          <article class="marketing-trust"><h3>You stay in charge</h3><ul><li>Each customer signs in with their own Google account and workspace.</li><li>Gmail integration is optional and user-connected.</li><li>MCAS does not read incoming email or invoke a Gmail send operation.</li><li>You decide what to edit, approve, copy or send yourself.</li></ul></article>
+        </div>
+        <div class="warning" style="margin-top:14px">Website checks are limited public-page assessments, not penetration tests, legal compliance reviews or security certifications. Gmail's <code>gmail.compose</code> permission is broader than draft creation, even though MCAS uses it only to create drafts. Google verification is required before a general public Gmail integration launch.</div>
+      </section>
+      <section id="faq" class="marketing-section">
+        <div class="marketing-section-head"><span class="marketing-section-kicker">Frequently asked questions</span><h2>Know what MCAS does—and where it draws the line.</h2></div>
+        <div class="marketing-faq">
+          <details><summary>Who is MCAS designed for?</summary><p>Independent web developers, freelancers and small digital agencies that want to research potential clients, understand a website opportunity and prepare a relevant proposal or first conversation.</p></details>
+          <details><summary>Is MCAS a freelance marketplace like Upwork?</summary><p>No. MCAS is a private client-acquisition workspace for your own business. It does not list freelancers for hire, broker contracts or process client payments.</p></details>
+          <details><summary>Does MCAS guarantee that a business needs a website?</summary><p>No. Public listings can be incomplete. A missing website URL is labelled as “no website link found” until you independently verify the business's online presence.</p></details>
+          <details><summary>Does MCAS send emails or read my inbox?</summary><p>No. It can create Gmail drafts after you connect your account. It does not read incoming messages or include a send endpoint. You open Gmail and send messages yourself.</p></details>
+          <details><summary>Are website audits security tests?</summary><p>No. They inspect a bounded set of public pages and selected technical signals. They do not exploit vulnerabilities, bypass logins, scan ports or certify a website as secure.</p></details>
+          <details><summary>Can I start without buying a domain?</summary><p>Yes, you can test the local development version. A public customer launch requires a deployed HTTPS address, appropriate policies and completed Google verification steps.</p></details>
+        </div>
+      </section>
+      <section id="get-started" class="marketing-section">
+        <div class="marketing-final">
+          <span class="marketing-eyebrow"><i></i> Start with your own workspace</span>
+          <h2>Build a better process for finding and winning the right projects.</h2>
+          <p>Sign in with Google to open your MCAS workspace. New users receive a workspace automatically. Access is currently in development/testing and production availability depends on the operator's deployment and Google verification.</p>
+          <div id="googleSignInButton" style="display:flex;justify-content:center;min-height:46px;margin:18px auto 8px"></div>
+          <div id="authNotice" class="notice" role="status" aria-live="polite"></div>
+          <p class="tiny">Administrator tools are available only to verified Google accounts listed in the server's <code>MCAS_ADMIN_EMAILS</code> setting.</p>
+        </div>
+      </section>
+    </main>
+    <footer class="marketing-footer"><span>© Mosley MCAS · Evidence-led client acquisition</span><span>Private workspace · Human-reviewed outreach · Early access</span></footer>
+  </div>
+</div>
 <div id="app" class="shell hide">
 <header class="top"><div><div class="brand">MOSLEY <em>MCAS</em></div><div class="sub">Intelligence-led client acquisition</div></div><div class="userbar"><span class="status"><i class="dot"></i> Workspace secured</span><span id="signedEmail" class="tiny"></span><button id="logoutBtn" class="quiet">Sign out</button></div></header>
 <div class="layout"><aside class="sidebar"><div class="navgroup">Workspace</div><nav class="nav" aria-label="Main navigation">
