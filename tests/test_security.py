@@ -144,6 +144,7 @@ class ApiSecurityTest(unittest.TestCase):
             self.assertEqual(response.headers.get("X-Frame-Options"), "DENY")
             self.assertEqual(response.headers.get("X-Content-Type-Options"), "nosniff")
             self.assertEqual(response.headers.get("X-Permitted-Cross-Domain-Policies"), "none")
+            self.assertEqual(response.headers.get("Cross-Origin-Opener-Policy"), "same-origin-allow-popups")
             self.assertIn("script-src 'self'", response.headers.get("Content-Security-Policy", ""))
             self.assertEqual(response.headers.get("Cache-Control"), "no-store")
 
