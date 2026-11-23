@@ -145,7 +145,7 @@ class ApiSecurityTest(unittest.TestCase):
             response = client.post(
                 "/api/auth/google",
                 json={"credential": "invalid", "nonce": "not-a-real-nonce"},
-                headers={"Origin": "http://testserver"},
+                headers={"Origin": "http://localhost:8000"},
             )
             self.assertNotEqual(response.status_code, 403)
             self.assertNotEqual(response.text, "CSRF validation failed. Refresh and try again.")
