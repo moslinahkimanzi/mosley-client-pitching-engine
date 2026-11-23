@@ -386,7 +386,9 @@ async def security_middleware(request: Request, call_next):
     response.headers["X-DNS-Prefetch-Control"] = "off"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    # Google Identity Services uses a popup for account selection. This policy
+    # preserves the opener relationship required by the popup flow.
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin-allow-popups"
     response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
     if request.url.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
