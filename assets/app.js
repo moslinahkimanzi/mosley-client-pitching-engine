@@ -25,7 +25,7 @@ async function initGoogleSignIn(){
  const nonce=await api('/api/auth/google/nonce');
  container.innerHTML='';
  window.google.accounts.id.initialize({client_id:config.client_id,nonce:nonce.nonce,callback:async response=>{
-  try{if(!response.credential)throw new Error('Google did not return an ID token.');const result=await api('/api/auth/google',{method:'POST',body:JSON.stringify({credential:response.credential,nonce:nonce.nonce})});state.user=result;await refreshCsrf();showApp();await loadAll();}
+  try{if(!response.credential)throw new Error('Google did not return an ID token.');const result=await api('/api/auth/google',{method:'POST',body:JSON.stringify({credential:response.credential,nonce:nonce.nonce})});state.user=result;showApp();await loadAll();}
   catch(err){if(state.user){toast('Signed in, but workspace initialisation needs attention: '+err.message,true);}else{note('authNotice',err.message,true);setTimeout(()=>initGoogleSignIn().catch(()=>{}),500);}}
  }});
  window.google.accounts.id.renderButton(container,{type:'standard',theme:'outline',size:'large',text:'continue_with',shape:'rectangular',logo_alignment:'left',width:340});
