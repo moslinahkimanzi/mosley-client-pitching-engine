@@ -342,7 +342,17 @@ async def security_middleware(request: Request, call_next):
     if unsafe and origin and origin not in origins:
         log_security_event("request.origin_rejected", request)
         return Response("Origin not allowed", status_code=403, headers={"Cache-Control": "no-store"})
-    if unsafe and request.url.path not in {"/api/integrations/gmail/callback"}:
+
+    # Google sign-in is an unauthenticated identity exchange. Its CSRF defence is
+    # the mandatory same-origin check above plus Google's signed ID token and
+    # the short-lived, single-use server nonce verified by google_authenticate.
+    # Requiring a browser CSRF cookie here creates brittle first-login/account-
+    # switching failures without adding protection beyond that nonce protocol.
+    if unsafe and request.url.path == "/api/auth/google" and not origin:
+        log_security_event("request.origin_missing", request)
+        return Response("Origin required", status_code=403, headers={"Cache-Control": "no-store"})
+
+    if unsafe and request.url.path not in {"/api/integrations/gmail/callback", "/api/auth/google"}:
         cookie_token = request.cookies.get(CSRF_COOKIE, "")
         header_token = request.headers.get("x-csrf-token", "")
         if not cookie_token or not header_token or not hmac.compare_digest(cookie_token, header_token) or not valid_csrf(header_token):
