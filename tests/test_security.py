@@ -114,16 +114,28 @@ class ApiSecurityTest(unittest.TestCase):
             self.assertEqual(draft.status_code, 403, draft.text)
 
     def test_expensive_ai_endpoint_is_rate_limited(self):
+        import os
+        from unittest.mock import patch
         with TestClient(app) as client:
             self.register(client)
             token = self.csrf(client)
-            payload = {"task": "email", "prospect_name": "Test business"}
-            statuses = [client.post("/api/assistant/draft", json=payload,
-                headers={"X-CSRF-Token": token}).status_code for _ in range(6)]
-            self.assertTrue(all(code == 503 for code in statuses), statuses)
-            limited = client.post("/api/assistant/draft", json=payload,
-                headers={"X-CSRF-Token": token})
-            self.assertEqual(limited.status_code, 429)
+            prospect = client.post(
+                "/api/leads",
+                json={"name": "Rate limit test business", "market": "Kenya", "evidence": "Synthetic test record"},
+                headers={"X-CSRF-Token": token},
+            )
+            self.assertEqual(prospect.status_code, 201, prospect.text)
+            payload = {"task": "email", "prospect_name": "Test business",
+                       "lead_id": prospect.json()["id"]}
+            # Ensure each request reaches the endpoint's unavailable-AI branch.
+            # Middleware rate limiting must still count all attempts first.
+            with patch.dict(os.environ, {"AI_API_BASE_URL": "", "AI_API_KEY": "", "AI_MODEL": ""}):
+                statuses = [client.post("/api/assistant/draft", json=payload,
+                    headers={"X-CSRF-Token": token}).status_code for _ in range(6)]
+                self.assertTrue(all(code == 503 for code in statuses), statuses)
+                limited = client.post("/api/assistant/draft", json=payload,
+                    headers={"X-CSRF-Token": token})
+                self.assertEqual(limited.status_code, 429)
 
     def test_security_headers_are_present(self):
         with TestClient(app) as client:
