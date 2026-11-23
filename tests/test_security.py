@@ -137,6 +137,32 @@ class ApiSecurityTest(unittest.TestCase):
                     headers={"X-CSRF-Token": token})
                 self.assertEqual(limited.status_code, 429)
 
+    def test_google_signin_uses_origin_and_nonce_not_browser_csrf_cookie(self):
+        with TestClient(app) as client:
+            # The Google exchange must pass the generic CSRF-cookie layer when
+            # the browser sends an explicitly allowed Origin. The route then
+            # rejects this deliberately invalid/expired nonce.
+            response = client.post(
+                "/api/auth/google",
+                json={"credential": "invalid", "nonce": "not-a-real-nonce"},
+                headers={"Origin": "http://testserver"},
+            )
+            self.assertNotEqual(response.status_code, 403)
+            self.assertNotEqual(response.text, "CSRF validation failed. Refresh and try again.")
+
+    def test_google_signin_rejects_missing_or_untrusted_origin(self):
+        with TestClient(app) as client:
+            payload = {"credential": "invalid", "nonce": "not-a-real-nonce"}
+            missing = client.post("/api/auth/google", json=payload)
+            self.assertEqual(missing.status_code, 403)
+            self.assertEqual(missing.text, "Origin required")
+            untrusted = client.post(
+                "/api/auth/google", json=payload,
+                headers={"Origin": "https://attacker.invalid"},
+            )
+            self.assertEqual(untrusted.status_code, 403)
+            self.assertEqual(untrusted.text, "Origin not allowed")
+
     def test_security_headers_are_present(self):
         with TestClient(app) as client:
             response = client.get("/api/health")
