@@ -2179,9 +2179,11 @@ def analyze_opted_in_feedback(user=Depends(current_user)):
         },
     ]
     raw = call_configured_ai(messages, temperature=0.15, max_tokens=1800)
+    if not isinstance(raw, str) or not raw.strip():
+        raise HTTPException(502, "The AI provider returned an empty or non-text response. No improvement plan was saved.")
     try:
         result = json.loads(raw)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, TypeError, ValueError):
         raise HTTPException(502, "The AI response was not valid JSON. No improvement plan was saved.")
     if not isinstance(result, dict):
         raise HTTPException(502, "The AI response did not match the improvement-plan schema.")
@@ -2371,9 +2373,11 @@ def admin_test_lab_plan(payload: AdminTestPlanIn, user=Depends(current_user)):
         {"role": "user", "content": json.dumps({"feature_under_test": payload.feature}, ensure_ascii=False)},
     ]
     raw = call_configured_ai(messages, temperature=0.1, max_tokens=2200)
+    if not isinstance(raw, str) or not raw.strip():
+        raise HTTPException(502, "The AI provider returned an empty or non-text response. No test plan was saved.")
     try:
         plan = json.loads(raw)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, TypeError, ValueError):
         raise HTTPException(502, "The AI test plan was not valid JSON. No test plan was saved.")
     if not isinstance(plan, dict) or not isinstance(plan.get("summary"), str) or not isinstance(plan.get("risks"), list) or not isinstance(plan.get("acceptance_criteria"), list) or not isinstance(plan.get("test_cases"), list):
         raise HTTPException(502, "The AI test plan had invalid fields.")
