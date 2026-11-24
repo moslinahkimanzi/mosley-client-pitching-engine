@@ -1,7 +1,8 @@
 import unittest
 
 from backend.intelligence import assess_website
-from decimal import Decimal\nfrom backend.commercial import PLANS, CREDIT_PACKS, CREDIT_COSTS, public_catalog, payment_quote, mpesa_kes_amount
+from decimal import Decimal
+from backend.commercial import PLANS, CREDIT_PACKS, CREDIT_COSTS, public_catalog, payment_quote, mpesa_kes_amount
 
 
 class CommercialModelTest(unittest.TestCase):
