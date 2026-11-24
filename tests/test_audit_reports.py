@@ -87,7 +87,7 @@ class AuditPdfTests(unittest.TestCase):
 
         # Validate the PDF cross-reference table and every listed object offset.
         import re
-        startxref_match = re.search(rb"startxref\\s+(\\d+)", pdf)
+        startxref_match = re.search(rb"startxref\s+(\d+)", pdf)
         self.assertIsNotNone(startxref_match)
         xref_offset = int(startxref_match.group(1))
         xref_lines = pdf[xref_offset:].splitlines()
