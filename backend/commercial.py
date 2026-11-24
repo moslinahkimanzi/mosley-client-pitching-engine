@@ -11,6 +11,7 @@ import os
 import re
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
@@ -38,7 +39,10 @@ CREDIT_COSTS = {
 
 
 def amount_usd(cents: int) -> str:
-    return f"{Decimal(int(cents)) / Decimal(100):.2f}"
+    value = int(cents)
+    if value < 0:
+        raise ValueError("USD cents cannot be negative.")
+    return f"{Decimal(value) / Decimal(100):.2f}"
 
 
 def get_usd_kes_rate() -> Decimal | None:
@@ -67,6 +71,8 @@ def mpesa_kes_amount(usd_cents: int, rate: Decimal) -> int:
 
 def payment_quote(usd_cents: int, payment_method: str, rate: Decimal | None = None) -> dict[str, Any]:
     """Build a server-authoritative provider amount for USD card or KES M-Pesa."""
+    if not isinstance(usd_cents, int) or isinstance(usd_cents, bool) or usd_cents <= 0:
+        raise ValueError("A paid catalogue item must have a positive integer USD price.")
     usd_value = amount_usd(usd_cents)
     if payment_method == "card":
         return {"base_amount_usd_cents": int(usd_cents), "base_amount_usd": usd_value,
@@ -112,14 +118,22 @@ def public_catalog() -> dict[str, Any]:
 
 
 def flutterwave_ready() -> bool:
-    return bool(os.getenv("FLW_SECRET_KEY", "").strip()
-                and os.getenv("FLW_SECRET_HASH", "").strip()
-                and os.getenv("MCAS_PUBLIC_URL", "").strip().startswith("https://"))
+    public_url = os.getenv("MCAS_PUBLIC_URL", "").strip()
+    try:
+        parsed = urlsplit(public_url)
+        secure_public_url = parsed.scheme == "https" and bool(parsed.hostname) and not parsed.username and not parsed.password
+    except ValueError:
+        secure_public_url = False
+    enabled = os.getenv("MCAS_BILLING_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+    return bool(enabled and os.getenv("FLW_SECRET_KEY", "").strip()
+                and os.getenv("FLW_SECRET_HASH", "").strip() and secure_public_url)
 
 
 def initialize_flutterwave_checkout(*, tx_ref: str, amount: str, currency: str,
                                     payment_method: str, email: str, customer_id: str,
-                                    item_type: str, item_code: str) -> dict[str, Any]:
+                                    item_type: str, item_code: str,
+                                    phone_number: str | None = None,
+                                    redirect_url: str | None = None) -> dict[str, Any]:
     key = os.getenv("FLW_SECRET_KEY", "").strip()
     public_url = os.getenv("MCAS_PUBLIC_URL", "").strip().rstrip("/")
     if not key or not public_url.startswith("https://"):
@@ -134,9 +148,10 @@ def initialize_flutterwave_checkout(*, tx_ref: str, amount: str, currency: str,
         raise ValueError("Unsupported payment method.")
     payload = {
         "tx_ref": tx_ref, "amount": str(amount), "currency": currency,
-        "redirect_url": public_url + "/?billing=return",
+        "redirect_url": redirect_url or (public_url + "/?billing=return"),
         "payment_options": "card" if payment_method == "card" else "mpesa",
-        "customer": {"email": email, "name": email.split("@")[0]},
+        "customer": {"email": email, "name": email.split("@")[0],
+                     **({"phone_number": phone_number} if payment_method == "mpesa" and phone_number else {})},
         "customizations": {"title": "MCAS", "description": "MCAS " + item_type.replace("_", " ")},
         "meta": {"customer_id": customer_id, "item_type": item_type, "item_code": item_code,
                  "base_currency": "USD", "payment_method": payment_method},
