@@ -8,8 +8,8 @@ from __future__ import annotations
 PLANS = {
     "free": {"name": "Free", "amount_kes": 0, "monthly_credits": 20, "seats": 1},
     "starter": {"name": "Starter", "amount_kes": 2500, "monthly_credits": 150, "seats": 1},
-    "growth": {"name": "Growth", "amount_kes": 6500, "monthly_credits": 500, "seats": 3},
-    "agency": {"name": "Agency", "amount_kes": 16900, "monthly_credits": 1500, "seats": 5},
+    "growth": {"name": "Growth", "amount_kes": 6500, "monthly_credits": 500, "seats": 1},
+    "agency": {"name": "Agency", "amount_kes": 16900, "monthly_credits": 1500, "seats": 1},
 }
 CREDIT_PACKS = {
     "small": {"name": "Small credit pack", "amount_kes": 1500, "credits": 100},
