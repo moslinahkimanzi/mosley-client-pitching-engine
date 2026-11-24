@@ -3261,19 +3261,33 @@ def billing_checkout(payload: BillingCheckoutIn, user=Depends(current_user)):
 @app.post('/api/billing/flutterwave/webhook')
 async def flutterwave_webhook(request: Request):
     secret = os.getenv('FLW_SECRET_HASH', '').strip()
-    signature = request.headers.get('verif-hash', '').strip()
-    if not secret or not signature or not hmac.compare_digest(signature, secret):
+    if not secret:
+        raise HTTPException(503, 'Payment webhook secret is not configured.')
+    raw_body = await request.body()
+    signature = request.headers.get('flutterwave-signature', '').strip()
+    legacy_signature = request.headers.get('verif-hash', '').strip()
+    if signature:
+        expected_signature = base64.b64encode(
+            hmac.new(secret.encode('utf-8'), raw_body, hashlib.sha256).digest()
+        ).decode('ascii')
+        valid_signature = hmac.compare_digest(signature, expected_signature)
+    else:
+        # Backward compatibility for older Flutterwave webhook configurations.
+        valid_signature = bool(legacy_signature) and hmac.compare_digest(legacy_signature, secret)
+    if not valid_signature:
         raise HTTPException(401, 'Invalid payment webhook signature.')
     try:
-        payload = await request.json()
-    except Exception:
+        payload = json.loads(raw_body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
         raise HTTPException(400, 'Invalid webhook payload.')
     if not isinstance(payload, dict):
         raise HTTPException(400, 'Invalid webhook payload.')
     data = payload.get('data')
-    if not isinstance(data, dict) or not str(data.get('id', '')).isdigit():
+    if not isinstance(data, dict):
         return {'status': 'ignored'}
-    transaction_id = str(data['id'])
+    transaction_id = str(data.get('id') or '').strip()
+    if not transaction_id or len(transaction_id) > 120:
+        return {'status': 'ignored'}
     event_key = str(payload.get('id') or (transaction_id + ':' + str(payload.get('type') or payload.get('event') or 'charge.completed')))[:200]
     with db() as c:
         if c.execute('SELECT 1 FROM billing_webhook_events WHERE event_key=?', (event_key,)).fetchone():
@@ -3282,7 +3296,7 @@ async def flutterwave_webhook(request: Request):
         with db() as c:
             c.execute("INSERT OR IGNORE INTO billing_webhook_events(event_key,received_at,outcome) VALUES(?,?,?)", (event_key, now(), 'not_successful'))
         return {'status': 'not_successful'}
-    tx_ref_hint = str(data.get('tx_ref') or data.get('reference') or '')
+    tx_ref_hint = str(data.get('tx_ref') or data.get('reference') or '').strip()
     metadata = data.get('meta') if isinstance(data.get('meta'), dict) else {}
     order_id_hint = str(metadata.get('mcas_order_id') or '')
     with db() as c:
@@ -3294,26 +3308,34 @@ async def flutterwave_webhook(request: Request):
     if order['status'] == 'paid':
         return {'status': 'duplicate'}
     try:
-        verified = verify_usd_transaction(transaction_id)
-        from decimal import Decimal, InvalidOperation
+        verified = verify_usd_transaction(transaction_id, order['tx_ref'])
+        from decimal import Decimal
         expected_currency = str(order['provider_currency'] or order['currency'] or 'KES').upper()
         expected_amount = Decimal(str(order['provider_amount'] if order['provider_amount'] is not None else order['amount_kes']))
         actual_amount = Decimal(str(verified.get('amount', '0')))
         if (str(verified.get('status', '')).lower() != 'successful'
                 or str(verified.get('tx_ref', '')) != order['tx_ref']
                 or str(verified.get('currency', '')).upper() != expected_currency
-                or not actual_amount.is_finite() or actual_amount != expected_amount
-                or str(verified.get('id', '')) != transaction_id):
+                or not actual_amount.is_finite() or actual_amount != expected_amount):
             raise ValueError('Verified provider payment does not exactly match the MCAS order.')
+        verified_id = str(verified.get('id') or transaction_id)
+        if transaction_id.isdigit() and verified_id != transaction_id:
+            raise ValueError('Verified provider transaction ID does not match the webhook.')
         if order['amount_usd_cents'] is not None:
             verified_meta = verified.get('meta') if isinstance(verified.get('meta'), dict) else {}
-            if (str(verified_meta.get('customer_id', '')) != str(order['user_id'])
-                    or str(verified_meta.get('item_type', '')) != str(order['item_type'])
-                    or str(verified_meta.get('item_code', '')) != str(order['item_code'])
-                    or str(verified_meta.get('payment_method', '')) != str(order['payment_method'])
-                    or str(verified_meta.get('mcas_order_id', '')) != str(order['id'])):
-                raise ValueError('Verified payment metadata does not match the MCAS order.')
-        grant_verified_order(order['id'], transaction_id)
+            # Flutterwave may return meta=null in its verification response. tx_ref is
+            # the unique server-generated binding; validate metadata whenever supplied.
+            expected_meta = {
+                'customer_id': str(order['user_id']),
+                'item_type': str(order['item_type']),
+                'item_code': str(order['item_code']),
+                'payment_method': str(order['payment_method']),
+                'mcas_order_id': str(order['id']),
+            }
+            for key, expected in expected_meta.items():
+                if key in verified_meta and str(verified_meta[key]) != expected:
+                    raise ValueError('Verified payment metadata does not match the MCAS order.')
+        grant_verified_order(order['id'], verified_id)
     except Exception:
         SECURITY_LOGGER.exception('MCAS payment webhook verification failed')
         raise HTTPException(400, 'Payment could not be verified against the MCAS order; no entitlement was granted.')
