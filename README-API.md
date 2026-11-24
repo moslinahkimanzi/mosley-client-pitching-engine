@@ -27,7 +27,7 @@ set +a
 uvicorn backend.app:app --host 127.0.0.1 --port 8000
 ``
 
-Add your Serper key to `.env` as `SERPER_API_KEY=...` (never paste it into browser code or commit it). For Kenyan Google results, set `SERPER_GL=ke` and `SERPER_HL=en`. Open Firefox at http://127.0.0.1:8000. Create an account on the welcome screen. The API's interactive documentation is at http://127.0.0.1:8000/docs.
+Add your Serper key to `.env` as `SERPER_API_KEY=...` (never paste it into browser code or commit it). The country and language configured under **My workspace** control the Serper `gl` and `hl` parameters for that customer. Open Firefox at http://127.0.0.1:8000. Create an account on the welcome screen. The API's interactive documentation is at http://127.0.0.1:8000/docs.
 
 ## Implemented in this branch
 
@@ -43,6 +43,19 @@ Add your Serper key to `.env` as `SERPER_API_KEY=...` (never paste it into brows
 - Gmail OAuth connection with encrypted refresh-token storage. MCAS creates drafts only; it does not read, search, list or monitor incoming messages and exposes no send endpoint. When Gmail is already connected and research finds a public contact email, a Gmail draft is created automatically; otherwise the draft stays in MCAS for review. Customer replies must be pasted manually into Reply Assistant. Google documents gmail.compose as draft management plus send-capable at API scope level, but this application only calls the drafts.create endpoint.
 - Follow-up task tracking, audit events, metrics and JSON workspace export.
 - Security headers, Trusted Host validation, basic per-process rate limiting, request-size cap, Docker health check, CI tests and dependency audit workflow.
+
+## Workspace regional preferences
+
+Each authenticated workspace has independent regional preferences saved in the server database:
+
+- Country / market selection. The selected country is sent as Serper's region parameter for Places and web-search discovery; the city or area still needs to be entered in the Research field.
+- Display currency. Indicative website estimates are converted from the MCAS KES planning bands using the ExchangeRate-API Open Access endpoint. The daily response is cached server-side; MCAS shows the source attribution and update timestamp when available. The endpoint requires attribution, allows caching and commercial conversion, and prohibits redistribution of its raw rate table. The displayed conversion is an estimate aid, not an invoice or payment settlement rate.
+- Time zone. MCAS detects the browser's IANA time zone during first setup, stores it on the workspace and supports manual overrides. Follow-up input and display use that selected time zone.
+- Language. Supported selections are English, Kiswahili, French, Spanish, German, Portuguese and Arabic. AI-generated email, reply and proposal text follows the selected language. The current localization covers the main navigation and the regional-preferences page; other detailed interface text is still primarily English.
+- Appearance. Choose dark, light or follow-device theme.
+- Regional price adjustment. The workspace can edit its own planning multiplier. The starting website price bands are Kenya-based; for other countries MCAS applies the selected multiplier and explicitly advises validating local supplier rates. They are not verified price surveys for each country.
+
+Preferences belong to the signed-in user/workspace and are not shared between customer accounts. Selecting a country does not automatically make the typed city valid; enter a location that matches the chosen country.
 
 ## Configure optional providers
 

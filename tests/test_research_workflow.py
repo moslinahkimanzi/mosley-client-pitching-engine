@@ -70,6 +70,8 @@ class ResearchWorkflowTest(unittest.TestCase):
         self.assertIn("google.com/maps", result["results"][0]["source_url"])
         mocked.assert_called_once()
         self.assertEqual(mocked.call_args.args[0], "places")
+        self.assertEqual(mocked.call_args.args[1]["gl"], "ke")
+        self.assertEqual(mocked.call_args.args[1]["hl"], "en")
         self.assertIn("Italian", mocked.call_args.args[1]["q"])
         self.assertIn("Nairobi", mocked.call_args.args[1]["q"])
 
@@ -82,6 +84,15 @@ class ResearchWorkflowTest(unittest.TestCase):
 
     def test_serper_web_search_returns_organic_results(self):
         client, _ = self._registered_client()
+        preference_token = client.get("/api/auth/csrf").json()["csrf_token"]
+        preferences = {
+            "country_code": "US", "currency_code": "USD",
+            "timezone": "America/New_York", "language_code": "es",
+            "theme": "light", "pricing_multiplier": 2.2,
+        }
+        saved = client.put("/api/workspace/preferences", json=preferences,
+                           headers={"X-CSRF-Token": preference_token})
+        self.assertEqual(saved.status_code, 200, saved.text)
         with patch.dict(os.environ, {"SERPER_API_KEY": "test-serper-key"}), patch.object(
             mcas, "serper_request",
             return_value={"organic": [{"title": "Example salon", "link": "https://example.org", "snippet": "A salon"}]},
@@ -91,7 +102,7 @@ class ResearchWorkflowTest(unittest.TestCase):
         result = response.json()
         self.assertEqual(result["provider"], "Serper")
         self.assertEqual(result["results"][0]["url"], "https://example.org")
-        mocked.assert_called_once_with("search", {"q": "salons in Nairobi", "num": 10})
+        mocked.assert_called_once_with("search", {"q": "salons in Nairobi", "num": 10, "gl": "us", "hl": "es"})
 
     def test_research_requires_serper_key(self):
         client, csrf = self._registered_client()

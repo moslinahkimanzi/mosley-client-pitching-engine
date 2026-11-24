@@ -1,7 +1,9 @@
 import os
 import json
+import tempfile
 import unittest
 import uuid
+from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -11,9 +13,20 @@ from backend.app import app, APP_VERSION
 
 class UpdatesAndFeedbackTest(unittest.TestCase):
     def setUp(self):
-        from backend.app import db
-        with db() as connection:
+        # Each test gets a fresh SQLite database. This prevents old opted-in
+        # feedback from other test cases affecting consent-analysis assertions.
+        import backend.app as app_module
+        self._app_module = app_module
+        self._original_db_path = app_module.DB_PATH
+        self._db_tempdir = tempfile.TemporaryDirectory(prefix="mcas-feedback-tests-")
+        app_module.DB_PATH = Path(self._db_tempdir.name) / "test.sqlite3"
+        app_module.init_db()
+        with app_module.db() as connection:
             connection.execute("DELETE FROM security_rate_limits")
+
+    def tearDown(self):
+        self._app_module.DB_PATH = self._original_db_path
+        self._db_tempdir.cleanup()
 
     def _register(self, client, email=None):
         email = email or ("updates-test-" + uuid.uuid4().hex + "@example.test")
@@ -223,6 +236,31 @@ class UpdatesAndFeedbackTest(unittest.TestCase):
                         headers={"X-CSRF-Token": self._csrf(admin)},
                     )
                     self.assertEqual(response.status_code, 502, response.text)
+                after_ids = {item["id"] for item in admin.get("/api/admin/improvements").json()}
+                self.assertEqual(after_ids, before_ids)
+
+    def test_non_text_ai_response_is_rejected_without_saving(self):
+        customer_email = "nontext-ai-" + uuid.uuid4().hex + "@example.test"
+        admin_email = "nontext-ai-admin-" + uuid.uuid4().hex + "@example.test"
+        with TestClient(app) as customer, TestClient(app) as admin:
+            self._register(customer, customer_email)
+            created = customer.post(
+                "/api/feedback",
+                json={"category": "bug", "title": "Search response issue",
+                      "message": "The search action does not show a completion result.",
+                      "ai_analysis_consent": True},
+                headers={"X-CSRF-Token": self._csrf(customer)},
+            )
+            self.assertEqual(created.status_code, 201, created.text)
+            self._register(admin, admin_email)
+            with patch.dict(os.environ, {"MCAS_ADMIN_EMAILS": admin_email}):
+                before_ids = {item["id"] for item in admin.get("/api/admin/improvements").json()}
+                with patch("backend.app.call_configured_ai", return_value=object()):
+                    response = admin.post(
+                        "/api/admin/improvements/analyze",
+                        headers={"X-CSRF-Token": self._csrf(admin)},
+                    )
+                self.assertEqual(response.status_code, 502, response.text)
                 after_ids = {item["id"] for item in admin.get("/api/admin/improvements").json()}
                 self.assertEqual(after_ids, before_ids)
 

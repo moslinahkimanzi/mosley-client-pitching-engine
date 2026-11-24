@@ -114,16 +114,122 @@ class ApiSecurityTest(unittest.TestCase):
             self.assertEqual(draft.status_code, 403, draft.text)
 
     def test_expensive_ai_endpoint_is_rate_limited(self):
+        import os
+        from unittest.mock import patch
         with TestClient(app) as client:
             self.register(client)
             token = self.csrf(client)
-            payload = {"task": "email", "prospect_name": "Test business"}
-            statuses = [client.post("/api/assistant/draft", json=payload,
-                headers={"X-CSRF-Token": token}).status_code for _ in range(6)]
-            self.assertTrue(all(code == 503 for code in statuses), statuses)
-            limited = client.post("/api/assistant/draft", json=payload,
-                headers={"X-CSRF-Token": token})
-            self.assertEqual(limited.status_code, 429)
+            prospect = client.post(
+                "/api/leads",
+                json={"name": "Rate limit test business", "market": "Kenya", "evidence": "Synthetic test record"},
+                headers={"X-CSRF-Token": token},
+            )
+            self.assertEqual(prospect.status_code, 201, prospect.text)
+            payload = {"task": "email", "prospect_name": "Test business",
+                       "lead_id": prospect.json()["id"]}
+            # Ensure each request reaches the endpoint's unavailable-AI branch.
+            # Middleware rate limiting must still count all attempts first.
+            with patch.dict(os.environ, {"AI_API_BASE_URL": "", "AI_API_KEY": "", "AI_MODEL": ""}):
+                statuses = [client.post("/api/assistant/draft", json=payload,
+                    headers={"X-CSRF-Token": token}).status_code for _ in range(6)]
+                self.assertTrue(all(code == 503 for code in statuses), statuses)
+                limited = client.post("/api/assistant/draft", json=payload,
+                    headers={"X-CSRF-Token": token})
+                self.assertEqual(limited.status_code, 429)
+
+    def test_google_signin_uses_origin_and_nonce_not_browser_csrf_cookie(self):
+        with TestClient(app) as client:
+            # The Google exchange must pass the generic CSRF-cookie layer when
+            # the browser sends an explicitly allowed Origin. The route then
+            # rejects this deliberately invalid/expired nonce.
+            response = client.post(
+                "/api/auth/google",
+                json={"credential": "invalid", "nonce": "not-a-real-nonce"},
+                headers={"Origin": "http://localhost:8000"},
+            )
+            self.assertNotEqual(response.status_code, 403)
+            self.assertNotEqual(response.text, "CSRF validation failed. Refresh and try again.")
+
+    def test_google_signin_rejects_missing_or_untrusted_origin(self):
+        with TestClient(app) as client:
+            payload = {"credential": "invalid", "nonce": "not-a-real-nonce"}
+            missing = client.post("/api/auth/google", json=payload)
+            self.assertEqual(missing.status_code, 403)
+            self.assertEqual(missing.text, "Origin required")
+            untrusted = client.post(
+                "/api/auth/google", json=payload,
+                headers={"Origin": "https://attacker.invalid"},
+            )
+            self.assertEqual(untrusted.status_code, 403)
+            self.assertEqual(untrusted.text, "Origin not allowed")
+
+    def test_workspace_preferences_are_validated_and_persisted_per_account(self):
+        with TestClient(app) as first:
+            self.register(first)
+            default = first.get("/api/workspace/preferences")
+            self.assertEqual(default.status_code, 200)
+            self.assertEqual(default.json()["country_code"], "KE")
+            self.assertEqual(default.json()["currency_code"], "KES")
+            self.assertEqual(default.json()["theme"], "dark")
+
+            regions = first.get("/api/regions")
+            self.assertEqual(regions.status_code, 200)
+            self.assertIn("US", [item["code"] for item in regions.json()["countries"]])
+            self.assertIn("America/New_York", regions.json()["timezones"])
+            self.assertIn("sw", [item["code"] for item in regions.json()["languages"]])
+
+            payload = {
+                "country_code": "US",
+                "currency_code": "USD",
+                "timezone": "America/New_York",
+                "language_code": "es",
+                "theme": "light",
+                "pricing_multiplier": 2.2,
+            }
+            token = self.csrf(first)
+            saved = first.put("/api/workspace/preferences", json=payload,
+                              headers={"X-CSRF-Token": token})
+            self.assertEqual(saved.status_code, 200, saved.text)
+            self.assertEqual(saved.json()["country_code"], "US")
+            self.assertEqual(saved.json()["currency_code"], "USD")
+            self.assertEqual(saved.json()["timezone"], "America/New_York")
+            self.assertEqual(saved.json()["language_code"], "es")
+            self.assertEqual(saved.json()["theme"], "light")
+            self.assertEqual(saved.json()["pricing_multiplier"], 2.2)
+
+            token = self.csrf(first)
+            invalid_timezone = dict(payload, timezone="Mars/Olympus_Mons")
+            rejected = first.put("/api/workspace/preferences", json=invalid_timezone,
+                                 headers={"X-CSRF-Token": token})
+            self.assertEqual(rejected.status_code, 422)
+
+            token = self.csrf(first)
+            invalid_currency = dict(payload, currency_code="ZZZ")
+            rejected = first.put("/api/workspace/preferences", json=invalid_currency,
+                                 headers={"X-CSRF-Token": token})
+            self.assertEqual(rejected.status_code, 422)
+
+        with TestClient(app) as second:
+            self.register(second)
+            other = second.get("/api/workspace/preferences")
+            self.assertEqual(other.status_code, 200)
+            self.assertEqual(other.json()["country_code"], "KE")
+            self.assertEqual(other.json()["currency_code"], "KES")
+
+    def test_currency_conversion_uses_cached_rates_without_live_network(self):
+        from unittest.mock import patch
+        with TestClient(app) as client:
+            self.register(client)
+            rates = {
+                "rates": {"USD": 1.0, "KES": 130.0, "EUR": 0.92},
+                "updated_at": "Mon, 24 Nov 2026 00:00:01 +0000",
+            }
+            with patch("backend.app._get_fx_rates", return_value=rates):
+                converted = client.get("/api/fx/convert?amount_kes=13000&currency=USD")
+            self.assertEqual(converted.status_code, 200, converted.text)
+            self.assertEqual(converted.json()["amount"], 100.0)
+            self.assertEqual(converted.json()["currency"], "USD")
+            self.assertEqual(converted.json()["source"], "ExchangeRate-API Open Access")
 
     def test_security_headers_are_present(self):
         with TestClient(app) as client:
@@ -132,6 +238,7 @@ class ApiSecurityTest(unittest.TestCase):
             self.assertEqual(response.headers.get("X-Frame-Options"), "DENY")
             self.assertEqual(response.headers.get("X-Content-Type-Options"), "nosniff")
             self.assertEqual(response.headers.get("X-Permitted-Cross-Domain-Policies"), "none")
+            self.assertEqual(response.headers.get("Cross-Origin-Opener-Policy"), "same-origin-allow-popups")
             self.assertIn("script-src 'self'", response.headers.get("Content-Security-Policy", ""))
             self.assertEqual(response.headers.get("Cache-Control"), "no-store")
 
