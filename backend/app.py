@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Optional, Literal
 
 from backend.intelligence import assess_website
-from backend.commercial import PLANS, CREDIT_PACKS, CREDIT_COSTS, public_catalog, flutterwave_ready, initialize_flutterwave_checkout, verify_flutterwave_transaction
+from backend.commercial import PLANS, CREDIT_PACKS, CREDIT_COSTS, public_catalog, flutterwave_ready, initialize_flutterwave_checkout, verify_flutterwave_transaction, payment_quote, get_usd_kes_rate
 
 from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
@@ -196,6 +196,11 @@ def init_db():
         add_column(c, "drafts", "to_email", "TEXT")
         add_column(c, "drafts", "gmail_draft_id", "TEXT")
         add_column(c, "customer_feedback", "ai_analysis_consent", "INTEGER NOT NULL DEFAULT 0")
+        add_column(c, "billing_payments", "amount_usd_cents", "INTEGER NOT NULL DEFAULT 0")
+        add_column(c, "billing_payments", "provider_amount", "TEXT NOT NULL DEFAULT ''")
+        add_column(c, "billing_payments", "provider_currency", "TEXT NOT NULL DEFAULT 'KES'")
+        add_column(c, "billing_payments", "payment_method", "TEXT NOT NULL DEFAULT 'mpesa'")
+        add_column(c, "billing_payments", "exchange_rate", "TEXT")
         # Backfill billing for accounts created before credit billing was introduced.
         c.execute("""INSERT OR IGNORE INTO billing_accounts(user_id,credit_balance,plan,subscription_status,updated_at)
                      SELECT id,10,'trial','trial',? FROM users""", (now(),))
@@ -2136,13 +2141,14 @@ def billing_status(user=Depends(current_user)):
     return {"plan": row["plan"], "subscription_status": row["subscription_status"],
             "current_period_end": row["current_period_end"], "credits": row["credit_balance"],
             "billing_enabled": flutterwave_ready(), "provider": "Flutterwave" if flutterwave_ready() else None,
-            "message": "M-Pesa and card checkout available." if flutterwave_ready() else "Checkout not configured; trial credits remain available.",
+            "message": "USD card checkout and converted KES M-Pesa checkout are available when configured." if flutterwave_ready() else "Checkout not configured; trial credits remain available.",
             "recent_activity": [dict(x) for x in ledger]}
 
 
 class CheckoutIn(BaseModel):
     item_type: Literal["subscription", "credit_pack"]
     item_code: str = Field(min_length=2, max_length=30)
+    payment_method: Literal["card", "mpesa"]
 
 
 @app.post("/api/billing/checkout")
@@ -2153,31 +2159,48 @@ def billing_checkout(payload: CheckoutIn, user=Depends(current_user)):
     item = catalog.get(payload.item_code)
     if not item:
         raise HTTPException(422, "Unknown subscription or credit pack.")
+    try:
+        quote = payment_quote(item["amount_usd_cents"], payload.payment_method, get_usd_kes_rate())
+    except ValueError as exc:
+        raise HTTPException(503 if payload.payment_method == "mpesa" else 422, str(exc))
     tx_ref = "mcas_" + secrets.token_urlsafe(18)
     payment_id = secrets.token_urlsafe(18)
     with db() as c:
-        c.execute("INSERT INTO billing_payments(id,user_id,tx_ref,item_type,item_code,amount_kes,currency,status,created_at) VALUES(?,?,?,?,?,?,'KES','pending',?)",
-                  (payment_id, user["id"], tx_ref, payload.item_type, payload.item_code, item["amount_kes"], now()))
-        audit(c, user["id"], "billing.checkout_started", {"payment_id": payment_id, "item_type": payload.item_type, "item_code": payload.item_code})
+        c.execute("""INSERT INTO billing_payments
+            (id,user_id,tx_ref,item_type,item_code,amount_kes,currency,status,created_at,
+             amount_usd_cents,provider_amount,provider_currency,payment_method,exchange_rate)
+            VALUES(?,?,?,?,?,?,?,'pending',?,?,?,?,?,?)""",
+            (payment_id,user["id"],tx_ref,payload.item_type,payload.item_code,
+             quote["amount_kes"],quote["provider_currency"],now(),quote["base_amount_usd_cents"],
+             quote["provider_amount"],quote["provider_currency"],payload.payment_method,quote["exchange_rate"]))
+        audit(c,user["id"],"billing.checkout_started",{"payment_id":payment_id,"item_type":payload.item_type,
+            "item_code":payload.item_code,"payment_method":payload.payment_method,
+            "base_amount_usd":quote["base_amount_usd"],"provider_currency":quote["provider_currency"]})
     try:
-        result = initialize_flutterwave_checkout(tx_ref=tx_ref, amount_kes=item["amount_kes"],
-            email=user["email"], customer_id=user["id"], item_type=payload.item_type, item_code=payload.item_code)
+        result=initialize_flutterwave_checkout(tx_ref=tx_ref,amount=quote["provider_amount"],
+            currency=quote["provider_currency"],payment_method=payload.payment_method,
+            email=user["email"],customer_id=user["id"],item_type=payload.item_type,item_code=payload.item_code)
     except Exception:
         with db() as c:
-            c.execute("UPDATE billing_payments SET status='initialization_failed' WHERE id=?", (payment_id,))
-        raise HTTPException(502, "Checkout initialization failed. No entitlement was granted.")
-    return {"checkout_url": result["checkout_url"], "tx_ref": tx_ref, "amount_kes": item["amount_kes"], "currency": "KES"}
+            c.execute("UPDATE billing_payments SET status='initialization_failed' WHERE id=?",(payment_id,))
+        raise HTTPException(502,"Checkout initialization failed. No entitlement was granted.")
+    return {"checkout_url":result["checkout_url"],"tx_ref":tx_ref,
+        "amount_usd":quote["base_amount_usd"],"provider_amount":quote["provider_amount"],
+        "provider_currency":quote["provider_currency"],"payment_method":payload.payment_method}
 
 
 def apply_verified_payment(payment, verified):
     tx_ref = str(verified.get("tx_ref") or "")
     transaction_id = str(verified.get("id") or "")
-    if str(verified.get("status") or "").lower() != "successful" or str(verified.get("currency") or "").upper() != "KES":
-        raise ValueError("Payment is not successful in KES.")
-    if float(verified.get("amount") or 0) < float(payment["amount_kes"]) or tx_ref != payment["tx_ref"] or not transaction_id:
+    expected_currency=str(payment.get("provider_currency") or payment.get("currency") or "KES").upper()
+    expected_amount=str(payment.get("provider_amount") or payment.get("amount_kes") or "")
+    if str(verified.get("status") or "").lower() != "successful" or str(verified.get("currency") or "").upper() != expected_currency:
+        raise ValueError("Payment is not successful in the expected currency.")
+    from decimal import Decimal
+    if Decimal(str(verified.get("amount") or "0")) < Decimal(expected_amount) or tx_ref != payment["tx_ref"] or not transaction_id:
         raise ValueError("Verified payment amount or reference mismatch.")
     meta = verified.get("meta") or {}
-    if meta.get("customer_id") != payment["user_id"] or meta.get("item_type") != payment["item_type"] or meta.get("item_code") != payment["item_code"]:
+    if meta.get("customer_id") != payment["user_id"] or meta.get("item_type") != payment["item_type"] or meta.get("item_code") != payment["item_code"] or meta.get("payment_method", payment.get("payment_method")) != payment.get("payment_method", "mpesa"):
         raise ValueError("Payment metadata mismatch.")
     with db() as c:
         c.execute("BEGIN IMMEDIATE")
