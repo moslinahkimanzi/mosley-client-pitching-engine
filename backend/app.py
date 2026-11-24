@@ -33,6 +33,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
 
 from backend.audit_engine import advanced_site_audit
+from backend.audit_reports import build_audit_pdf, audit_pdf_filename
 from backend.google_auth import verify_google_id_token
 from backend.billing import PLANS as LEGACY_PLANS, CREDIT_PACKS as LEGACY_CREDIT_PACKS, credits_for_audit, credits_for_competitors
 from backend.commercial import (
@@ -198,6 +199,16 @@ def init_db():
             feedback_id TEXT NOT NULL REFERENCES customer_feedback(id) ON DELETE CASCADE,
             PRIMARY KEY(review_id,feedback_id)
         );
+        CREATE TABLE IF NOT EXISTS website_audit_reports(
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            lead_id TEXT,
+            website_url TEXT NOT NULL,
+            report_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_audit_reports_user_created
+            ON website_audit_reports(user_id,created_at);
         CREATE TABLE IF NOT EXISTS billing_accounts(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, plan_code TEXT NOT NULL DEFAULT 'free', monthly_credits INTEGER NOT NULL DEFAULT 20, purchased_credits INTEGER NOT NULL DEFAULT 0, period_start TEXT, period_end TEXT, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS billing_orders(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, tx_ref TEXT NOT NULL UNIQUE, item_type TEXT NOT NULL CHECK(item_type IN ('subscription','credits')), item_code TEXT NOT NULL, amount_kes INTEGER NOT NULL, currency TEXT NOT NULL DEFAULT 'KES', status TEXT NOT NULL DEFAULT 'pending', checkout_url TEXT, provider_transaction_id TEXT UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS billing_webhook_events(event_key TEXT PRIMARY KEY, received_at TEXT NOT NULL, outcome TEXT NOT NULL);
@@ -234,6 +245,7 @@ def init_db():
         add_column(c, "leads", "do_not_contact", "INTEGER NOT NULL DEFAULT 0")
         add_column(c, "drafts", "to_email", "TEXT")
         add_column(c, "drafts", "gmail_draft_id", "TEXT")
+        add_column(c, "drafts", "audit_report_id", "TEXT")
         add_column(c, "customer_feedback", "ai_analysis_consent", "INTEGER NOT NULL DEFAULT 0")
         c.execute("INSERT OR IGNORE INTO billing_accounts(user_id,plan_code,monthly_credits,purchased_credits,updated_at) SELECT id,'free',20,0,? FROM users", (now(),))
 
@@ -594,6 +606,7 @@ class DraftIn(BaseModel):
     to_email: Optional[str] = Field(default=None, max_length=254)
     subject: str = Field(max_length=200)
     body: str = Field(min_length=1, max_length=12000)
+    audit_report_id: Optional[str] = Field(default=None, max_length=100)
 
 class FollowupIn(BaseModel):
     lead_id: str
@@ -878,16 +891,38 @@ def save_draft(payload: DraftIn, user=Depends(current_user)):
     validate_email(payload.to_email)
     did = secrets.token_urlsafe(15)
     with db() as c:
+        lead = None
         if payload.lead_id:
             lead = owned_lead(c, payload.lead_id, user["id"])
             if int(lead["do_not_contact"] or 0) and payload.kind.lower() in {"cold email", "follow-up", "outreach"}:
                 raise HTTPException(403, "This prospect is marked do-not-contact; outreach drafts are blocked.")
-        c.execute("""INSERT INTO drafts(id,user_id,lead_id,kind,subject,body,state,created_at,to_email)
-            VALUES(?,?,?,?,?,?,?,?,?)""",
+
+        if payload.audit_report_id:
+            report = c.execute(
+                """SELECT id,lead_id,website_url FROM website_audit_reports
+                   WHERE id=? AND user_id=?""",
+                (payload.audit_report_id, user["id"]),
+            ).fetchone()
+            if not report:
+                raise HTTPException(404, "The selected audit report was not found in this workspace.")
+            if report["lead_id"] and report["lead_id"] != payload.lead_id:
+                raise HTTPException(422, "This audit report belongs to a different prospect.")
+            if payload.lead_id and not report["lead_id"]:
+                report_host = (urllib.parse.urlparse(report["website_url"]).hostname or "").lower().removeprefix("www.")
+                lead_host = (urllib.parse.urlparse(lead["website"] or "").hostname or "").lower().removeprefix("www.")
+                if not report_host or report_host != lead_host:
+                    raise HTTPException(422, "The audit report website does not match the selected prospect's saved website.")
+
+        c.execute("""INSERT INTO drafts
+            (id,user_id,lead_id,kind,subject,body,state,created_at,to_email,audit_report_id)
+            VALUES(?,?,?,?,?,?,?,?,?,?)""",
             (did, user["id"], payload.lead_id, payload.kind, payload.subject, payload.body,
-             "pending_approval", now(), payload.to_email))
-        audit(c, user["id"], "draft.saved", {"draft_id": did, "kind": payload.kind})
-    return {"id": did, "state": "pending_approval"}
+             "pending_approval", now(), payload.to_email, payload.audit_report_id))
+        audit(c, user["id"], "draft.saved", {
+            "draft_id": did, "kind": payload.kind,
+            "audit_report_attached": bool(payload.audit_report_id),
+        })
+    return {"id": did, "state": "pending_approval", "audit_report_attached": bool(payload.audit_report_id)}
 
 @app.delete("/api/drafts/{draft_id}")
 def delete_draft(draft_id: str, user=Depends(current_user)):
@@ -2014,24 +2049,93 @@ def verify_lead_website(lead_id: str, user=Depends(current_user)):
 
 @app.post("/api/audit-website")
 def audit_website(payload: WebsiteAuditIn, user=Depends(current_user)):
-    require_credits(user["id"], credits_for_audit(payload.max_pages))
-    result = advanced_site_audit(payload.url, safe_site_fetch, payload.max_pages)
-    result["checked_at"] = now()
+    # Validate prospect ownership and URL association before spending credits or performing requests.
+    business_name = None
     if payload.lead_id:
         with db() as c:
             lead = owned_lead(c, payload.lead_id, user["id"])
             if (lead["website"] or "").rstrip("/") != payload.url.rstrip("/"):
                 raise HTTPException(422, "Audit URL must match the selected prospect's saved website URL.")
+            business_name = lead["name"]
+    credit_cost = credits_for_audit(payload.max_pages)
+    require_credits(user["id"], credit_cost)
+
+    result = advanced_site_audit(payload.url, safe_site_fetch, payload.max_pages)
+    result["checked_at"] = now()
+    result["lead_id"] = payload.lead_id
+    result["business_name"] = business_name
+    report_id = secrets.token_urlsafe(18)
+    result["report_id"] = report_id
+    serialized_report = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+    if len(serialized_report.encode("utf-8")) > 300_000:
+        raise HTTPException(502, "Audit result exceeded the report storage limit. No report was saved.")
+
+    # Persist the report and consume credits atomically to avoid charging when report storage fails.
+    with db() as c:
+        c.execute("BEGIN IMMEDIATE")
+        account = ensure_billing_account(c, user["id"])
+        monthly = int(account["monthly_credits"])
+        purchased = int(account["purchased_credits"])
+        if monthly + purchased < credit_cost:
+            raise HTTPException(402, "Not enough MCAS credits. Choose a monthly plan or buy a credit pack.")
+        used_monthly = min(monthly, credit_cost)
+        used_purchased = credit_cost - used_monthly
+        c.execute(
+            "UPDATE billing_accounts SET monthly_credits=?,purchased_credits=?,updated_at=? WHERE user_id=?",
+            (monthly - used_monthly, purchased - used_purchased, now(), user["id"]),
+        )
+        c.execute(
+            """INSERT INTO billing_credit_ledger
+               (id,user_id,delta_monthly,delta_purchased,reason,reference,created_at)
+               VALUES(?,?,?,?,?,?,?)""",
+            (secrets.token_urlsafe(16), user["id"], -used_monthly, -used_purchased,
+             "advanced_website_audit", report_id, now()),
+        )
+        if payload.lead_id:
             status = store_website_audit(c, payload.lead_id, user["id"], result)
-            audit(c, user["id"], "website.advanced_audit", {"lead_id": payload.lead_id,
-                  "url": result.get("url"), "pages_checked": result.get("pages_checked"), "website_status": status})
-        result["website_status"] = status
-    else:
-        with db() as c:
-            audit(c, user["id"], "website.advanced_audit", {"url": result.get("url"),
-                  "pages_checked": result.get("pages_checked")})
-    debit_credits(user["id"], credits_for_audit(payload.max_pages), "advanced_website_audit", payload.lead_id)
+            result["website_status"] = status
+        c.execute(
+            """INSERT INTO website_audit_reports
+               (id,user_id,lead_id,website_url,report_json,created_at)
+               VALUES(?,?,?,?,?,?)""",
+            (report_id, user["id"], payload.lead_id, result.get("url") or payload.url,
+             json.dumps(result, ensure_ascii=False, separators=(",", ":")), now()),
+        )
+        audit(c, user["id"], "website.advanced_audit", {
+            "report_id": report_id, "lead_id": payload.lead_id,
+            "url": result.get("url"), "pages_checked": result.get("pages_checked"),
+            "health_score": (result.get("summary") or {}).get("health_score"),
+            "unique_findings": (result.get("summary") or {}).get("unique_findings"),
+        })
     return result
+
+
+@app.get("/api/audit-reports/{report_id}/pdf")
+def download_audit_report_pdf(report_id: str, user=Depends(current_user)):
+    with db() as c:
+        row = c.execute(
+            "SELECT report_json FROM website_audit_reports WHERE id=? AND user_id=?",
+            (report_id, user["id"]),
+        ).fetchone()
+    if not row:
+        # Do not reveal whether a report belongs to another workspace.
+        raise HTTPException(404, "Audit report not found.")
+    try:
+        report = json.loads(row["report_json"])
+        pdf = build_audit_pdf(report)
+        filename = audit_pdf_filename(report)
+    except (TypeError, ValueError, KeyError):
+        SECURITY_LOGGER.exception("Stored audit report could not be rendered; report_id=%s", report_id)
+        raise HTTPException(500, "The saved audit report could not be rendered.")
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.post("/api/competitor-intelligence")
@@ -2633,6 +2737,7 @@ def gmail_access_token(uid):
         raise HTTPException(502, "Could not refresh Gmail access")
 
 def create_gmail_draft_for_user(draft_id: str, uid: str):
+    report = None
     with db() as c:
         draft = c.execute("SELECT * FROM drafts WHERE id=? AND user_id=?", (draft_id, uid)).fetchone()
         if not draft:
@@ -2647,6 +2752,17 @@ def create_gmail_draft_for_user(draft_id: str, uid: str):
                              (draft["lead_id"], uid)).fetchone()
             if lead and lead["do_not_contact"]:
                 raise HTTPException(403, "This prospect is marked do-not-contact")
+        if draft["audit_report_id"]:
+            report_row = c.execute(
+                "SELECT report_json FROM website_audit_reports WHERE id=? AND user_id=?",
+                (draft["audit_report_id"], uid),
+            ).fetchone()
+            if not report_row:
+                raise HTTPException(404, "The attached audit report is no longer available.")
+            try:
+                report = json.loads(report_row["report_json"])
+            except (TypeError, ValueError):
+                raise HTTPException(500, "The attached audit report could not be read.")
     validate_email(draft["to_email"])
     if "\r" in draft["subject"] or "\n" in draft["subject"]:
         raise HTTPException(422, "Email subject must be a single line")
@@ -2654,6 +2770,17 @@ def create_gmail_draft_for_user(draft_id: str, uid: str):
     message["To"] = draft["to_email"]
     message["Subject"] = draft["subject"]
     message.set_content(draft["body"])
+    if report is not None:
+        try:
+            pdf_content = build_audit_pdf(report)
+            message.add_attachment(
+                pdf_content,
+                maintype="application",
+                subtype="pdf",
+                filename=audit_pdf_filename(report),
+            )
+        except (TypeError, ValueError, KeyError):
+            raise HTTPException(500, "The attached audit report could not be converted to PDF.")
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode().rstrip("=")
     token = gmail_access_token(uid)
     req = urllib.request.Request("https://gmail.googleapis.com/gmail/v1/users/me/drafts",
@@ -2669,9 +2796,14 @@ def create_gmail_draft_for_user(draft_id: str, uid: str):
         if gmail_draft_id:
             c.execute("UPDATE drafts SET gmail_draft_id=? WHERE id=? AND user_id=?",
                       (gmail_draft_id, draft_id, uid))
-        audit(c, uid, "gmail.draft_created", {"draft_id": draft_id, "gmail_draft_id": gmail_draft_id})
-    return {"ok": True, "gmail_draft_id": gmail_draft_id,
-            "message": "Created a draft in Gmail. It has not been sent."}
+        audit(c, uid, "gmail.draft_created", {
+            "draft_id": draft_id, "gmail_draft_id": gmail_draft_id,
+            "audit_report_attached": bool(report),
+        })
+    message_text = "Created a draft in Gmail. It has not been sent."
+    if report is not None:
+        message_text = "Created a Gmail draft with the website audit PDF attached. It has not been sent."
+    return {"ok": True, "gmail_draft_id": gmail_draft_id, "message": message_text}
 
 @app.post("/api/drafts/{draft_id}/gmail")
 def create_gmail_draft(draft_id: str, user=Depends(current_user)):
