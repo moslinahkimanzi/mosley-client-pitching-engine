@@ -82,6 +82,100 @@ class ResearchWorkflowTest(unittest.TestCase):
         self.assertEqual(drafts[0]["state"], "pending_approval")
         self.assertIn("does not necessarily mean", drafts[0]["body"].lower())
 
+    def test_business_verification_requires_fresh_listing_and_human_confirmation(self):
+        client, csrf = self._registered_client()
+        created = client.post(
+            "/api/leads",
+            json={
+                "name": "Verification Test Dental Clinic",
+                "market": "Nairobi",
+                "business_address": "1 Test Road, Nairobi, Kenya",
+                "contact_phone": "+254700123456",
+                "status": "Unverified",
+                "evidence": "Initial discovery only.",
+            },
+            headers={"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        lead_id = created.json()["id"]
+        listing = {
+            "places": [{
+                "title": "Verification Test Dental Clinic",
+                "address": "1 Test Road, Nairobi, Kenya",
+                "phoneNumber": "+254700123456",
+                "cid": "987654321",
+            }]
+        }
+        with patch.object(mcas, "serper_request", return_value=listing) as mocked:
+            csrf = client.get("/api/auth/csrf").json()["csrf_token"]
+            checked = client.post(
+                f"/api/leads/{lead_id}/verify-business",
+                headers={"X-CSRF-Token": csrf},
+            )
+        self.assertEqual(checked.status_code, 200, checked.text)
+        self.assertEqual(checked.json()["status"], "provider_reconfirmed")
+        self.assertTrue(checked.json()["checks"]["business_name_match"])
+        self.assertTrue(checked.json()["checks"]["address_match"])
+        self.assertTrue(checked.json()["checks"]["phone_match"])
+        mocked.assert_called_once()
+
+        lead = next(item for item in client.get("/api/leads").json() if item["id"] == lead_id)
+        self.assertEqual(lead["status"], "Unverified")
+        self.assertEqual(lead["business_verification_status"], "provider_reconfirmed")
+
+        csrf = client.get("/api/auth/csrf").json()["csrf_token"]
+        confirmed = client.post(
+            f"/api/leads/{lead_id}/confirm-business",
+            headers={"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(confirmed.status_code, 200, confirmed.text)
+        self.assertEqual(confirmed.json()["status"], "Verified")
+        lead = next(item for item in client.get("/api/leads").json() if item["id"] == lead_id)
+        self.assertEqual(lead["business_verification_status"], "human_confirmed")
+
+    def test_business_verification_does_not_accept_a_name_only_match(self):
+        client, csrf = self._registered_client()
+        created = client.post(
+            "/api/leads",
+            json={
+                "name": "Verification Test Dental Clinic",
+                "market": "Nairobi",
+                "business_address": "1 Test Road, Nairobi, Kenya",
+                "contact_phone": "+254700123456",
+            },
+            headers={"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        lead_id = created.json()["id"]
+        listing = {"places": [{
+            "title": "Verification Test Dental Clinic",
+            "address": "99 Different Avenue, Mombasa, Kenya",
+            "phoneNumber": "+254711999999",
+        }]}
+        with patch.object(mcas, "serper_request", return_value=listing):
+            csrf = client.get("/api/auth/csrf").json()["csrf_token"]
+            checked = client.post(
+                f"/api/leads/{lead_id}/verify-business",
+                headers={"X-CSRF-Token": csrf},
+            )
+        self.assertEqual(checked.status_code, 200, checked.text)
+        self.assertEqual(checked.json()["status"], "needs_manual_review")
+        csrf = client.get("/api/auth/csrf").json()["csrf_token"]
+        rejected = client.post(
+            f"/api/leads/{lead_id}/confirm-business",
+            headers={"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(rejected.status_code, 409)
+
+    def test_prospect_cannot_be_created_as_verified(self):
+        client, csrf = self._registered_client()
+        response = client.post(
+            "/api/leads",
+            json={"name": "Unverified Shortcut Test", "market": "Nairobi", "status": "Verified"},
+            headers={"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(response.status_code, 409)
+
     def test_serper_web_search_returns_organic_results(self):
         client, _ = self._registered_client()
         preference_token = client.get("/api/auth/csrf").json()["csrf_token"]
