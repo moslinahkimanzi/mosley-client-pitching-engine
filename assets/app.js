@@ -61,7 +61,7 @@ function billingMethodAvailable(method){
 }
 function renderBilling(){
  const data=state.billing;if(!data)return;
- $('billingPlan').textContent=(data.plans?.[data.plan]?.name)||data.plan||'Free';
+ $('billingPlan').textContent=data.plan==='free'?'Free':((data.plans?.[data.plan]?.name)||data.plan||'Free');
  $('billingMonthlyCredits').textContent=Number(data.monthly_credits||0).toLocaleString();
  $('billingPurchasedCredits').textContent=Number(data.purchased_credits||0).toLocaleString();
  $('billingTotalCredits').textContent=Number(data.total_credits||0).toLocaleString();
