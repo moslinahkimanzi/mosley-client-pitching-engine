@@ -389,6 +389,8 @@ async def security_middleware(request: Request, call_next):
         category, cap = "improvement_analysis", 3
     elif path in {"/api/research/search", "/api/research/run"}:
         category, cap = "search", 5
+    elif path == "/api/competitor-intelligence":
+        category, cap = "competitor", 5
     elif path == "/api/audit-website" or path == "/api/admin/test-lab/audit" or path.endswith("/verify-website"):
         category, cap = "website", 10
     elif path.endswith("/gmail") and request.method == "POST":
@@ -441,6 +443,11 @@ class WebsiteAuditIn(BaseModel):
     url: str = Field(min_length=8, max_length=2048)
     lead_id: Optional[str] = None
     max_pages: int = Field(default=10, ge=1, le=15)
+
+class CompetitorIn(BaseModel):
+    lead_id: str = Field(min_length=1, max_length=100)
+    industry: Literal["restaurant", "salon", "retail", "professional", "hotel", "healthcare", "education"] = "restaurant"
+    max_results: int = Field(default=5, ge=2, le=8)
 
 class AdminTestPlanIn(BaseModel):
     feature: str = Field(min_length=8, max_length=3000)
@@ -1899,6 +1906,115 @@ def audit_website(payload: WebsiteAuditIn, user=Depends(current_user)):
             audit(c, user["id"], "website.advanced_audit", {"url": result.get("url"),
                   "pages_checked": result.get("pages_checked")})
     return result
+
+
+@app.post("/api/competitor-intelligence")
+def competitor_intelligence(payload: CompetitorIn, user=Depends(current_user)):
+    """Find local competitor candidates from Serper Places and perform bounded public-site checks."""
+    with db() as c:
+        lead = owned_lead(c, payload.lead_id, user["id"])
+    market = str(lead["market"] or "").strip()
+    if not market:
+        raise HTTPException(422, "The selected prospect needs a market or location before competitor research.")
+
+    category = payload.industry.replace("_", " ")
+    query = category + " businesses in " + market
+    data = serper_request("places", {
+        "q": query,
+        "gl": os.getenv("SERPER_GL", "ke").strip().lower()[:2] or "ke",
+        "hl": os.getenv("SERPER_HL", "en").strip().lower()[:2] or "en",
+    })
+    places = data.get("places") or []
+    target_url = str(lead["website"] or "").strip()
+    if target_url and not re.match(r"^https?://", target_url, re.I):
+        target_url = "https://" + target_url
+    target_host = (urllib.parse.urlparse(target_url).hostname or "").lower().removeprefix("www.")
+    competitors = []
+    seen = set()
+
+    for place in places:
+        if not isinstance(place, dict) or len(competitors) >= payload.max_results:
+            continue
+        name = str(place.get("title") or place.get("name") or "").strip()
+        if not name or name.casefold() == str(lead["name"]).casefold() or name.casefold() in seen:
+            continue
+        seen.add(name.casefold())
+        raw_website = place.get("website") or place.get("websiteUrl")
+        website = str(raw_website).strip() if raw_website else ""
+        if website and not re.match(r"^https?://", website, re.I):
+            website = "https://" + website
+
+        website_state = "not_listed"
+        audit_summary = None
+        if website:
+            try:
+                # Use the existing pinned-public-IP fetcher and strict same-host crawler.
+                # A small page budget prevents a competitor search becoming an unbounded crawl.
+                audit_result = advanced_site_audit(website, safe_site_fetch, 3)
+                status = int(audit_result.get("http_status") or 0)
+                website_state = "responding" if 200 <= status < 400 else (
+                    "restricted" if status in {401, 403, 429} else "needs_review"
+                )
+                audit_summary = {
+                    "health_score": (audit_result.get("summary") or {}).get("health_score"),
+                    "findings": (audit_result.get("summary") or {}).get("total", 0),
+                    "high": (audit_result.get("summary") or {}).get("high", 0),
+                    "medium": (audit_result.get("summary") or {}).get("medium", 0),
+                    "low": (audit_result.get("summary") or {}).get("low", 0),
+                    "pages_checked": audit_result.get("pages_checked", 0),
+                }
+            except (HTTPException, ValueError, TypeError):
+                website_state = "needs_review"
+
+        competitor_host = (urllib.parse.urlparse(website).hostname or "").lower().removeprefix("www.")
+        competitors.append({
+            "name": name,
+            "category": place.get("category") or place.get("type"),
+            "address": place.get("address"),
+            "website": website or None,
+            "website_state": website_state,
+            "same_domain_as_target": bool(target_host and competitor_host and target_host == competitor_host),
+            "rating": place.get("rating"),
+            "rating_count": place.get("ratingCount"),
+            "source": "Serper Places",
+            "source_url": serper_source_url(place, name, str(place.get("address") or "")),
+            "audit_summary": audit_summary,
+        })
+
+    target_state = "not_listed" if not target_url else "not_audited_in_competitor_search"
+    result = {
+        "target": {
+            "lead_id": payload.lead_id,
+            "name": lead["name"],
+            "market": market,
+            "website": lead["website"],
+            "website_state": target_state,
+        },
+        "query": query,
+        "competitors": competitors,
+        "comparison": {
+            "competitors_found": len(competitors),
+            "with_listed_websites": sum(1 for item in competitors if item["website"]),
+            "without_listed_websites": sum(1 for item in competitors if not item["website"]),
+            "responding_websites": sum(1 for item in competitors if item["website_state"] == "responding"),
+        },
+        "limitations": [
+            "Search-provider place listings are candidate competitors, not proof of direct commercial competition.",
+            "Ratings and business details may be incomplete or stale; verify them independently.",
+            "Website checks are bounded static-page observations, not a full browser, SEO-ranking, malware or penetration test.",
+            "A missing website listing does not prove that a business has no website.",
+            "No prospect was contacted and no email was sent.",
+        ],
+        "checked_at": now(),
+    }
+    with db() as c:
+        audit(c, user["id"], "competitor.intelligence", {
+            "lead_id": payload.lead_id,
+            "industry": payload.industry,
+            "candidate_count": len(competitors),
+        })
+    return result
+
 
 def assistant_system_prompt(task: str) -> str:
     shared = (
