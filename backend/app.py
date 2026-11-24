@@ -452,6 +452,7 @@ class LeadIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     website: Optional[str] = Field(default=None, max_length=2048)
     market: str = Field(default="Kenya", max_length=100)
+    business_address: Optional[str] = Field(default=None, max_length=300)
     evidence: str = Field(default="", max_length=5000)
     status: Literal["Unverified", "Verified", "Contacted", "Replied", "Interested", "Negotiating", "Won", "Lost"] = "Unverified"
     contact_email: Optional[str] = Field(default=None, max_length=254)
@@ -684,10 +685,11 @@ def add_lead(payload: LeadIn, user=Depends(current_user)):
     with db() as c:
         initial_website_status = "not_checked" if payload.website else "not_listed"
         c.execute("""INSERT INTO leads(id,user_id,name,website,market,evidence,status,score,created_at,updated_at,
-            contact_email,contact_phone,source_url,do_not_contact,website_status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            contact_email,contact_phone,source_url,do_not_contact,website_status,business_address)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (lid, user["id"], payload.name.strip(), payload.website, payload.market, payload.evidence,
              payload.status, 0, stamp, stamp, payload.contact_email, payload.contact_phone, payload.source_url,
-             int(payload.do_not_contact), initial_website_status))
+             int(payload.do_not_contact), initial_website_status, payload.business_address))
         audit(c, user["id"], "lead.created", {"lead_id": lid})
     return {"id": lid, "name": payload.name, "status": payload.status}
 
@@ -700,10 +702,10 @@ def update_lead(lead_id: str, payload: LeadIn, user=Depends(current_user)):
             raise HTTPException(409, "Business verification cannot be bypassed. Recheck the public listing and confirm the source evidence in Prospects.")
         changed_website = (current["website"] or "").strip() != (payload.website or "").strip()
         next_status = ("not_checked" if payload.website else "not_listed") if changed_website else current["website_status"]
-        cur = c.execute("""UPDATE leads SET name=?,website=?,market=?,evidence=?,status=?,contact_email=?,
+        cur = c.execute("""UPDATE leads SET name=?,website=?,market=?,business_address=?,evidence=?,status=?,contact_email=?,
             contact_phone=?,source_url=?,do_not_contact=?,website_status=?,website_verified_at=?,website_audit_json=?,
             updated_at=? WHERE id=? AND user_id=?""",
-            (payload.name.strip(), payload.website, payload.market, payload.evidence, payload.status,
+            (payload.name.strip(), payload.website, payload.market, payload.business_address, payload.evidence, payload.status,
              payload.contact_email, payload.contact_phone, payload.source_url, int(payload.do_not_contact),
              next_status, None if changed_website else current["website_verified_at"],
              "{}" if changed_website else current["website_audit_json"], now(), lead_id, user["id"]))
