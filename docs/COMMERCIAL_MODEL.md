@@ -50,18 +50,18 @@ This is arithmetic, not a forecast. It excludes payment fees, taxes, refunds, fa
 
 ## Payments and subscription lifecycle
 
-- Flutterwave hosted checkout is used for one-time KES payments with M-Pesa and card options.
+- Flutterwave hosted checkout is used for one-time KES payments with M-Pesa (`mpesa`) and card (`card`) options.
 - The server records a pending transaction before checkout. A redirect back to the browser never grants credits.
 - The webhook secret hash is checked, then MCAS independently verifies the transaction with the provider API and matches status, amount, currency, reference and purchase metadata before applying an entitlement.
 - Provider transaction IDs and payment references are unique/idempotent. Credits are granted through an append-only ledger.
-- Monthly subscriptions currently grant 30-day access and credits only after a verified payment. A customer must complete a renewal payment; automatic M-Pesa debits are not enabled.
+- Monthly subscriptions currently grant 30-day access and credits only after a verified payment. A customer must complete a renewal payment in this release. Flutterwave Payment Plans document recurring billing for cards only; the current MCAS checkout does not create a payment plan or tokenise cards. Automatic M-Pesa debits are not enabled.
 - Automatic recurring card billing or Safaricom Ratiba requires separate setup, customer consent/mandates, provider approval, retry/cancellation logic and webhook tests.
-- Bank settlement account changes are configured with the payment provider, not by collecting bank credentials in MCAS. Confirm supported payout countries, account ownership checks and settlement fees with the provider.
+- Bank settlement account changes are configured in the Flutterwave merchant dashboard, not by collecting bank credentials in MCAS. Flutterwave documents settlements to an approved bank account and lists KES bank transfers for Kenya; live eligibility, settlement timing, KYC and fees depend on merchant approval.
 
 ## Production prerequisites
 
 1. Set `FLW_SECRET_KEY`, `FLW_SECRET_HASH` and the public HTTPS `MCAS_PUBLIC_URL` in the deployment secret manager. Never commit real secrets.
-2. Configure the exact webhook URL `/api/billing/flutterwave/webhook` in the provider dashboard and test signature/verification in sandbox.
+2. In Flutterwave's dashboard, set the approved Kenyan bank account as the settlement destination after KYC. Configure the exact webhook URL `/api/billing/flutterwave/webhook` in the provider dashboard and test signature/verification in sandbox.
 3. Verify M-Pesa and card flows separately, including underpayment, wrong currency, duplicate webhook, delayed webhook, abandoned checkout, refunds and disputes.
 4. Reconcile provider settlements daily. The ledger is not a substitute for provider statements or accounting.
 5. Use PostgreSQL and a durable job queue before scaling beyond a small pilot; add invoice/tax handling, customer cancellation and refunds, dispute handling, alerts, backup/restore drills and external security review.
