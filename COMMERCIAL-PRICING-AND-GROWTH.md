@@ -42,11 +42,11 @@ Launch in KES for the Kenyan market. USD reference prices are proposed internati
 |---|---:|---:|---:|---:|---|
 | Free | KES 0 | $0 | 20 | 1 | Product evaluation with conservative limits |
 | Starter | KES 2,500 | $19 | 150 | 1 | Independent developer / small operator |
-| Growth | KES 6,500 | $49 | 500 | 3 | Active freelancer / small studio |
-| Agency | KES 16,900 | $129 | 1,500 | 5 | Small agency / team workflow |
+| Growth | KES 6,500 | $49 | 500 | 1 | Active freelancer / small studio |
+| Agency | KES 16,900 | $129 | 1,500 | 1 | Small agency / team workflow |
 | Business | Custom | Custom | Contracted | Contracted | Larger usage, support or security requirements |
 
-The KES and USD prices are separately chosen price points, not a claim that they are an exact current FX conversion. Review local willingness to pay, usage costs, churn, gateway fees and support burden after a controlled pilot.
+The KES and USD prices are separately chosen price points, not a claim that they are an exact current FX conversion. Every tier is single-user in this first release; multi-seat team workspaces are not implemented and must not be advertised as available yet. Review local willingness to pay, usage costs, churn, gateway fees and support burden after a controlled pilot.
 
 ## 4. Prepaid credit packs
 
