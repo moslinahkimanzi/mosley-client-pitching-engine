@@ -368,7 +368,10 @@ function renderAdvisorDiagnosis(lead,audit){
  const findings=advisorFindings(lead,audit);
  const source=lead?.source_url?'<p class="tiny">Research source: <a href="'+safeLink(lead.source_url)+'" target="_blank" rel="noopener noreferrer">Open source listing</a></p>':'';
  const site=lead?.website?'<p class="tiny">Website checked: <a href="'+safeLink(lead.website)+'" target="_blank" rel="noopener noreferrer">'+esc(lead.website)+'</a></p>':'';
- $('advisorDiagnosis').innerHTML=findings.join('')+site+source+'<div class="warning"><b>Evidence boundary:</b> These are saved research observations or a lightweight public-page check, not a full SEO, accessibility, security, performance or conversion audit. Recommendations below are proposed improvements, not diagnosed defects.</div>';
+ const intelligence=audit?.intelligence;
+ const scoreCard=(label,item)=>item?'<div class="item"><div class="itemtop"><strong>'+esc(label)+'</strong><span class="badge '+(item.score===null?'amber':item.score>=80?'green':item.score>=55?'amber':'red')+'">'+(item.score===null?'Not scored':esc(item.score)+'/100')+'</span></div><p class="tiny">Evidence coverage: '+esc(item.coverage_percent)+'% · '+esc(item.assessed_signals)+' of '+esc(item.total_signals)+' signals assessed</p>'+((item.findings||[]).filter(x=>x.status==='issue'||x.status==='unknown').map(x=>'<p><b>'+esc(x.signal)+'</b> · '+esc(x.status)+'<br>'+esc(x.evidence)+'<br><span class="tiny">'+esc(x.recommendation)+'</span></p>').join(''))+'</div>':'';
+ const scores=intelligence?'<h3>Three website measurements</h3>'+scoreCard('Technical Health',intelligence.technical_health)+scoreCard('Business Readiness',intelligence.business_readiness)+scoreCard('Commercial Opportunity',intelligence.commercial_opportunity):'';
+ $('advisorDiagnosis').innerHTML=scores+findings.join('')+site+source+'<div class="warning"><b>Evidence boundary:</b> These are saved research observations or a lightweight public-page check, not a full SEO, accessibility, security, performance or conversion audit. Unknown signals are not treated as failures. Commercial Opportunity is a review priority, not buying intent or predicted revenue.</div>';
 }
 async function runAdvisorLiveAudit(){
  const lead=advisorProspect();
