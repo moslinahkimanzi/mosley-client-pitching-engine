@@ -319,8 +319,9 @@ def grant_verified_order(order_id: str, transaction_id: str):
             plan = PLANS.get(order['item_code'])
             if not plan or plan['amount_kes'] != int(order['amount_kes']): raise HTTPException(409, "Stored subscription order does not match catalogue.")
             period_end = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+            monthly_delta = int(plan['monthly_credits']) - int(account['monthly_credits'])
             c.execute("UPDATE billing_accounts SET plan_code=?,monthly_credits=?,period_start=?,period_end=?,updated_at=? WHERE user_id=?", (order['item_code'], plan['monthly_credits'], stamp, period_end, stamp, order['user_id']))
-            monthly_delta, purchased_delta = int(plan['monthly_credits']), 0
+            purchased_delta = 0
         elif order['item_type'] == 'credits':
             pack = CREDIT_PACKS.get(order['item_code'])
             if not pack or pack['amount_kes'] != int(order['amount_kes']): raise HTTPException(409, "Stored credit order does not match catalogue.")
