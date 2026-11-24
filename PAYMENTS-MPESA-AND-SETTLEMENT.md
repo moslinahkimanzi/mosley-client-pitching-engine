@@ -19,7 +19,7 @@ Official payment-method reference: https://developer.flutterwave.com/docs/collec
 
 - The app generates the product price, currency and transaction reference server-side. The browser cannot submit an arbitrary amount.
 - Checkout redirects are not proof of payment.
-- The webhook verifies the raw request body using HMAC-SHA256 (base64 digest) and the Flutterwave `flutterwave-signature` header with a distinct `FLW_SECRET_HASH`.
+- The webhook verifies the raw request body using HMAC-SHA256 (base64 digest) and the Flutterwave `flutterwave-signature` header with a distinct `FLW_SECRET_HASH`, matching Flutterwave's current webhook guide. The handler correlates the event to a local order and verifies the transaction by the locally stored reference before fulfilment.
 - Before adding credits or activating a plan, the server calls Flutterwave's transaction-verification endpoint and checks successful status, expected reference, exact amount and currency.
 - Store unique transaction references and webhook IDs; duplicate events must not grant value more than once.
 - Never store card PAN, CVV, OTP, PIN or raw payment credentials in MCAS.
@@ -53,6 +53,7 @@ If the owner remains an individual, do not assume direct Paybill eligibility. As
 
 The backend supports these server-only settings:
 
+- `MCAS_BILLING_ENABLED`: must remain `false` until sandbox tests pass and the operator has approved the merchant configuration. The checkout API enforces this server-side.
 - `FLW_SECRET_KEY`: Flutterwave test key in sandbox and live key only after approval.
 - `FLW_SECRET_HASH`: random webhook-signing secret configured identically in Flutterwave dashboard.
 - `MCAS_PUBLIC_URL`: public HTTPS base URL used for the checkout return URL in production.
