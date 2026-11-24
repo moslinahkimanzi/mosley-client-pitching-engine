@@ -163,6 +163,74 @@ class ApiSecurityTest(unittest.TestCase):
             self.assertEqual(untrusted.status_code, 403)
             self.assertEqual(untrusted.text, "Origin not allowed")
 
+    def test_workspace_preferences_are_validated_and_persisted_per_account(self):
+        with TestClient(app) as first:
+            self.register(first)
+            default = first.get("/api/workspace/preferences")
+            self.assertEqual(default.status_code, 200)
+            self.assertEqual(default.json()["country_code"], "KE")
+            self.assertEqual(default.json()["currency_code"], "KES")
+            self.assertEqual(default.json()["theme"], "dark")
+
+            regions = first.get("/api/regions")
+            self.assertEqual(regions.status_code, 200)
+            self.assertIn("US", [item["code"] for item in regions.json()["countries"]])
+            self.assertIn("America/New_York", regions.json()["timezones"])
+            self.assertIn("sw", [item["code"] for item in regions.json()["languages"]])
+
+            payload = {
+                "country_code": "US",
+                "currency_code": "USD",
+                "timezone": "America/New_York",
+                "language_code": "es",
+                "theme": "light",
+                "pricing_multiplier": 2.2,
+            }
+            token = self.csrf(first)
+            saved = first.put("/api/workspace/preferences", json=payload,
+                              headers={"X-CSRF-Token": token})
+            self.assertEqual(saved.status_code, 200, saved.text)
+            self.assertEqual(saved.json()["country_code"], "US")
+            self.assertEqual(saved.json()["currency_code"], "USD")
+            self.assertEqual(saved.json()["timezone"], "America/New_York")
+            self.assertEqual(saved.json()["language_code"], "es")
+            self.assertEqual(saved.json()["theme"], "light")
+            self.assertEqual(saved.json()["pricing_multiplier"], 2.2)
+
+            token = self.csrf(first)
+            invalid_timezone = dict(payload, timezone="Mars/Olympus_Mons")
+            rejected = first.put("/api/workspace/preferences", json=invalid_timezone,
+                                 headers={"X-CSRF-Token": token})
+            self.assertEqual(rejected.status_code, 422)
+
+            token = self.csrf(first)
+            invalid_currency = dict(payload, currency_code="ZZZ")
+            rejected = first.put("/api/workspace/preferences", json=invalid_currency,
+                                 headers={"X-CSRF-Token": token})
+            self.assertEqual(rejected.status_code, 422)
+
+        with TestClient(app) as second:
+            self.register(second)
+            other = second.get("/api/workspace/preferences")
+            self.assertEqual(other.status_code, 200)
+            self.assertEqual(other.json()["country_code"], "KE")
+            self.assertEqual(other.json()["currency_code"], "KES")
+
+    def test_currency_conversion_uses_cached_rates_without_live_network(self):
+        from unittest.mock import patch
+        with TestClient(app) as client:
+            self.register(client)
+            rates = {
+                "rates": {"USD": 1.0, "KES": 130.0, "EUR": 0.92},
+                "updated_at": "Mon, 24 Nov 2026 00:00:01 +0000",
+            }
+            with patch("backend.app._get_fx_rates", return_value=rates):
+                converted = client.get("/api/fx/convert?amount_kes=13000&currency=USD")
+            self.assertEqual(converted.status_code, 200, converted.text)
+            self.assertEqual(converted.json()["amount"], 100.0)
+            self.assertEqual(converted.json()["currency"], "USD")
+            self.assertEqual(converted.json()["source"], "ExchangeRate-API Open Access")
+
     def test_security_headers_are_present(self):
         with TestClient(app) as client:
             response = client.get("/api/health")
