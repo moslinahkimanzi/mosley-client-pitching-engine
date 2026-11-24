@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Optional, Literal
+from zoneinfo import ZoneInfo, available_timezones
 
 from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
@@ -154,6 +155,16 @@ def init_db():
             user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             provider TEXT NOT NULL,encrypted_refresh_token TEXT NOT NULL,connected_at TEXT NOT NULL,
             PRIMARY KEY(user_id,provider)
+        );
+        CREATE TABLE IF NOT EXISTS workspace_preferences(
+            user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+            country_code TEXT NOT NULL DEFAULT 'KE',
+            currency_code TEXT NOT NULL DEFAULT 'KES',
+            timezone TEXT NOT NULL DEFAULT 'Africa/Nairobi',
+            language_code TEXT NOT NULL DEFAULT 'en',
+            theme TEXT NOT NULL DEFAULT 'dark',
+            pricing_multiplier REAL NOT NULL DEFAULT 1.0,
+            updated_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS customer_feedback(
             id TEXT PRIMARY KEY,
@@ -472,6 +483,14 @@ class ResearchRunIn(BaseModel):
     industry: Literal["any", "restaurant", "salon", "retail", "professional", "hotel", "healthcare", "education"] = "any"
     keywords: str = Field(default="", max_length=120)
     max_results: int = Field(default=6, ge=1, le=12)
+
+class WorkspacePreferencesIn(BaseModel):
+    country_code: str = Field(pattern=r"^[A-Z]{2}$")
+    currency_code: str = Field(pattern=r"^[A-Z]{3}$")
+    timezone: str = Field(min_length=3, max_length=80)
+    language_code: Literal["en", "sw", "fr", "es", "de", "pt", "ar"]
+    theme: Literal["dark", "light", "system"]
+    pricing_multiplier: float = Field(ge=0.5, le=5.0)
 
 class AIIn(BaseModel):
     lead_id: Optional[str] = None
@@ -967,6 +986,24 @@ def serper_request(endpoint: str, payload: dict) -> dict:
     return data
 
 
+ISO_COUNTRY_CODES = set("AF AL DZ AS AD AO AI AQ AG AR AM AW AU AT AZ BS BH BD BB BY BE BZ BJ BM BT BO BQ BA BW BV BR IO BN BG BF BI CV KH CM CA KY CF TD CL CN CX CC CO KM CG CD CK CR HR CU CW CY CZ CI DK DJ DM DO EC EG SV GQ ER EE SZ ET FK FO FJ FI FR GF PF TF GA GM GE DE GH GI GR GL GD GP GU GT GG GN GW GY HT HM VA HN HK HU IS IN ID IR IQ IE IM IL IT JM JP JE JO KZ KE KI KP KR KW KG LA LV LB LS LR LY LI LT LU MO MG MW MY MV ML MT MH MQ MR MU YT MX FM MD MC MN ME MS MA MZ MM NA NR NP NL NC NZ NI NE NG NU NF MK MP NO OM PK PW PS PA PG PY PE PH PN PL PT PR QA RO RU RW RE BL SH KN LC MF PM VC WS SM ST SA SN RS SC SL SG SX SK SI SB SO ZA GS SS ES LK SD SR SJ SE CH SY TW TJ TZ TH TL TK TO TT TN TM TC TV TR UG UA AE GB US UM UY UZ VU VE VN VG VI WF EH YE ZM ZW AX".split())
+
+def workspace_preferences_for(user_id: str) -> dict:
+    with db() as c:
+        c.execute(
+            "INSERT OR IGNORE INTO workspace_preferences(user_id,updated_at) VALUES(?,?)",
+            (user_id, now()),
+        )
+        row = c.execute(
+            "SELECT country_code,currency_code,timezone,language_code,theme,pricing_multiplier,updated_at "
+            "FROM workspace_preferences WHERE user_id=?",
+            (user_id,),
+        ).fetchone()
+    return dict(row) if row else {
+        "country_code": "KE", "currency_code": "KES", "timezone": "Africa/Nairobi",
+        "language_code": "en", "theme": "dark", "pricing_multiplier": 1.0,
+    }
+
 def serper_query_for(payload: ResearchRunIn) -> str:
     """Build a focused local-business query from the location, category and keyword."""
     labels = {
@@ -1203,24 +1240,22 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
     location = payload.location.strip()
     if not location or not re.search(r"[A-Za-z0-9]", location):
         raise HTTPException(422, "Enter a town, city or named administrative area.")
+    preferences = workspace_preferences_for(user["id"])
+    country_code = preferences["country_code"].lower()
+    language_code = preferences["language_code"]
     query = serper_query_for(payload)
-    cache_key = query.casefold()
+    cache_key = (query + "|gl=" + country_code + "|hl=" + language_code).casefold()
     cached = _SERPER_CACHE.get(cache_key)
     places = cached[1] if cached and time.time() - cached[0] < _SERPER_CACHE_TTL else None
     if places is None:
-        request_payload = {"q": query}
-        gl = os.getenv("SERPER_GL", "").strip()
-        hl = os.getenv("SERPER_HL", "en").strip()
-        if gl:
-            request_payload["gl"] = gl
-        if hl:
-            request_payload["hl"] = hl
+        request_payload = {"q": query, "gl": country_code, "hl": language_code}
         data = serper_request("places", request_payload)
         places = data.get("places") or []
         # When Places has no records, use Serper's ordinary web results as a fallback.
         # These are saved as unverified source links, never assumed to be official websites.
         if not places:
-            web_data = serper_request("search", {"q": query, "num": min(10, payload.max_results)})
+            web_data = serper_request("search", {"q": query, "num": min(10, payload.max_results),
+                                                     "gl": country_code, "hl": language_code})
             places = [{
                 "title": item.get("title"),
                 "link": item.get("link"),
@@ -1815,6 +1850,98 @@ def fernet():
         return Fernet(os.getenv("MCAS_ENCRYPTION_KEY").encode())
     except Exception:
         raise HTTPException(500, "MCAS_ENCRYPTION_KEY must be a valid Fernet key")
+
+@app.get("/api/workspace/preferences")
+def get_workspace_preferences(user=Depends(current_user)):
+    return workspace_preferences_for(user["id"])
+
+
+@app.put("/api/workspace/preferences")
+def update_workspace_preferences(payload: WorkspacePreferencesIn, user=Depends(current_user)):
+    country = payload.country_code.upper()
+    currency = payload.currency_code.upper()
+    timezone_name = payload.timezone.strip()
+    if country not in ISO_COUNTRY_CODES:
+        raise HTTPException(422, "Choose a valid ISO country.")
+    if not re.fullmatch(r"[A-Z]{3}", currency):
+        raise HTTPException(422, "Choose a valid three-letter currency code.")
+    try:
+        ZoneInfo(timezone_name)
+    except Exception:
+        raise HTTPException(422, "Choose a valid IANA time zone.")
+    with db() as c:
+        c.execute(
+            """INSERT INTO workspace_preferences
+               (user_id,country_code,currency_code,timezone,language_code,theme,pricing_multiplier,updated_at)
+               VALUES(?,?,?,?,?,?,?,?)
+               ON CONFLICT(user_id) DO UPDATE SET
+                 country_code=excluded.country_code,currency_code=excluded.currency_code,
+                 timezone=excluded.timezone,language_code=excluded.language_code,
+                 theme=excluded.theme,pricing_multiplier=excluded.pricing_multiplier,
+                 updated_at=excluded.updated_at""",
+            (user["id"], country, currency, timezone_name, payload.language_code,
+             payload.theme, payload.pricing_multiplier, now()),
+        )
+        audit(c, user["id"], "workspace.preferences_updated", {
+            "country_code": country, "currency_code": currency,
+            "timezone": timezone_name, "language_code": payload.language_code,
+            "theme": payload.theme,
+        })
+    return workspace_preferences_for(user["id"])
+
+
+_FX_RATE_CACHE: dict = {"rates": None, "valid_until": 0, "updated_at": None}
+
+
+def _get_fx_rates():
+    if _FX_RATE_CACHE["rates"] and time.time() < _FX_RATE_CACHE["valid_until"]:
+        return _FX_RATE_CACHE
+    req = urllib.request.Request(
+        "https://open.er-api.com/v6/latest/USD",
+        headers={"Accept": "application/json", "User-Agent": "MCAS/2.0"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as response:
+            data = json.loads(response.read(500_000))
+    except Exception:
+        if _FX_RATE_CACHE["rates"]:
+            return _FX_RATE_CACHE
+        raise HTTPException(503, "Currency conversion is temporarily unavailable. Try again later.")
+    rates = data.get("rates") if isinstance(data, dict) and data.get("result") == "success" else None
+    if not isinstance(rates, dict) or not rates.get("KES"):
+        raise HTTPException(502, "The exchange-rate provider returned an incomplete response.")
+    next_update = data.get("time_next_update_unix")
+    valid_until = int(next_update) if isinstance(next_update, (int, float)) else int(time.time()) + 86400
+    _FX_RATE_CACHE.update({
+        "rates": rates, "valid_until": max(int(time.time()) + 3600, valid_until),
+        "updated_at": data.get("time_last_update_utc"),
+    })
+    return _FX_RATE_CACHE
+
+
+@app.get("/api/fx/convert")
+def convert_kes_estimate(amount_kes: float = Query(gt=0, le=1000000000),
+                         currency: str = Query(pattern=r"^[A-Z]{3}$"),
+                         user=Depends(current_user)):
+    target = currency.upper()
+    if target == "KES":
+        return {"amount": round(amount_kes, 2), "currency": "KES", "rate": 1.0,
+                "updated_at": None, "source": "MCAS base estimate"}
+    cache = _get_fx_rates()
+    rates = cache["rates"]
+    target_rate = rates.get(target)
+    kes_rate = rates.get("KES")
+    if not isinstance(target_rate, (int, float)) or not isinstance(kes_rate, (int, float)) or kes_rate <= 0:
+        raise HTTPException(422, "The selected currency is not currently supported by the exchange-rate provider.")
+    rate = float(target_rate) / float(kes_rate)
+    return {
+        "amount": round(float(amount_kes) * rate, 2),
+        "currency": target,
+        "rate": round(rate, 8),
+        "updated_at": cache.get("updated_at"),
+        "source": "ExchangeRate-API Open Access",
+    }
+
 
 @app.get("/api/integrations/status")
 def integration_status(user=Depends(current_user)):
