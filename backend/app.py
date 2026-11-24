@@ -501,9 +501,10 @@ def register(payload: RegisterIn, response: Response):
     session = secrets.token_urlsafe(36)
     try:
         with db() as c:
-            c.execute("INSERT INTO users VALUES(?,?,?,?)", (uid, email, password_hash(payload.password), now()))
+            c.execute("INSERT INTO users (id,email,password_hash,created_at) VALUES(?,?,?,?)", (uid, email, password_hash(payload.password), now()))
             c.execute("INSERT INTO sessions VALUES(?,?,?)", (token_hash(session), uid, int(time.time()) + SESSION_SECONDS))
             c.execute("INSERT INTO billing_accounts(user_id,credit_balance,plan,subscription_status,updated_at) VALUES(?,10,'trial','trial',?)", (uid, now()))
+            c.execute("INSERT INTO credit_ledger(id,user_id,amount,balance_after,reason,reference,created_at) VALUES(?,?,10,10,'trial_grant','signup',?)", (secrets.token_urlsafe(16), uid, now()))
             audit(c, uid, "account.created")
     except sqlite3.IntegrityError:
         raise HTTPException(409, "An account with this email already exists")
