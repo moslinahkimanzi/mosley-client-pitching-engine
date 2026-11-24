@@ -232,7 +232,24 @@ def audit(c, uid, action, metadata=None):
 
 def ensure_billing_account(c, user_id: str):
     c.execute("INSERT OR IGNORE INTO billing_accounts(user_id,plan_code,monthly_credits,purchased_credits,updated_at) VALUES(?,'free',20,0,?)", (user_id, now()))
-    return c.execute("SELECT * FROM billing_accounts WHERE user_id=?", (user_id,)).fetchone()
+    account = c.execute("SELECT * FROM billing_accounts WHERE user_id=?", (user_id,)).fetchone()
+    if account["period_end"]:
+        try:
+            expired = datetime.fromisoformat(account["period_end"].replace("Z", "+00:00")) <= datetime.now(timezone.utc)
+        except (TypeError, ValueError):
+            expired = True
+        if expired:
+            c.execute("UPDATE billing_accounts SET plan_code='free',monthly_credits=20,period_start=NULL,period_end=NULL,updated_at=? WHERE user_id=?", (now(), user_id))
+            account = c.execute("SELECT * FROM billing_accounts WHERE user_id=?", (user_id,)).fetchone()
+    return account
+
+
+def require_credits(user_id: str, amount: int):
+    with db() as c:
+        account = ensure_billing_account(c, user_id)
+        if int(account["monthly_credits"]) + int(account["purchased_credits"]) < amount:
+            raise HTTPException(402, "Not enough MCAS credits. Choose a monthly plan or buy a credit pack.")
+
 
 def debit_credits(user_id: str, amount: int, reason: str, reference: Optional[str] = None):
     if amount <= 0: return
