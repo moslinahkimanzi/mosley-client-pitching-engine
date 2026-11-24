@@ -3205,7 +3205,7 @@ def billing_checkout(payload: BillingCheckoutIn, user=Depends(current_user)):
     if payload.payment_method == 'mpesa':
         if not payload.phone_number:
             raise HTTPException(422, 'Enter the M-Pesa phone number including country code.')
-        if not re.fullmatch(r'\\+?\\d{9,15}', payload.phone_number.strip()):
+        if not re.fullmatch(r'\+?\d{9,15}', payload.phone_number.strip()):
             raise HTTPException(422, 'Enter a valid international phone number.')
     elif payload.phone_number:
         raise HTTPException(422, 'A phone number is accepted only for M-Pesa checkout.')
