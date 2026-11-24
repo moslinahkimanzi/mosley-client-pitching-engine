@@ -1973,9 +1973,11 @@ def analyze_opted_in_feedback(user=Depends(current_user)):
         },
     ]
     raw = call_configured_ai(messages, temperature=0.15, max_tokens=1800)
+    if not isinstance(raw, (str, bytes, bytearray)):
+        raise HTTPException(502, "The AI provider returned an invalid response type. No improvement plan was saved.")
     try:
         result = json.loads(raw)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         raise HTTPException(502, "The AI response was not valid JSON. No improvement plan was saved.")
     if not isinstance(result, dict):
         raise HTTPException(502, "The AI response did not match the improvement-plan schema.")
