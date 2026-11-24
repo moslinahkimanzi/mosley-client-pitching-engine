@@ -202,6 +202,10 @@ def init_db():
         add_column(c, "leads", "website_status", "TEXT NOT NULL DEFAULT 'not_checked'")
         add_column(c, "leads", "website_verified_at", "TEXT")
         add_column(c, "leads", "website_audit_json", "TEXT NOT NULL DEFAULT '{}'")
+        add_column(c, "leads", "business_address", "TEXT")
+        add_column(c, "leads", "business_verification_status", "TEXT NOT NULL DEFAULT 'unverified'")
+        add_column(c, "leads", "business_verification_json", "TEXT NOT NULL DEFAULT '{}'")
+        add_column(c, "leads", "business_verified_at", "TEXT")
         add_column(c, "users", "google_subject", "TEXT")
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_subject ON users(google_subject) WHERE google_subject IS NOT NULL")
         add_column(c, "leads", "contact_phone", "TEXT")
@@ -690,6 +694,8 @@ def update_lead(lead_id: str, payload: LeadIn, user=Depends(current_user)):
     validate_email(payload.contact_email)
     with db() as c:
         current = owned_lead(c, lead_id, user["id"])
+        if payload.status == "Verified" and current["status"] != "Verified":
+            raise HTTPException(409, "Business verification cannot be bypassed. Recheck the public listing and confirm the source evidence in Prospects.")
         changed_website = (current["website"] or "").strip() != (payload.website or "").strip()
         next_status = ("not_checked" if payload.website else "not_listed") if changed_website else current["website_status"]
         cur = c.execute("""UPDATE leads SET name=?,website=?,market=?,evidence=?,status=?,contact_email=?,
@@ -1411,12 +1417,14 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             )
             c.execute(
                 """INSERT INTO leads(id,user_id,name,website,market,evidence,status,score,created_at,updated_at,
-                   contact_email,contact_phone,source_url,do_not_contact,website_status,website_verified_at,website_audit_json)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?)""",
+                   contact_email,contact_phone,source_url,do_not_contact,website_status,website_verified_at,website_audit_json,
+                   business_address,business_verification_status,business_verification_json,business_verified_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?)""",
                 (lead_id, user["id"], name, website, location, evidence, "Unverified", score, stamp, stamp,
                  email, phone, source_url, website_verification,
                  stamp if website_verification == "verified" else None,
-                 json.dumps({k: v for k, v in website_audit.items() if k != "links"})[:30000]),
+                 json.dumps({k: v for k, v in website_audit.items() if k != "links"})[:30000],
+                 address or None, "unverified", "{}", None),
             )
             title = "Website opportunity plan — " + name
             proposal = (
@@ -1573,6 +1581,130 @@ def store_website_audit(c, lead_id: str, uid: str, result: dict) -> str:
                stamp if website_status == "verified" else None,
                json.dumps(safe_result)[:30000], stamp, lead_id, uid))
     return website_status
+
+
+def _identity_tokens(value: str) -> set[str]:
+    words = re.findall(r"[a-z0-9]+", (value or "").casefold())
+    stop = {"the", "and", "of", "in", "at", "limited", "ltd", "llc", "inc", "company", "co"}
+    return {word for word in words if len(word) > 1 and word not in stop}
+
+
+def _identity_overlap(left: str, right: str) -> float:
+    a, b = _identity_tokens(left), _identity_tokens(right)
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def _phone_digits(value: str) -> str:
+    return re.sub(r"\\D", "", value or "")
+
+
+@app.post("/api/leads/{lead_id}/verify-business")
+def verify_lead_business(lead_id: str, user=Depends(current_user)):
+    """Recheck the saved identity against a fresh regional business listing; never silently assert legal identity."""
+    with db() as c:
+        lead = owned_lead(c, lead_id, user["id"])
+    if not lead["name"] or not lead["market"]:
+        raise HTTPException(422, "The prospect needs a business name and location before it can be rechecked.")
+    preferences = workspace_preferences_for(user["id"])
+    query = '"' + lead["name"] + '" ' + lead["market"]
+    data = serper_request("places", {
+        "q": query, "gl": preferences["country_code"].lower(),
+        "hl": preferences["language_code"],
+    })
+    candidates = data.get("places") if isinstance(data.get("places"), list) else []
+    saved_phone = _phone_digits(lead["contact_phone"] or "")
+    saved_address = lead["business_address"] or ""
+    best = None
+    best_score = 0.0
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        candidate_name = str(item.get("title") or item.get("name") or "").strip()
+        candidate_address = str(item.get("address") or "").strip()
+        candidate_phone = str(item.get("phoneNumber") or item.get("phone") or "").strip()
+        name_score = _identity_overlap(lead["name"], candidate_name)
+        address_score = _identity_overlap(saved_address, candidate_address) if saved_address else 0.0
+        candidate_digits = _phone_digits(candidate_phone)
+        phone_match = bool(saved_phone and candidate_digits and
+                           (saved_phone.endswith(candidate_digits[-8:]) or candidate_digits.endswith(saved_phone[-8:])))
+        exact_name = bool(_identity_tokens(lead["name"]) and
+                          _identity_tokens(lead["name"]) <= _identity_tokens(candidate_name))
+        corroborated = (exact_name or name_score >= 0.75) and (
+            phone_match or (bool(saved_address) and address_score >= 0.35)
+        )
+        score = name_score + (0.5 if phone_match else 0.0) + (0.35 * address_score)
+        if score > best_score:
+            best, best_score = (item, corroborated), score
+    checked_at = now()
+    matched = bool(best and best[1])
+    listing = best[0] if best else {}
+    verification = {
+        "provider": "Serper Places",
+        "checked_at": checked_at,
+        "query": query,
+        "status": "provider_reconfirmed" if matched else "needs_manual_review",
+        "checks": {
+            "business_name_match": bool(matched),
+            "address_match": bool(matched and saved_address and
+                                  _identity_overlap(saved_address, str(listing.get("address") or "")) >= 0.35),
+            "phone_match": bool(matched and saved_phone and
+                                _phone_digits(str(listing.get("phoneNumber") or listing.get("phone") or "")).endswith(saved_phone[-8:])),
+        },
+        "listing": {
+            "name": str(listing.get("title") or listing.get("name") or "")[:160],
+            "address": str(listing.get("address") or "")[:300],
+            "phone": str(listing.get("phoneNumber") or listing.get("phone") or "")[:60],
+            "website": str(listing.get("website") or listing.get("websiteUrl") or "")[:500],
+            "source_url": serper_source_url(listing, lead["name"], saved_address),
+        } if matched else {},
+        "limitation": "A fresh listing match is provider corroboration, not legal-entity verification or proof that a phone number/email is controlled by the business. A human must inspect the cited listing before confirming.",
+    }
+    with db() as c:
+        c.execute(
+            """UPDATE leads SET business_verification_status=?,business_verification_json=?,
+               business_verified_at=NULL,updated_at=? WHERE id=? AND user_id=?""",
+            ("provider_reconfirmed" if matched else "needs_manual_review",
+             json.dumps(verification)[:12000], checked_at, lead_id, user["id"]),
+        )
+        audit(c, user["id"], "lead.business_rechecked", {
+            "lead_id": lead_id, "status": verification["status"],
+        })
+    return verification
+
+
+@app.post("/api/leads/{lead_id}/confirm-business")
+def confirm_lead_business(lead_id: str, user=Depends(current_user)):
+    """Record an explicit human confirmation after reviewing fresh provider evidence."""
+    with db() as c:
+        lead = owned_lead(c, lead_id, user["id"])
+        if lead["business_verification_status"] != "provider_reconfirmed":
+            raise HTTPException(409, "A fresh matching public listing is required before human confirmation.")
+        try:
+            verification = json.loads(lead["business_verification_json"] or "{}")
+        except (TypeError, ValueError):
+            verification = {}
+        checked_at = verification.get("checked_at")
+        if not checked_at or checked_at != lead["updated_at"]:
+            # updated_at may change for unrelated edits; the timestamp inside the evidence is authoritative.
+            checked_epoch = 0
+            try:
+                checked_epoch = int(datetime.fromisoformat(checked_at.replace("Z", "+00:00")).timestamp())
+            except Exception:
+                pass
+            if not checked_epoch or time.time() - checked_epoch > 7 * 24 * 60 * 60:
+                raise HTTPException(409, "The listing check is older than seven days. Recheck it before confirming.")
+        stamp = now()
+        c.execute(
+            """UPDATE leads SET status='Verified',business_verification_status='human_confirmed',
+               business_verified_at=?,updated_at=? WHERE id=? AND user_id=?""",
+            (stamp, stamp, lead_id, user["id"]),
+        )
+        audit(c, user["id"], "lead.business_human_confirmed", {"lead_id": lead_id})
+    return {"status": "Verified", "business_verification_status": "human_confirmed",
+            "business_verified_at": stamp,
+            "message": "You confirmed the business after reviewing the fresh public listing. This is not legal-entity or contact-ownership verification."}
 
 
 @app.post("/api/leads/{lead_id}/verify-website")
