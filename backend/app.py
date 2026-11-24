@@ -1044,6 +1044,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
     location = payload.location.strip()
     if not location or not re.search(r"[A-Za-z0-9]", location):
         raise HTTPException(422, "Enter a town, city or named administrative area.")
+    require_credits(user["id"], CREDIT_COSTS["research_run"])
     query = serper_query_for(payload)
     cache_key = query.casefold()
     cached = _SERPER_CACHE.get(cache_key)
@@ -1251,6 +1252,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
         })
 
     with db() as c:
+        debit_credits(c, user["id"], CREDIT_COSTS["research_run"], "research_run", secrets.token_urlsafe(12))
         audit(c, user["id"], "research.run", {
             "location": location, "industry": payload.industry,
             "query": query[:160], "provider": "Serper",
@@ -1324,6 +1326,7 @@ def create_builder_prompt(lead_id: str, user=Depends(current_user)):
 
 @app.post("/api/audit-website")
 def audit_website(payload: dict, user=Depends(current_user)):
+    require_credits(user["id"], CREDIT_COSTS["website_audit"])
     raw = str(payload.get("url", ""))[:2048].strip()
     result = safe_site_fetch(raw)
     result["checked_at"] = now()
@@ -1481,6 +1484,7 @@ def ai_assistant(payload: AIIn, request: Request, user=Depends(current_user)):
     if configured_hosts and parsed.hostname.lower().rstrip(".") not in configured_hosts:
         log_security_event("ai.endpoint_host_rejected", request)
         raise HTTPException(503, "The configured AI endpoint host is not in MCAS_AI_ALLOWED_HOSTS.")
+    require_credits(user["id"], CREDIT_COSTS["ai_draft"])
     if payload.task not in {"email", "reply", "proposal"}:
         raise HTTPException(422, "Unsupported assistant task")
     if not payload.lead_id:
@@ -2086,6 +2090,14 @@ def review_customer_feedback(feedback_id: str, payload: FeedbackReviewIn, user=D
             raise HTTPException(404, "Feedback item not found.")
         audit(c, user["id"], "feedback.reviewed", {"feedback_id": feedback_id, "status": payload.status})
     return {"ok": True, "status": payload.status}
+
+def require_credits(uid, amount):
+    with db() as c:
+        row = c.execute("SELECT credit_balance FROM billing_accounts WHERE user_id=?", (uid,)).fetchone()
+    if not row or int(row["credit_balance"]) < amount:
+        available = int(row["credit_balance"]) if row else 0
+        raise HTTPException(402, "Insufficient credits. Required: " + str(amount) + "; available: " + str(available) + ".")
+
 
 def debit_credits(c, uid, amount, reason, reference):
     c.execute("BEGIN IMMEDIATE")
