@@ -8,6 +8,13 @@ Current published Kenya pricing lists 2.9% for local wallets/mobile money and 3.
 
 Official payment-method reference: https://developer.flutterwave.com/docs/collections-inflow/payment-methods.
 
+## 1A. Kenyan merchant onboarding if the owner is not yet registered
+
+Flutterwave's currently published Kenya onboarding guidance includes an **Unregistered Businesses** category. It lists items such as a verifiable website URL or social page, proof of residential address, payout details (bank or mobile-money details), estimated monthly sales, a business-activity profile, valid identification and a KRA PIN certificate. The provider decides eligibility and may request additional evidence; this is not a promise of approval. Review the current official checklist before applying:
+https://www.flutterwave.com/us/support/onboarding/onboarding-requirements-for-using-flutterwave-in-kenya
+
+This means formal business registration may not be an absolute prerequisite for every unregistered-business application, but a KRA PIN, identity, address and business evidence may still be required. Do not invent or borrow another person's registration or payout details. Use a payout account/wallet in the applicant's own name and ask Flutterwave to confirm the exact acceptable documents for this specific account.
+
 ## 2. Monthly subscriptions versus prepaid credits
 
 - Prepaid credits: one-off hosted checkout; add credits only after server-side transaction verification.
