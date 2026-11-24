@@ -1408,6 +1408,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
     location = payload.location.strip()
     if not location or not re.search(r"[A-Za-z0-9]", location):
         raise HTTPException(422, "Enter a town, city or named administrative area.")
+    require_credits(user["id"], 5)
     preferences = workspace_preferences_for(user["id"])
     country_code = preferences["country_code"].lower()
     language_code = preferences["language_code"]
@@ -1750,6 +1751,7 @@ def verify_lead_business(lead_id: str, user=Depends(current_user)):
         lead = owned_lead(c, lead_id, user["id"])
     if not lead["name"] or not lead["market"]:
         raise HTTPException(422, "The prospect needs a business name and location before it can be rechecked.")
+    require_credits(user["id"], 3)
     preferences = workspace_preferences_for(user["id"])
     query = '"' + lead["name"] + '" ' + lead["market"]
     data = serper_request("places", {
@@ -1990,6 +1992,7 @@ def verify_lead_website(lead_id: str, user=Depends(current_user)):
 
 @app.post("/api/audit-website")
 def audit_website(payload: WebsiteAuditIn, user=Depends(current_user)):
+    require_credits(user["id"], credits_for_audit(payload.max_pages))
     result = advanced_site_audit(payload.url, safe_site_fetch, payload.max_pages)
     result["checked_at"] = now()
     if payload.lead_id:
@@ -2018,6 +2021,7 @@ def competitor_intelligence(payload: CompetitorIn, user=Depends(current_user)):
     if not market:
         raise HTTPException(422, "The selected prospect needs a market or location before competitor research.")
 
+    require_credits(user["id"], credits_for_competitors(payload.max_results))
     category = payload.industry.replace("_", " ")
     query = category + " businesses in " + market
     data = serper_request("places", {
@@ -2261,6 +2265,7 @@ def call_configured_ai(messages: list[dict], temperature: float = 0.2, max_token
 
 @app.post("/api/assistant/draft")
 def ai_assistant(payload: AIIn, request: Request, user=Depends(current_user)):
+    require_credits(user["id"], 1)
     base = os.getenv("AI_API_BASE_URL", "").rstrip("/")
     key = os.getenv("AI_API_KEY", "")
     model = os.getenv("AI_MODEL", "")
@@ -2386,6 +2391,7 @@ def ai_assistant(payload: AIIn, request: Request, user=Depends(current_user)):
             502,
             "The AI provider returned an unexpected or empty response. No draft was saved."
         )
+    debit_credits(user["id"], 1, "ai_generation", payload.task)
     with db() as c:
         audit(c, user["id"], "assistant.generated", {"task": payload.task})
     return {"draft": str(text)[:16000], "provider": "configured AI provider",
