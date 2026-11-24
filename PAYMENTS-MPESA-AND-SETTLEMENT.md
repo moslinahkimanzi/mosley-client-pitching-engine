@@ -26,14 +26,14 @@ This means formal business registration may not be an absolute prerequisite for 
 
 - The app generates the product price, currency and transaction reference server-side. The browser cannot submit an arbitrary amount.
 - Checkout redirects are not proof of payment.
-- The webhook verifies the raw request body using HMAC-SHA256 (base64 digest) and the Flutterwave `flutterwave-signature` header with a distinct `FLW_SECRET_HASH`, matching Flutterwave's current webhook guide. The handler correlates the event to a local order and verifies the transaction by the locally stored reference before fulfilment.
+- This implementation uses Flutterwave's v3 API. Its webhook guide specifies the `verif-hash` header: compare it in constant time with the secret hash configured in the Flutterwave dashboard and stored as `FLW_SECRET_HASH`. Do not substitute the separate v4/HMAC webhook scheme unless the API integration is migrated to v4. The handler correlates the event to a local order and verifies the transaction by the locally stored reference before fulfilment.
 - Before adding credits or activating a plan, the server calls Flutterwave's transaction-verification endpoint and checks successful status, expected reference, exact amount and currency.
 - Store unique transaction references and webhook IDs; duplicate events must not grant value more than once.
 - Never store card PAN, CVV, OTP, PIN or raw payment credentials in MCAS.
 - Keep API secrets server-side. Use HTTPS for the public webhook URL. Configure webhook retries in the provider dashboard.
 - A failed verification, amount mismatch, currency mismatch, missing local order or invalid signature must not activate paid features.
 
-Official documentation: https://developer.flutterwave.com/docs/webhooks and https://developer.flutterwave.com/docs/transaction-verification.
+Official documentation: https://developer.flutterwave.com/v3.0.0/docs/webhooks and https://developer.flutterwave.com/docs/transaction-verification.
 
 ## 4. Settlement to the owner
 
