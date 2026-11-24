@@ -16,6 +16,18 @@ Official information:
 - Safaricom Business Till: https://www.business.safaricom.co.ke/products/m-pesa-business-till
 - Lipa Na M-PESA application portal: https://m-pesaforbusiness.co.ke/apply
 
+### Individual applicant (no business registration yet)
+
+Safaricom's published 2024 Lipa Na M-PESA requirements explicitly list **Individual — Buy Goods product only**. They do not list an individual as eligible for the standard Paybill product. For an individual Buy Goods application, the published checklist asks for:
+- completed and signed application form and terms;
+- National ID, passport, Alien ID or Military ID;
+- for online businesses, the website link and/or approved documentation showing the online business;
+- if requesting bank settlement, an individual KRA PIN certificate and bank evidence: cancelled cheque or bank statement for banks on Real Time Settlement, or a bank letter / cancelled cheque for banks not on RTS.
+
+This means you may be able to apply as an individual for Buy Goods without first registering a sole proprietorship, but Safaricom makes the final eligibility and KYC decision. The 2024 document is the published reference; confirm the currently accepted documents and online-business classification with Safaricom before submitting.
+
+Official 2024 requirements PDF: https://www.safaricom.co.ke/images/Downloads/Lipa-na-M-PESA-Requirements-2024.pdf
+
 ## 2. Set up the nominated M-PESA number and bank settlement
 
 During the merchant application, confirm:
