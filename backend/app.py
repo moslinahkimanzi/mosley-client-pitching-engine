@@ -701,17 +701,33 @@ def update_lead(lead_id: str, payload: LeadIn, user=Depends(current_user)):
         if payload.status == "Verified" and current["status"] != "Verified":
             raise HTTPException(409, "Business verification cannot be bypassed. Recheck the public listing and confirm the source evidence in Prospects.")
         changed_website = (current["website"] or "").strip() != (payload.website or "").strip()
-        next_status = ("not_checked" if payload.website else "not_listed") if changed_website else current["website_status"]
+        identity_changed = any([
+            (current["name"] or "").strip().casefold() != payload.name.strip().casefold(),
+            (current["market"] or "").strip().casefold() != payload.market.strip().casefold(),
+            (current["business_address"] or "").strip().casefold() != (payload.business_address or "").strip().casefold(),
+            (current["contact_phone"] or "").strip() != (payload.contact_phone or "").strip(),
+            (current["contact_email"] or "").strip().casefold() != (payload.contact_email or "").strip().casefold(),
+        ])
+        next_website_status = ("not_checked" if payload.website else "not_listed") if changed_website else current["website_status"]
+        next_business_status = "unverified" if identity_changed else current["business_verification_status"]
+        next_lead_status = "Unverified" if identity_changed else payload.status
         cur = c.execute("""UPDATE leads SET name=?,website=?,market=?,business_address=?,evidence=?,status=?,contact_email=?,
             contact_phone=?,source_url=?,do_not_contact=?,website_status=?,website_verified_at=?,website_audit_json=?,
+            business_verification_status=?,business_verification_json=?,business_verified_at=?,
             updated_at=? WHERE id=? AND user_id=?""",
-            (payload.name.strip(), payload.website, payload.market, payload.business_address, payload.evidence, payload.status,
+            (payload.name.strip(), payload.website, payload.market, payload.business_address, payload.evidence, next_lead_status,
              payload.contact_email, payload.contact_phone, payload.source_url, int(payload.do_not_contact),
-             next_status, None if changed_website else current["website_verified_at"],
-             "{}" if changed_website else current["website_audit_json"], now(), lead_id, user["id"]))
+             next_website_status, None if changed_website else current["website_verified_at"],
+             "{}" if changed_website else current["website_audit_json"], next_business_status,
+             "{}" if identity_changed else current["business_verification_json"],
+             None if identity_changed else current["business_verified_at"],
+             now(), lead_id, user["id"]))
         if not cur.rowcount:
             raise HTTPException(404, "Prospect not found")
-        audit(c, user["id"], "lead.updated", {"lead_id": lead_id, "website_changed": changed_website})
+        audit(c, user["id"], "lead.updated", {
+            "lead_id": lead_id, "website_changed": changed_website,
+            "identity_changed": identity_changed,
+        })
     return {"ok": True}
 
 @app.delete("/api/leads/{lead_id}")
