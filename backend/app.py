@@ -3107,7 +3107,7 @@ def billing_checkout(payload: BillingCheckoutIn, user=Depends(current_user)):
     tx_ref, order_id, stamp = 'MCAS-'+secrets.token_urlsafe(18), secrets.token_urlsafe(18), now()
     with db() as c:
         c.execute("INSERT INTO billing_orders(id,user_id,tx_ref,item_type,item_code,amount_kes,currency,status,created_at,updated_at) VALUES(?,?,?,?,?,?,'KES','pending',?,?)", (order_id,user['id'],tx_ref,payload.item_type,payload.item_code,int(product['amount_kes']),stamp,stamp))
-    request_data = {'tx_ref':tx_ref,'amount':str(int(product['amount_kes'])),'currency':'KES','redirect_url':public_url+'/?payment_return='+urllib.parse.quote(order_id),'payment_options':'card' if payload.payment_method == 'card' else 'mobilemoneykenya','customer':{'email':user['email'],'phonenumber':payload.phone_number or ''},'customizations':{'title':'Mosley Client Acquisition System','description':product['name']},'meta':{'mcas_order_id':order_id,'mcas_item_type':payload.item_type,'mcas_item_code':payload.item_code}}
+    request_data = {'tx_ref':tx_ref,'amount':str(int(product['amount_kes'])),'currency':'KES','redirect_url':public_url+'/?payment_return='+urllib.parse.quote(order_id),'payment_options':'card' if payload.payment_method == 'card' else 'mpesa','customer':{'email':user['email'],'phone_number':payload.phone_number or ''},'customizations':{'title':'Mosley Client Acquisition System','description':product['name']},'meta':{'mcas_order_id':order_id,'mcas_item_type':payload.item_type,'mcas_item_code':payload.item_code}}
     try:
         result = flutterwave_request('POST','payments',request_data)
         checkout_url = result.get('data',{}).get('link') if isinstance(result.get('data'),dict) else None
@@ -3123,25 +3123,32 @@ def billing_checkout(payload: BillingCheckoutIn, user=Depends(current_user)):
 @app.post('/api/billing/flutterwave/webhook')
 async def flutterwave_webhook(request: Request):
     secret = os.getenv('FLW_SECRET_HASH','').strip()
-    signature = request.headers.get('verif-hash','').strip()
-    if not secret or not signature or not hmac.compare_digest(signature,secret): raise HTTPException(401,'Invalid payment webhook signature.')
-    try: payload = json.loads((await request.body()).decode('utf-8'))
+    raw_body = await request.body()
+    signature = request.headers.get('flutterwave-signature','').strip()
+    expected_signature = base64.b64encode(
+        hmac.new(secret.encode('utf-8'), raw_body, hashlib.sha256).digest()
+    ).decode('ascii')
+    if not secret or not signature or not hmac.compare_digest(signature, expected_signature):
+        raise HTTPException(401,'Invalid payment webhook signature.')
+    try: payload = json.loads(raw_body.decode('utf-8'))
     except Exception: raise HTTPException(400,'Invalid webhook payload.')
     data = payload.get('data') if isinstance(payload,dict) else None
     if not isinstance(data,dict): return {'status':'ignored'}
-    transaction_id, tx_ref = data.get('id'), str(data.get('tx_ref') or '')
-    if not transaction_id or not tx_ref: return {'status':'ignored'}
-    with db() as c: order = c.execute('SELECT * FROM billing_orders WHERE tx_ref=?',(tx_ref,)).fetchone()
-    if not order: return {'status':'ignored'}
-    event_key = str(payload.get('id') or (str(transaction_id)+':'+str(payload.get('event') or 'charge.completed')))
+    transaction_id = data.get('id')
+    if not transaction_id: return {'status':'ignored'}
+    event_key = str(payload.get('id') or (str(transaction_id)+':'+str(payload.get('type') or payload.get('event') or 'charge.completed')))
     with db() as c:
         if c.execute('SELECT 1 FROM billing_webhook_events WHERE event_key=?',(event_key,)).fetchone(): return {'status':'duplicate'}
-    if str(data.get('status','')).lower() != 'successful':
+    if str(data.get('status','')).lower() not in {'successful','succeeded'}:
         with db() as c: c.execute("INSERT OR IGNORE INTO billing_webhook_events(event_key,received_at,outcome) VALUES(?,?,?)",(event_key,now(),'not_successful'))
         return {'status':'not_successful'}
     verified = flutterwave_request('GET','transactions/'+urllib.parse.quote(str(transaction_id),safe='')+'/verify')
     tx = verified.get('data') if isinstance(verified.get('data'),dict) else {}
-    if verified.get('status') != 'success' or str(tx.get('status','')).lower() != 'successful' or str(tx.get('tx_ref','')) != tx_ref or str(tx.get('currency','')).upper() != 'KES': raise HTTPException(400,'Payment could not be verified against the MCAS order.')
+    tx_ref = str(tx.get('tx_ref') or data.get('tx_ref') or '')
+    if verified.get('status') != 'success' or str(tx.get('status','')).lower() != 'successful' or not tx_ref or str(tx.get('currency','')).upper() != 'KES':
+        raise HTTPException(400,'Payment could not be verified against the MCAS order.')
+    with db() as c: order = c.execute('SELECT * FROM billing_orders WHERE tx_ref=?',(tx_ref,)).fetchone()
+    if not order: return {'status':'ignored'}
     try: paid_amount = float(tx.get('amount'))
     except (TypeError,ValueError): raise HTTPException(400,'Verified payment amount is invalid.')
     if paid_amount != float(order['amount_kes']): raise HTTPException(400,'Verified payment amount does not match the MCAS order.')
