@@ -4,12 +4,20 @@ For the current research-completion build, use branch \`feature/mcas-research-co
 
 ## A. Automated checks
 
-Run from the project root with the virtual environment active:
+Run from the project root with the virtual environment active. **Always use a temporary test database** so automated tests never read or modify your real `data/mcas.db`, and so old feedback from earlier runs cannot affect consent tests:
 
     python -m compileall -q backend tests
-    python -m unittest discover -s tests -v
+
+    set -o pipefail
+    TEST_DB_DIR="$(mktemp -d)"
+    trap 'rm -rf "$TEST_DB_DIR"' EXIT
+    MCAS_DATABASE_PATH="$TEST_DB_DIR/mcas.db" AI_API_BASE_URL="" AI_API_KEY="" AI_MODEL="" python -m unittest discover -s tests -v 2>&1 | tee /tmp/mcas-test.log
+    grep -E '^(FAIL:|ERROR:|Ran |FAILED (|OK$)' /tmp/mcas-test.log
+
     node --check assets/app.js
     pip-audit -r requirements.txt
+
+The temporary database is deleted when the shell exits; the test log remains at `/tmp/mcas-test.log`. Never point automated tests at the live customer database. A test run against a persistent database can encounter older explicitly opted-in feedback, because the admin improvement analyser correctly considers all unprocessed consented feedback across workspaces.
 
 All commands should exit successfully. Resolve dependency advisories before publishing. GitHub Actions also runs the repository checks on supported branch pushes and pull requests.
 

@@ -24,6 +24,9 @@ from email.message import EmailMessage
 from pathlib import Path
 from typing import Optional, Literal
 
+from backend.intelligence import assess_website
+from backend.commercial import PLANS, CREDIT_PACKS, CREDIT_COSTS, public_catalog, flutterwave_ready, initialize_flutterwave_checkout, verify_flutterwave_transaction, payment_quote, get_usd_kes_rate
+
 from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -180,6 +183,11 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at);
         CREATE INDEX IF NOT EXISTS idx_followups_user_due ON followups(user_id,due_at,state);
         CREATE INDEX IF NOT EXISTS idx_proposals_user ON proposals(user_id,updated_at);
+        CREATE TABLE IF NOT EXISTS billing_accounts(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,credit_balance INTEGER NOT NULL DEFAULT 10 CHECK(credit_balance >= 0),plan TEXT NOT NULL DEFAULT 'trial',subscription_status TEXT NOT NULL DEFAULT 'trial',current_period_end TEXT,updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS credit_ledger(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,amount INTEGER NOT NULL,balance_after INTEGER NOT NULL,reason TEXT NOT NULL,reference TEXT,created_at TEXT NOT NULL,UNIQUE(user_id,reason,reference));
+        CREATE TABLE IF NOT EXISTS billing_payments(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,tx_ref TEXT NOT NULL UNIQUE,item_type TEXT NOT NULL,item_code TEXT NOT NULL,amount_kes INTEGER NOT NULL,currency TEXT NOT NULL DEFAULT 'KES',status TEXT NOT NULL DEFAULT 'pending',provider_transaction_id TEXT UNIQUE,created_at TEXT NOT NULL,paid_at TEXT);
+        CREATE INDEX IF NOT EXISTS idx_credit_ledger_user_created ON credit_ledger(user_id,created_at);
+        CREATE INDEX IF NOT EXISTS idx_billing_payments_user_created ON billing_payments(user_id,created_at);
         """)
         add_column(c, "leads", "contact_email", "TEXT")
         add_column(c, "leads", "contact_phone", "TEXT")
@@ -188,6 +196,19 @@ def init_db():
         add_column(c, "drafts", "to_email", "TEXT")
         add_column(c, "drafts", "gmail_draft_id", "TEXT")
         add_column(c, "customer_feedback", "ai_analysis_consent", "INTEGER NOT NULL DEFAULT 0")
+        add_column(c, "billing_payments", "amount_usd_cents", "INTEGER NOT NULL DEFAULT 0")
+        add_column(c, "billing_payments", "provider_amount", "TEXT NOT NULL DEFAULT ''")
+        add_column(c, "billing_payments", "provider_currency", "TEXT NOT NULL DEFAULT 'KES'")
+        add_column(c, "billing_payments", "payment_method", "TEXT NOT NULL DEFAULT 'mpesa'")
+        add_column(c, "billing_payments", "exchange_rate", "TEXT")
+        # Backfill billing for accounts created before credit billing was introduced.
+        c.execute("""INSERT OR IGNORE INTO billing_accounts(user_id,credit_balance,plan,subscription_status,updated_at)
+                     SELECT id,10,'trial','trial',? FROM users""", (now(),))
+        c.execute("""INSERT INTO credit_ledger(id,user_id,amount,balance_after,reason,reference,created_at)
+                     SELECT 'trial-migration-' || users.id,users.id,10,10,'trial_grant','migration',?
+                     FROM users WHERE NOT EXISTS(
+                       SELECT 1 FROM credit_ledger WHERE credit_ledger.user_id=users.id AND reason='trial_grant'
+                     )""", (now(),))
 
 init_db()
 
@@ -329,7 +350,7 @@ async def security_middleware(request: Request, call_next):
     if unsafe and origin and origin not in origins:
         log_security_event("request.origin_rejected", request)
         return Response("Origin not allowed", status_code=403, headers={"Cache-Control": "no-store"})
-    if unsafe and request.url.path not in {"/api/integrations/gmail/callback"}:
+    if unsafe and request.url.path not in {"/api/integrations/gmail/callback", "/api/billing/flutterwave/webhook"}:
         cookie_token = request.cookies.get(CSRF_COOKIE, "")
         header_token = request.headers.get("x-csrf-token", "")
         if not cookie_token or not header_token or not hmac.compare_digest(cookie_token, header_token) or not valid_csrf(header_token):
@@ -480,8 +501,10 @@ def register(payload: RegisterIn, response: Response):
     session = secrets.token_urlsafe(36)
     try:
         with db() as c:
-            c.execute("INSERT INTO users VALUES(?,?,?,?)", (uid, email, password_hash(payload.password), now()))
+            c.execute("INSERT INTO users (id,email,password_hash,created_at) VALUES(?,?,?,?)", (uid, email, password_hash(payload.password), now()))
             c.execute("INSERT INTO sessions VALUES(?,?,?)", (token_hash(session), uid, int(time.time()) + SESSION_SECONDS))
+            c.execute("INSERT INTO billing_accounts(user_id,credit_balance,plan,subscription_status,updated_at) VALUES(?,10,'trial','trial',?)", (uid, now()))
+            c.execute("INSERT INTO credit_ledger(id,user_id,amount,balance_after,reason,reference,created_at) VALUES(?,?,10,10,'trial_grant','signup',?)", (secrets.token_urlsafe(16), uid, now()))
             audit(c, uid, "account.created")
     except sqlite3.IntegrityError:
         raise HTTPException(409, "An account with this email already exists")
@@ -1035,6 +1058,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
     location = payload.location.strip()
     if not location or not re.search(r"[A-Za-z0-9]", location):
         raise HTTPException(422, "Enter a town, city or named administrative area.")
+    require_credits(user["id"], CREDIT_COSTS["research_run"])
     query = serper_query_for(payload)
     cache_key = query.casefold()
     cached = _SERPER_CACHE.get(cache_key)
@@ -1117,6 +1141,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             tags["addr:street"] = address
         strategy = business_strategy(tags)
         score, score_reasons = opportunity_score(tags, website_state, website_audit, email, phone)
+        intelligence = assess_website(website_audit, website_state, {"phone": phone, "email": email})
 
         facts = [
             "Discovered through Serper Places for the search: " + query + ".",
@@ -1168,7 +1193,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                     "website": website, "website_state": website_state, "evidence": evidence,
                     "source_url": source_url, "recommendation": strategy["type"],
                     "pages": strategy["pages"], "opportunity_score": score,
-                    "score_reasons": score_reasons, "contact_email": email,
+                    "score_reasons": score_reasons, "intelligence": intelligence, "contact_email": email,
                     "contact_phone": phone, "website_audit": website_audit,
                     "draft_created": False, "proposal_created": False,
                 })
@@ -1234,13 +1259,14 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             "website": website, "website_state": website_state, "evidence": evidence,
             "source_url": source_url, "contact_email": email, "contact_phone": phone,
             "recommendation": strategy["type"], "pages": strategy["pages"],
-            "opportunity_score": score, "score_reasons": score_reasons,
+            "opportunity_score": score, "score_reasons": score_reasons, "intelligence": intelligence,
             "website_audit": website_audit, "draft_created": True, "proposal_created": True,
             "gmail_draft_created": gmail_draft_created, "gmail_draft_error": gmail_draft_error,
             "rating": place.get("rating"), "rating_count": place.get("ratingCount"),
         })
 
     with db() as c:
+        debit_credits(c, user["id"], CREDIT_COSTS["research_run"], "research_run", secrets.token_urlsafe(12))
         audit(c, user["id"], "research.run", {
             "location": location, "industry": payload.industry,
             "query": query[:160], "provider": "Serper",
@@ -1314,10 +1340,14 @@ def create_builder_prompt(lead_id: str, user=Depends(current_user)):
 
 @app.post("/api/audit-website")
 def audit_website(payload: dict, user=Depends(current_user)):
+    require_credits(user["id"], CREDIT_COSTS["website_audit"])
     raw = str(payload.get("url", ""))[:2048].strip()
     result = safe_site_fetch(raw)
     result["checked_at"] = now()
+    state = "broken" if result.get("http_status") in {404, 410, 500, 502, 503, 504} else ("working" if isinstance(result.get("http_status"), int) and 200 <= result["http_status"] < 400 else "needs_review")
+    result["intelligence"] = assess_website(result, state)
     with db() as c:
+        debit_credits(c, user["id"], CREDIT_COSTS["website_audit"], "website_audit", secrets.token_urlsafe(12))
         audit(c, user["id"], "website.audit", {"url": result.get("url"), "status": result.get("http_status")})
     return result
 
@@ -1468,6 +1498,7 @@ def ai_assistant(payload: AIIn, request: Request, user=Depends(current_user)):
     if configured_hosts and parsed.hostname.lower().rstrip(".") not in configured_hosts:
         log_security_event("ai.endpoint_host_rejected", request)
         raise HTTPException(503, "The configured AI endpoint host is not in MCAS_AI_ALLOWED_HOSTS.")
+    require_credits(user["id"], CREDIT_COSTS["ai_draft"])
     if payload.task not in {"email", "reply", "proposal"}:
         raise HTTPException(422, "Unsupported assistant task")
     if not payload.lead_id:
@@ -1942,9 +1973,11 @@ def analyze_opted_in_feedback(user=Depends(current_user)):
         },
     ]
     raw = call_configured_ai(messages, temperature=0.15, max_tokens=1800)
+    if not isinstance(raw, (str, bytes, bytearray)):
+        raise HTTPException(502, "The AI provider returned an invalid response type. No improvement plan was saved.")
     try:
         result = json.loads(raw)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         raise HTTPException(502, "The AI response was not valid JSON. No improvement plan was saved.")
     if not isinstance(result, dict):
         raise HTTPException(502, "The AI response did not match the improvement-plan schema.")
@@ -2074,7 +2107,156 @@ def review_customer_feedback(feedback_id: str, payload: FeedbackReviewIn, user=D
         audit(c, user["id"], "feedback.reviewed", {"feedback_id": feedback_id, "status": payload.status})
     return {"ok": True, "status": payload.status}
 
+def require_credits(uid, amount):
+    with db() as c:
+        row = c.execute("SELECT credit_balance FROM billing_accounts WHERE user_id=?", (uid,)).fetchone()
+    if not row or int(row["credit_balance"]) < amount:
+        available = int(row["credit_balance"]) if row else 0
+        raise HTTPException(402, "Insufficient credits. Required: " + str(amount) + "; available: " + str(available) + ".")
+
+
+def debit_credits(c, uid, amount, reason, reference):
+    c.execute("BEGIN IMMEDIATE")
+    row = c.execute("SELECT credit_balance FROM billing_accounts WHERE user_id=?", (uid,)).fetchone()
+    if not row:
+        raise HTTPException(402, "Billing account is not initialized.")
+    balance = int(row["credit_balance"])
+    if balance < amount:
+        raise HTTPException(402, "Insufficient credits. Required: " + str(amount) + "; available: " + str(balance) + ".")
+    balance -= amount
+    c.execute("UPDATE billing_accounts SET credit_balance=?,updated_at=? WHERE user_id=?", (balance, now(), uid))
+    c.execute("INSERT INTO credit_ledger(id,user_id,amount,balance_after,reason,reference,created_at) VALUES(?,?,?,?,?,?,?)",
+              (secrets.token_urlsafe(16), uid, -amount, balance, reason, reference, now()))
+
+
+@app.get("/api/billing/catalog")
+def billing_catalog(user=Depends(current_user)):
+    return public_catalog()
+
+
 @app.get("/api/billing/status")
 def billing_status(user=Depends(current_user)):
-    return {"plan": "beta", "billing_enabled": False,
-            "message": "Subscription checkout is not enabled in this build. Do not accept customer payments until a payment provider and webhook verification are configured."}
+    with db() as c:
+        row = c.execute("SELECT * FROM billing_accounts WHERE user_id=?", (user["id"],)).fetchone()
+        ledger = c.execute("SELECT amount,balance_after,reason,created_at FROM credit_ledger WHERE user_id=? ORDER BY created_at DESC LIMIT 15", (user["id"],)).fetchall()
+    if not row:
+        raise HTTPException(500, "Billing account is not initialized.")
+    return {"plan": row["plan"], "subscription_status": row["subscription_status"],
+            "current_period_end": row["current_period_end"], "credits": row["credit_balance"],
+            "billing_enabled": flutterwave_ready(), "provider": "Flutterwave" if flutterwave_ready() else None,
+            "message": "USD card checkout and converted KES M-Pesa checkout are available when configured." if flutterwave_ready() else "Checkout not configured; trial credits remain available.",
+            "recent_activity": [dict(x) for x in ledger]}
+
+
+class CheckoutIn(BaseModel):
+    item_type: Literal["subscription", "credit_pack"]
+    item_code: str = Field(min_length=2, max_length=30)
+    payment_method: Literal["card", "mpesa"]
+
+
+@app.post("/api/billing/checkout")
+def billing_checkout(payload: CheckoutIn, user=Depends(current_user)):
+    if not flutterwave_ready():
+        raise HTTPException(503, "Set FLW_SECRET_KEY, FLW_SECRET_HASH and MCAS_PUBLIC_URL (HTTPS) on the server.")
+    catalog = PLANS if payload.item_type == "subscription" else CREDIT_PACKS
+    item = catalog.get(payload.item_code)
+    if not item:
+        raise HTTPException(422, "Unknown subscription or credit pack.")
+    try:
+        quote = payment_quote(item["amount_usd_cents"], payload.payment_method, get_usd_kes_rate())
+    except ValueError as exc:
+        raise HTTPException(503 if payload.payment_method == "mpesa" else 422, str(exc))
+    tx_ref = "mcas_" + secrets.token_urlsafe(18)
+    payment_id = secrets.token_urlsafe(18)
+    with db() as c:
+        c.execute("""INSERT INTO billing_payments
+            (id,user_id,tx_ref,item_type,item_code,amount_kes,currency,status,created_at,
+             amount_usd_cents,provider_amount,provider_currency,payment_method,exchange_rate)
+            VALUES(?,?,?,?,?,?,?,'pending',?,?,?,?,?,?)""",
+            (payment_id,user["id"],tx_ref,payload.item_type,payload.item_code,
+             quote["amount_kes"],quote["provider_currency"],now(),quote["base_amount_usd_cents"],
+             quote["provider_amount"],quote["provider_currency"],payload.payment_method,quote["exchange_rate"]))
+        audit(c,user["id"],"billing.checkout_started",{"payment_id":payment_id,"item_type":payload.item_type,
+            "item_code":payload.item_code,"payment_method":payload.payment_method,
+            "base_amount_usd":quote["base_amount_usd"],"provider_currency":quote["provider_currency"]})
+    try:
+        result=initialize_flutterwave_checkout(tx_ref=tx_ref,amount=quote["provider_amount"],
+            currency=quote["provider_currency"],payment_method=payload.payment_method,
+            email=user["email"],customer_id=user["id"],item_type=payload.item_type,item_code=payload.item_code)
+    except Exception:
+        with db() as c:
+            c.execute("UPDATE billing_payments SET status='initialization_failed' WHERE id=?",(payment_id,))
+        raise HTTPException(502,"Checkout initialization failed. No entitlement was granted.")
+    return {"checkout_url":result["checkout_url"],"tx_ref":tx_ref,
+        "amount_usd":quote["base_amount_usd"],"provider_amount":quote["provider_amount"],
+        "provider_currency":quote["provider_currency"],"payment_method":payload.payment_method}
+
+
+def apply_verified_payment(payment, verified):
+    tx_ref = str(verified.get("tx_ref") or "")
+    transaction_id = str(verified.get("id") or "")
+    expected_currency=str(payment.get("provider_currency") or payment.get("currency") or "KES").upper()
+    expected_amount=str(payment.get("provider_amount") or payment.get("amount_kes") or "")
+    if str(verified.get("status") or "").lower() != "successful" or str(verified.get("currency") or "").upper() != expected_currency:
+        raise ValueError("Payment is not successful in the expected currency.")
+    from decimal import Decimal
+    if Decimal(str(verified.get("amount") or "0")) < Decimal(expected_amount) or tx_ref != payment["tx_ref"] or not transaction_id:
+        raise ValueError("Verified payment amount or reference mismatch.")
+    meta = verified.get("meta") or {}
+    if meta.get("customer_id") != payment["user_id"] or meta.get("item_type") != payment["item_type"] or meta.get("item_code") != payment["item_code"] or meta.get("payment_method", payment.get("payment_method")) != payment.get("payment_method", "mpesa"):
+        raise ValueError("Payment metadata mismatch.")
+    with db() as c:
+        c.execute("BEGIN IMMEDIATE")
+        row = c.execute("SELECT status FROM billing_payments WHERE id=?", (payment["id"],)).fetchone()
+        if not row:
+            raise ValueError("Pending payment does not exist.")
+        if row["status"] == "paid":
+            return
+        if c.execute("SELECT 1 FROM billing_payments WHERE provider_transaction_id=? AND status='paid'", (transaction_id,)).fetchone():
+            raise ValueError("Transaction already applied.")
+        account = c.execute("SELECT * FROM billing_accounts WHERE user_id=?", (payment["user_id"],)).fetchone()
+        if payment["item_type"] == "credit_pack":
+            credits = int(CREDIT_PACKS[payment["item_code"]]["credits"])
+        else:
+            credits = int(PLANS[payment["item_code"]]["credits"])
+            from datetime import timedelta
+            end = account["current_period_end"]
+            base = datetime.fromisoformat(end) if end and datetime.fromisoformat(end) > datetime.now(timezone.utc) else datetime.now(timezone.utc)
+            period_end = (base + timedelta(days=30)).isoformat()
+            c.execute("UPDATE billing_accounts SET plan=?,subscription_status='active',current_period_end=? WHERE user_id=?",
+                      (payment["item_code"], period_end, payment["user_id"]))
+        balance = int(account["credit_balance"]) + credits
+        c.execute("UPDATE billing_accounts SET credit_balance=?,updated_at=? WHERE user_id=?", (balance, now(), payment["user_id"]))
+        c.execute("INSERT INTO credit_ledger(id,user_id,amount,balance_after,reason,reference,created_at) VALUES(?,?,?,?,?,?,?)",
+                  (secrets.token_urlsafe(16), payment["user_id"], credits, balance,
+                   "credit_pack_purchase" if payment["item_type"] == "credit_pack" else "subscription_credit_grant",
+                   payment["tx_ref"], now()))
+        c.execute("UPDATE billing_payments SET status='paid',provider_transaction_id=?,paid_at=? WHERE id=?",
+                  (transaction_id, now(), payment["id"]))
+        audit(c, payment["user_id"], "billing.payment_verified", {"payment_id": payment["id"], "item_type": payment["item_type"], "item_code": payment["item_code"]})
+
+
+@app.post("/api/billing/flutterwave/webhook")
+async def flutterwave_webhook(request: Request):
+    secret = os.getenv("FLW_SECRET_HASH", "")
+    supplied = request.headers.get("verif-hash", "")
+    if not secret or not supplied or not hmac.compare_digest(secret, supplied):
+        raise HTTPException(401, "Invalid payment webhook signature.")
+    try:
+        event = await request.json()
+        data = event.get("data") or {}
+        tx_id, tx_ref = str(data.get("id") or ""), str(data.get("tx_ref") or "")
+        if not tx_id or not tx_ref:
+            raise ValueError("Missing transaction identifiers.")
+        with db() as c:
+            payment = c.execute("SELECT * FROM billing_payments WHERE tx_ref=?", (tx_ref,)).fetchone()
+        if not payment:
+            raise ValueError("Pending payment not found.")
+        verified = verify_flutterwave_transaction(tx_id)
+        apply_verified_payment(dict(payment), verified)
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception:
+        SECURITY_LOGGER.exception("MCAS payment webhook verification failed")
+        raise HTTPException(400, "Payment notification could not be verified; no entitlement was granted.")
