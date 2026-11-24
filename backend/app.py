@@ -1285,20 +1285,25 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
         request_payload = {"q": query, "gl": country_code, "hl": language_code}
         data = serper_request("places", request_payload)
         places = data.get("places") or []
-        # When Places has no records, use Serper's ordinary web results as a fallback.
-        # These are saved as unverified source links, never assumed to be official websites.
+        # A second, simpler Places query helps when a long keyword phrase returns no map entities.
+        # Organic web links are never converted into business records: they do not establish a local business identity.
         if not places:
-            web_data = serper_request("search", {"q": query, "num": min(10, payload.max_results),
-                                                     "gl": country_code, "hl": language_code})
-            places = [{
-                "title": item.get("title"),
-                "link": item.get("link"),
-                "description": item.get("snippet"),
-                "_source_type": "web",
-            } for item in web_data.get("organic", [])
-              if isinstance(item, dict) and isinstance(item.get("title"), str)
-              and isinstance(item.get("link"), str)
-              and item.get("link", "").startswith(("https://", "http://"))]
+            fallback_terms = {
+                "any": "businesses",
+                "restaurant": "restaurants",
+                "salon": "salons",
+                "retail": "shops",
+                "professional": "professional services",
+                "hotel": "hotels",
+                "healthcare": "clinics",
+                "education": "schools",
+            }
+            fallback_query = fallback_terms.get(payload.industry, "businesses") + " near " + location
+            if fallback_query.casefold() != query.casefold():
+                fallback_data = serper_request("places", {
+                    "q": fallback_query, "gl": country_code, "hl": language_code,
+                })
+                places = fallback_data.get("places") or []
         _SERPER_CACHE[cache_key] = (time.time(), places)
 
     discovered = []
