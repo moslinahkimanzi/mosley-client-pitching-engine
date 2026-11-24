@@ -36,7 +36,7 @@ const navTranslations={
  ar:{nav_overview:'نظرة عامة',nav_prospects:'العملاء المحتملون',nav_research:'البحث',nav_advisor:'مستشار المواقع',nav_email:'استوديو البريد',nav_replies:'مساعد الردود',nav_proposals:'العروض',nav_followups:'المتابعات',nav_updates:'التحديثات والملاحظات',nav_gmail:'مسودات Gmail'}
 };
 function applyLanguage(code){const dict={...(navTranslations[code]||navTranslations.en),...(pageTranslations[code]||pageTranslations.en),...(translations[code]||translations.en)};document.documentElement.lang=code;document.documentElement.dir=code==='ar'?'rtl':'ltr';document.querySelectorAll('[data-i18n]').forEach(el=>{const key=el.dataset.i18n;if(dict[key])el.textContent=dict[key];});}
-function page(name){const adminPages=new Set(['integrations','security','admin-maintenance']);if(adminPages.has(name)&&!state.user?.is_admin){toast('Settings are available to administrators only.',true);name='overview';}document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id===name));document.querySelectorAll('[data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===name));if(name==='prospects')renderLeads();if(name==='studio')renderDrafts();if(name==='followups')renderFollowups();if(name==='proposals')renderProposals();if(name==='updates'){loadUpdates();loadMyFeedback();}if(name==='admin-maintenance')loadAdminMaintenance();if(name==='workspace-settings')renderWorkspaceSettings();if(name==='billing')renderBilling();}
+function page(name){const adminPages=new Set(['integrations','security','admin-maintenance']);if(adminPages.has(name)&&!state.user?.is_admin){toast('Settings are available to administrators only.',true);name='overview';}document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id===name));document.querySelectorAll('[data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===name));if(name==='prospects')renderLeads();if(name==='studio')renderDrafts();if(name==='followups')renderFollowups();if(name==='proposals')renderProposals();if(name==='updates'){loadUpdates();loadMyFeedback();}if(name==='admin-maintenance')loadAdminMaintenance();if(name==='workspace-settings')renderWorkspaceSettings();if(name==='billing'){renderBilling();loadCreditHistory(0,false);}}
 document.querySelectorAll('[data-page]').forEach(b=>b.addEventListener('click',()=>page(b.dataset.page)));
 document.querySelectorAll('[data-go]').forEach(b=>b.addEventListener('click',()=>page(b.dataset.go)));
 async function initGoogleSignIn(){
@@ -66,7 +66,8 @@ function renderBilling(){
  $('billingPurchasedCredits').textContent=Number(data.purchased_credits||0).toLocaleString();
  $('billingTotalCredits').textContent=Number(data.total_credits||0).toLocaleString();
  $('billingPeriod').textContent=data.plan==='free'?(data.period_end?'Free allowance refreshes '+new Date(data.period_end).toLocaleDateString():'Free plan'):(data.period_end?'Paid through '+new Date(data.period_end).toLocaleDateString():'Paid plan period not active');
- const method=$('billingMethod')?.value||'mpesa';
+ const method='mpesa';
+ if($('billingMethod'))$('billingMethod').value='mpesa';
  const methodAvailable=billingMethodAvailable(method);
  const price=plan=>{
   const cents=Number(plan.amount_usd_cents||0);
@@ -82,13 +83,13 @@ function renderBilling(){
  }).join('')||'<div class="empty">No payment orders yet.</div>';
  const quote=data.mpesa_quote;
  const quoteText=quote?'M-Pesa reference rate: 1 USD = '+esc(quote.usd_kes_rate)+' KES (dated '+esc(quote.rate_date)+').':'M-Pesa is unavailable until a current, dated USD/KES rate is configured.';
- const noteText=quoteText+' Card payments are charged in USD; M-Pesa payments are charged in KES. Final provider amount is confirmed at checkout.';
+ const noteText=quoteText+' M-Pesa is the only payment method enabled for this launch. The final KES amount is confirmed at checkout.';
  if($('billingPriceNote'))$('billingPriceNote').textContent=noteText;
  if($('billingStatus'))$('billingStatus').textContent=(data.message||'')+' '+quoteText;
  document.querySelectorAll('[data-billing-type]').forEach(button=>{button.disabled=!methodAvailable;});
 }
 async function startBillingCheckout(type,code){
- const method=$('billingMethod').value,phone=$('billingPhone').value.trim();
+ const method='mpesa',phone=$('billingPhone').value.trim();
  if(method==='mpesa'&&!phone){note('billingNotice','Enter the M-Pesa phone number, including country code.',true);return;}
  const buttons=[...document.querySelectorAll('[data-billing-type]')];buttons.forEach(button=>button.disabled=true);
  try{
@@ -100,12 +101,56 @@ async function startBillingCheckout(type,code){
 $('billingPlanCards').addEventListener('click',event=>{const button=event.target.closest('[data-billing-type]');if(button)startBillingCheckout(button.dataset.billingType,button.dataset.billingCode);});
 $('billingCreditCards').addEventListener('click',event=>{const button=event.target.closest('[data-billing-type]');if(button)startBillingCheckout(button.dataset.billingType,button.dataset.billingCode);});
 
+
+let creditHistoryOffset=0;
+let creditHistoryHasMore=false;
+function signedCredits(value){
+ const n=Number(value||0);
+ return (n>0?'+':'')+n.toLocaleString();
+}
+function creditHistoryDate(value){
+ const d=new Date(value);
+ return Number.isNaN(d.getTime())?String(value||''):d.toLocaleString();
+}
+async function loadCreditHistory(offset=0,append=false){
+ const box=$('creditHistory');
+ if(!box)return;
+ if(!append)box.innerHTML='<div class="empty">Loading credit history…</div>';
+ $('creditHistoryMore').disabled=true;
+ try{
+  const data=await api('/api/billing/credit-history?limit=20&offset='+offset);
+  $('creditMonthlyUsed').textContent=Number(data.monthly_used_this_period||0).toLocaleString();
+  $('creditPurchasedUsed').textContent=Number(data.purchased_used_this_period||0).toLocaleString();
+  $('creditTotalUsed').textContent=Number(data.total_used_this_period||0).toLocaleString();
+  const rows=(data.items||[]).map(item=>{
+   const delta=Number(item.total_delta||0);
+   const badge=delta<0?'amber':delta>0?'green':'';
+   const sign=delta>0?'+':'';
+   const detail='Monthly '+signedCredits(item.monthly_delta)+' · Purchased '+signedCredits(item.purchased_delta);
+   const reference=item.reference?'<p class="tiny">Reference: '+esc(item.reference)+'</p>':'';
+   return '<div class="item"><div class="itemtop"><strong>'+esc(item.description)+'</strong><span class="badge '+badge+'">'+sign+delta.toLocaleString()+' credits</span></div><p>'+esc(detail)+' · '+esc(creditHistoryDate(item.created_at))+'</p>'+reference+'</div>';
+  }).join('');
+  if(append)box.insertAdjacentHTML('beforeend',rows);
+  else box.innerHTML=rows||'<div class="empty">No credit activity has been recorded yet.</div>';
+  creditHistoryOffset=offset+(data.items||[]).length;
+  creditHistoryHasMore=!!data.has_more;
+  $('creditHistoryMore').classList.toggle('hide',!creditHistoryHasMore);
+  $('creditHistoryMore').disabled=false;
+ }catch(error){
+  if(!append)box.innerHTML='<div class="empty">Credit history could not be loaded.</div>';
+  note('creditHistoryNotice',error.message,true);
+  $('creditHistoryMore').disabled=false;
+ }
+}
+$('creditHistoryMore').addEventListener('click',()=>loadCreditHistory(creditHistoryOffset,true));
+
 async function refreshBillingStatus(){
  try{state.billing=await api('/api/billing/status');renderBilling();note('billingNotice','Billing status refreshed. A checkout redirect alone does not confirm payment.');}
  catch(error){note('billingNotice',error.message,true);}
 }
 $('refreshBillingBtn').addEventListener('click',refreshBillingStatus);
-$('billingMethod').addEventListener('change',renderBilling);
+$('billingMethod').value='mpesa';
+$('billingMethod').addEventListener('change',()=>{ $('billingMethod').value='mpesa';renderBilling(); });
 
 function renderAll(){renderMetrics();renderLeads();renderDrafts();renderFollowups();renderProposals();renderSelects();renderUpdates();renderMyFeedback();renderOnboarding();renderBilling();}
 const regionalPriceDefaults={KE:1,US:2.4,CA:2.1,GB:2.15,AU:2.1,NZ:1.85,DE:2,FR:1.95,IE:2,NL:2,CH:2.5,SG:1.9,AE:1.85,ZA:1.25,NG:0.9,GH:0.85,IN:0.8,PK:0.7,PH:0.85,BR:1.1,MX:1.05,JP:2,KR:1.8};

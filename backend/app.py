@@ -3261,7 +3261,7 @@ def admin_test_lab_plan(payload: AdminTestPlanIn, user=Depends(current_user)):
 class BillingCheckoutIn(BaseModel):
     item_type: Literal['subscription', 'credits']
     item_code: str = Field(min_length=2, max_length=30)
-    payment_method: Literal['card', 'mpesa'] = 'mpesa'
+    payment_method: Literal['mpesa'] = 'mpesa'
     phone_number: Optional[str] = Field(default=None, min_length=9, max_length=20)
 
 
@@ -3279,6 +3279,12 @@ def billing_status(user=Depends(current_user)):
         ).fetchall()
     configured = billing_provider_ready()
     catalog = usd_billing_catalog()
+    payment_methods = dict(catalog.get('payment_methods') or {})
+    payment_methods['card'] = {
+        'currency': 'USD',
+        'available': False,
+        'label': 'Card payments are not enabled in this launch.',
+    }
     return {
         'plan': account['plan_code'],
         'monthly_credits': int(account['monthly_credits']),
@@ -3288,7 +3294,7 @@ def billing_status(user=Depends(current_user)):
         'period_end': account['period_end'],
         'billing_enabled': configured,
         'provider': 'Flutterwave' if configured else None,
-        'payment_methods': catalog['payment_methods'],
+        'payment_methods': payment_methods,
         'mpesa_quote': catalog['mpesa_quote'],
         'currency': 'USD',
         'renewal_policy': 'Subscriptions last 30 days and renew only after a new customer-initiated, verified payment. Automatic recurring charges are not enabled.',
@@ -3296,7 +3302,93 @@ def billing_status(user=Depends(current_user)):
         'credit_packs': catalog['credit_packs'],
         'credit_costs': catalog['credit_costs'],
         'recent_orders': [dict(row) for row in orders],
-        'message': 'USD card checkout and converted KES M-Pesa checkout are configured. Complete sandbox testing and merchant approval before live sales.' if configured else 'Payments are disabled. Configure the provider, HTTPS public URL and explicit MCAS_BILLING_ENABLED=true only after sandbox testing and merchant approval.'
+        'message': 'Flutterwave configuration is present. M-Pesa checkout still requires a current dated USD/KES rate. Card checkout is disabled for this launch; keep live billing off until sandbox tests and merchant approval are complete.' if configured else 'Payments are disabled. Configure the provider, HTTPS public URL and explicit MCAS_BILLING_ENABLED=true only after sandbox testing and merchant approval.'
+    }
+
+
+@app.get('/api/billing/credit-history')
+def billing_credit_history(
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=100000),
+    user=Depends(current_user),
+):
+    """Return a tenant-scoped, paginated view of the authoritative credit ledger."""
+    with db() as c:
+        account = ensure_billing_account(c, user['id'])
+        total = int(c.execute(
+            'SELECT COUNT(*) FROM billing_credit_ledger WHERE user_id=?',
+            (user['id'],),
+        ).fetchone()[0])
+        rows = c.execute(
+            """SELECT id,delta_monthly,delta_purchased,reason,reference,created_at
+               FROM billing_credit_ledger
+               WHERE user_id=?
+               ORDER BY created_at DESC,id DESC
+               LIMIT ? OFFSET ?""",
+            (user['id'], limit, offset),
+        ).fetchall()
+        period_start = account['period_start'] or '0001-01-01T00:00:00+00:00'
+        usage = c.execute(
+            """SELECT
+                 COALESCE(SUM(CASE WHEN delta_monthly < 0 THEN -delta_monthly ELSE 0 END),0) AS monthly_used,
+                 COALESCE(SUM(CASE WHEN delta_purchased < 0 THEN -delta_purchased ELSE 0 END),0) AS purchased_used
+               FROM billing_credit_ledger
+               WHERE user_id=? AND created_at>=?""",
+            (user['id'], period_start),
+        ).fetchone()
+
+    reason_labels = {
+        'free_monthly_allowance': 'Free monthly allowance',
+        'prospect_research': 'Prospect research',
+        'business_identity_recheck': 'Business identity recheck',
+        'advanced_website_audit': 'Advanced website audit',
+        'competitor_intelligence': 'Competitor intelligence',
+        'ai_generation': 'AI generation',
+    }
+
+    items = []
+    for row in rows:
+        reason = str(row['reason'] or 'credit_activity')
+        if reason.startswith('subscription:'):
+            description = 'Subscription credit allocation (' + reason.split(':', 1)[1] + ')'
+        elif reason.startswith('credits:'):
+            description = 'Prepaid credit pack (' + reason.split(':', 1)[1] + ')'
+        else:
+            description = reason_labels.get(reason, reason.replace('_', ' ').capitalize())
+        monthly_delta = int(row['delta_monthly'] or 0)
+        purchased_delta = int(row['delta_purchased'] or 0)
+        total_delta = monthly_delta + purchased_delta
+        category = 'usage' if total_delta < 0 else ('credit_added' if total_delta > 0 else 'adjustment')
+        items.append({
+            'id': row['id'],
+            'reason': reason,
+            'description': description,
+            'category': category,
+            'monthly_delta': monthly_delta,
+            'purchased_delta': purchased_delta,
+            'total_delta': total_delta,
+            'reference': row['reference'],
+            'created_at': row['created_at'],
+        })
+
+    monthly_used = int(usage['monthly_used'] or 0)
+    purchased_used = int(usage['purchased_used'] or 0)
+    monthly_balance = int(account['monthly_credits'])
+    purchased_balance = int(account['purchased_credits'])
+    return {
+        'monthly_balance': monthly_balance,
+        'purchased_balance': purchased_balance,
+        'total_balance': monthly_balance + purchased_balance,
+        'monthly_used_this_period': monthly_used,
+        'purchased_used_this_period': purchased_used,
+        'total_used_this_period': monthly_used + purchased_used,
+        'period_start': account['period_start'],
+        'period_end': account['period_end'],
+        'items': items,
+        'total': total,
+        'limit': limit,
+        'offset': offset,
+        'has_more': offset + len(items) < total,
     }
 
 
