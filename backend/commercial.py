@@ -30,12 +30,17 @@ CREDIT_PACKS = {
     "standard": {"name": "Standard credit pack", "amount_usd_cents": 1500, "credits": 110},
     "pro": {"name": "Pro credit pack", "amount_usd_cents": 4900, "credits": 400},
 }
+# Keep this public catalogue aligned with the credit deductions in backend.billing.
 CREDIT_COSTS = {
-    "research_run": 5,
-    "website_audit": 2,
-    "ai_draft": 2,
-    "proposal_generation": 3,
-    "export_report": 1,
+    "research": 5,
+    "business_recheck": 3,
+    "audit_1_5_pages": 3,
+    "audit_6_10_pages": 5,
+    "audit_11_15_pages": 7,
+    "competitors_1_3": 6,
+    "competitors_4_5": 8,
+    "competitors_6_8": 11,
+    "ai_generation": 1,
 }
 
 
