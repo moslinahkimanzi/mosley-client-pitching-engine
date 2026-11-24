@@ -17,17 +17,17 @@ MCAS reports three independent dimensions, each from 0–100 where measurable:
 - The Commercial Opportunity score is not a probability of purchase, forecast of revenue or claim of buying intent.
 - Scores should always be displayed with evidence, coverage, timestamp and methodology version. Re-run before sending a proposal.
 
-## Proposed launch pricing (KES)
+## Proposed launch pricing (USD)
 
 | Offer | Price | Included credits |
 |---|---:|---:|
 | Trial | Free once | 10 |
-| Starter monthly | 1,499 / 30 days | 100 |
-| Growth monthly | 3,999 / 30 days | 350 |
-| Agency monthly | 9,999 / 30 days | 1,000 |
-| Mini top-up | 499 one-time | 30 |
-| Standard top-up | 1,499 one-time | 110 |
-| Pro top-up | 4,999 one-time | 400 |
+| Starter monthly | $12.00 / 30 days | 100 |
+| Growth monthly | $29.00 / 30 days | 350 |
+| Agency monthly | $79.00 / 30 days | 1,000 |
+| Mini top-up | $5.00 one-time | 30 |
+| Standard top-up | $15.00 one-time | 110 |
+| Pro top-up | $49.00 one-time | 400 |
 
 Credit costs:
 - Research run: 5 credits
@@ -36,7 +36,7 @@ Credit costs:
 - Proposal generation (reserved for next metered feature): 3 credits
 - Report export (reserved for next metered feature): 1 credit
 
-These are proposed launch prices, not market-validated willingness-to-pay. Review real API/search costs, payment-provider fees, hosting, support, taxes/VAT, refunds and churn after a paid pilot. Keep the price table configurable rather than promising these rates permanently.
+These are proposed USD launch prices, not market-validated willingness-to-pay. Review actual API/search costs, provider fees, hosting, support, taxes/VAT, refunds and churn after a paid pilot. Keep the price table configurable rather than promising these rates permanently.
 
 ## Revenue target scenario
 
