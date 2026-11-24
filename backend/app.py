@@ -1685,6 +1685,14 @@ def verify_lead_business(lead_id: str, user=Depends(current_user)):
     checked_at = now()
     matched = bool(best and best[1])
     listing = best[0] if best else {}
+    if matched and not (listing.get("website") or listing.get("websiteUrl")):
+        name_tokens = _identity_tokens(lead["name"])
+        for source in independent_sources:
+            domain_tokens = _identity_tokens(str(source.get("domain") or "").split(".")[0].replace("-", " "))
+            if name_tokens and len(name_tokens & domain_tokens) >= 1:
+                listing["website"] = source["url"]
+                listing["website_candidate_note"] = "Candidate domain discovered in an independent public result; confirm it belongs to the business before use."
+                break
     verification = {
         "provider": "Serper Places",
         "checked_at": checked_at,
