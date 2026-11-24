@@ -237,6 +237,7 @@ def ensure_billing_account(c, user_id: str):
     if not account["period_end"] and account["plan_code"] == "free":
         period_end = (stamp + timedelta(days=30)).isoformat()
         c.execute("UPDATE billing_accounts SET period_start=?,period_end=?,updated_at=? WHERE user_id=?", (stamp.isoformat(), period_end, now(), user_id))
+        c.execute("INSERT INTO billing_credit_ledger(id,user_id,delta_monthly,delta_purchased,reason,reference,created_at) VALUES(?,?,20,0,'free_monthly_allowance',?,?)", (secrets.token_urlsafe(16), user_id, stamp.isoformat(), now()))
         account = c.execute("SELECT * FROM billing_accounts WHERE user_id=?", (user_id,)).fetchone()
     elif account["period_end"]:
         try:
@@ -245,7 +246,9 @@ def ensure_billing_account(c, user_id: str):
             expired = True
         if expired:
             period_end = (stamp + timedelta(days=30)).isoformat()
+            monthly_delta = 20 - int(account["monthly_credits"])
             c.execute("UPDATE billing_accounts SET plan_code='free',monthly_credits=20,period_start=?,period_end=?,updated_at=? WHERE user_id=?", (stamp.isoformat(), period_end, now(), user_id))
+            c.execute("INSERT INTO billing_credit_ledger(id,user_id,delta_monthly,delta_purchased,reason,reference,created_at) VALUES(?,?,?,?,?,?,?)", (secrets.token_urlsafe(16), user_id, monthly_delta, 0, "free_monthly_allowance", stamp.isoformat(), now()))
             account = c.execute("SELECT * FROM billing_accounts WHERE user_id=?", (user_id,)).fetchone()
     return account
 
