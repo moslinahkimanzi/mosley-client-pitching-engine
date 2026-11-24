@@ -88,6 +88,20 @@
 .marketing-footer{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:25px 0 32px;border-top:1px solid #1c2b42;color:#7f93af;font-size:11px}
 @media(max-width:900px){.marketing-hero{grid-template-columns:1fr;gap:27px;padding:48px 0}.marketing-board{max-width:650px}.marketing-feature-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.marketing-steps{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:620px){.marketing-shell{padding:0 17px}.marketing-nav{align-items:flex-start}.marketing-links{gap:12px;justify-content:flex-end}.marketing-links a:not(.marketing-nav-cta){display:none}.marketing-nav-cta{padding:9px 11px;font-size:11px}.marketing-hero h1{font-size:40px}.marketing-lead{font-size:15px}.marketing-feature-grid,.marketing-steps,.marketing-split,.marketing-faq{grid-template-columns:1fr}.marketing-section{padding:48px 0}.marketing-final{padding:24px 17px}.marketing-board-step{grid-template-columns:34px minmax(0,1fr)}.marketing-step-status{grid-column:2}}
+
+body[data-theme="light"]{color-scheme:light;--bg:#edf2f8;--text:#17243a;--muted:#54657d;--line:#ccd7e5;--panel:#fff;--panel2:#f7faff;--shadow:0 12px 32px #1d355012;background:radial-gradient(ellipse at 20% -10%,#d9e8fb 0,transparent 45%),var(--bg);color:var(--text)}
+body[data-theme="light"] .sidebar,body[data-theme="light"] .card,body[data-theme="light"] .authcard{background:#fff;border-color:var(--line)}
+body[data-theme="light"] .item,body[data-theme="light"] .empty{background:#f7faff;border-color:var(--line);color:var(--text)}
+body[data-theme="light"] .nav button{color:#43546d}
+body[data-theme="light"] .nav button.active{background:#dceaff;border-color:#9ab9e4;color:#152b4a}
+body[data-theme="light"] .field input,body[data-theme="light"] .field textarea,body[data-theme="light"] .field select,body[data-theme="light"] .toolbar input,body[data-theme="light"] .toolbar select,body[data-theme="light"] .advisor-prospect-trigger{background:#fff;color:#17243a;border-color:#b9c8da}
+body[data-theme="light"] button{background:#e6eef8;color:#20334e;border-color:#c5d2e2}
+body[data-theme="light"] .primary{background:linear-gradient(135deg,#3477db,#2455a6);color:white}
+body[data-theme="light"] .badge{background:#eff4fb;color:#314866}
+body[data-theme="light"] .warning{background:#fff7e6;color:#674b17;border-color:#e9ca80}
+body[data-theme="light"] .good{background:#e8f8f1;color:#185b44;border-color:#9cd9bf}
+body[data-theme="light"] .row{border-color:#dbe3ee}
+body[data-theme="light"] .status{color:#1b4b80}
 </style></head><body>
 <div id="auth" class="marketing hide">
   <div class="marketing-shell">
@@ -187,6 +201,7 @@
 <button data-page="proposals"><span class="navicon">▤</span>Proposals</button>
 <button data-page="followups"><span class="navicon">◷</span>Follow-ups</button>
 <button data-page="updates"><span class="navicon">↻</span>Updates & feedback</button>
+<button data-page="workspace-settings"><span class="navicon">⚑</span>My workspace</button>
 </nav><div id="settingsNavGroup" class="hide"><div class="navgroup">Settings</div><nav class="nav" aria-label="Administrator settings"><button data-page="integrations"><span class="navicon">⌘</span>Integrations</button><button data-page="security"><span class="navicon">⬡</span>Security & plans</button><button id="adminMaintenanceNav" data-page="admin-maintenance"><span class="navicon">⚙</span>Admin maintenance</button></nav></div><div class="sidebarfoot"><div class="tiny">MCAS · Private workspace</div><div class="tiny">Human approval required for outreach.</div></div></aside>
 <main class="main">
 <section id="overview" class="page active"><div class="pagehead"><div><h1>Overview</h1><p>Your acquisition pipeline at a glance.</p></div><button class="primary" data-go="prospects">＋ Add prospect</button></div><div class="grid">
@@ -203,6 +218,30 @@
 </article>
 <div class="cols"><article class="card"><h2>Pipeline health</h2><div class="row"><span class="muted">Unverified prospects</span><b id="pUnverified">0</b></div><div class="row"><span class="muted">Drafts awaiting approval</span><b id="pPending">0</b></div><div class="row"><span class="muted">Do-not-contact records</span><b id="pDnc">0</b></div><div class="row"><span class="muted">Messages sent by MCAS</span><b>0</b></div></article><article class="card"><h2>Getting started</h2><p class="muted">Build a reliable pipeline with evidence, then prepare relevant outreach. MCAS never sends cold emails automatically.</p><div class="actions"><button data-go="research">Find prospects</button><button data-go="studio">Write an email</button><button data-go="gmail">Connect Gmail</button></div></article></div>
 <div class="cols"><article class="card"><h2>Recent prospects</h2><div id="recentLeads" class="list"></div></article><article class="card"><h2>System status</h2><div class="row"><span class="muted">API</span><span class="badge green">Connected</span></div><div class="row"><span class="muted">Database</span><span class="badge green">Persistent</span></div><div class="row"><span class="muted">Outbound email</span><span class="badge amber">Approval only</span></div><div class="row"><span class="muted">Live research</span><span id="searchBadge" class="badge">Checking</span></div><div class="row"><span class="muted">AI assistant</span><span id="aiBadge" class="badge">Checking</span></div></article></div></section>
+
+<section id="workspace-settings" class="page">
+<div class="pagehead"><div><h1 data-i18n="workspace_title">My workspace</h1><p data-i18n="workspace_subtitle">Set the region, currency, language, time zone and appearance for this workspace.</p></div></div>
+<article class="card">
+<h2 data-i18n="regional_heading">Regional preferences</h2>
+<p class="muted" data-i18n="regional_help">These settings belong to your account and affect prospect search, estimates and date/time display. Your workspace is not limited to the selected country.</p>
+<div class="cols">
+<div class="field"><label for="prefCountry" data-i18n="country_label">Workspace country / market</label><select id="prefCountry"></select></div>
+<div class="field"><label for="prefCurrency" data-i18n="currency_label">Display currency</label><select id="prefCurrency"></select></div>
+<div class="field"><label for="prefTimezone" data-i18n="timezone_label">Time zone</label><select id="prefTimezone"></select><small class="tiny" data-i18n="timezone_help">Automatically detected from this browser on first setup. You can change it manually.</small></div>
+<div class="field"><label for="prefLanguage" data-i18n="language_label">Language</label><select id="prefLanguage"></select></div>
+<div class="field"><label for="prefTheme" data-i18n="theme_label">Background theme</label><select id="prefTheme"><option value="dark">Dark</option><option value="light">Light</option><option value="system">Follow device setting</option></select></div>
+<div class="field"><label for="prefMultiplier" data-i18n="pricing_multiplier_label">Local pricing adjustment</label><input id="prefMultiplier" type="number" min="0.5" max="5" step="0.05" value="1.0"><small class="tiny" data-i18n="pricing_multiplier_help">Planning adjustment only. This is not verified market-price research. Adjust it to your own pricing policy.</small></div>
+</div>
+<div class="actions"><button id="saveWorkspacePreferences" class="primary" data-i18n="save_preferences">Save workspace preferences</button><button id="detectTimezone" data-i18n="detect_timezone">Detect my time zone</button></div>
+<div id="workspacePreferencesNotice" class="notice" role="status"></div>
+</article>
+<article class="card" style="margin-top:14px"><h2 data-i18n="regional_research_heading">How regional settings affect MCAS</h2>
+<div class="row"><span data-i18n="region_search_label">Prospect discovery</span><span class="badge" data-i18n="region_search_value">Country and language parameters</span></div>
+<div class="row"><span data-i18n="region_pricing_label">Website estimates</span><span class="badge" data-i18n="region_pricing_value">Local multiplier and currency conversion</span></div>
+<div class="row"><span data-i18n="region_timezone_label">Dates and reminders</span><span class="badge" data-i18n="region_timezone_value">Your selected IANA time zone</span></div>
+<p class="tiny" data-i18n="region_disclaimer">Currency rates are indicative. Country pricing multipliers are starting assumptions that you can edit; they are not verified quotations or market surveys.</p>
+</article>
+</section>
 
 <section id="prospects" class="page"><div class="pagehead"><div><h1>Prospect workspace</h1><p>Capture business facts, evidence and outreach permissions.</p></div></div><div class="split"><article class="card"><h2>Add a prospect</h2><form id="leadForm">
 <div class="field"><label>Business / organisation name *</label><input id="leadName" required maxlength="120"></div>
