@@ -794,7 +794,12 @@ def save_proposal(payload: ProposalIn, user=Depends(current_user)):
 
 @app.get("/api/research/search")
 def research_search(q: str = Query(min_length=2, max_length=160), user=Depends(current_user)):
-    data = serper_request("search", {"q": q, "num": 10})
+    preferences = workspace_preferences_for(user["id"])
+    data = serper_request("search", {
+        "q": q, "num": 10,
+        "gl": preferences["country_code"].lower(),
+        "hl": preferences["language_code"],
+    })
     organic = data.get("organic", [])
     results = [{"title": x.get("title"), "url": x.get("link"),
                 "description": x.get("snippet")} for x in organic[:10]
@@ -1771,11 +1776,27 @@ def ai_assistant(payload: AIIn, request: Request, user=Depends(current_user)):
         lead = owned_lead(c, payload.lead_id, user["id"])
         if payload.task == "email" and int(lead["do_not_contact"] or 0):
             raise HTTPException(403, "This prospect is marked do-not-contact; outreach drafting is blocked.")
-    system = assistant_system_prompt(payload.task)
+    preferences = workspace_preferences_for(user["id"])
+    output_languages = {
+        "en": "English", "sw": "Kiswahili", "fr": "French",
+        "es": "Spanish", "de": "German", "pt": "Portuguese", "ar": "Arabic",
+    }
+    output_language = output_languages.get(preferences["language_code"], "English")
+    system = assistant_system_prompt(payload.task) + (
+        " Write the complete user-facing output in " + output_language
+        + ". Keep business names, URLs, email addresses and product names unchanged. "
+        "Do not mix languages unless a proper noun requires it."
+    )
     if payload.task == "reply" and not payload.incoming.strip():
         raise HTTPException(422, "Paste the customer's message before generating a reply.")
     input_data = payload.model_dump()
-    input_data.update({"prospect_name": lead["name"], "market": lead["market"], "evidence": lead["evidence"]})
+    input_data.update({
+        "prospect_name": lead["name"], "market": lead["market"], "evidence": lead["evidence"],
+        "workspace_country": preferences["country_code"],
+        "workspace_currency": preferences["currency_code"],
+        "workspace_timezone": preferences["timezone"],
+        "output_language": output_language,
+    })
     user_prompt = json.dumps(input_data, ensure_ascii=False)
     req = urllib.request.Request(base + "/chat/completions",
         data=json.dumps({"model": model, "temperature": 0.35, "messages": [
