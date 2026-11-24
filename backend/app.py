@@ -1355,7 +1355,8 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                         and re.search(r"(contact|about|location|reach-us|support)", candidate_parts.path, re.I)
                         and candidate_url not in contact_links):
                         contact_links.append(candidate_url)
-                for contact_url in contact_links[:2]:
+                contact_pages_to_check = contact_links[:1] if (not contact_emails or not contact_phones) else []
+                for contact_url in contact_pages_to_check:
                     try:
                         contact_page = safe_site_fetch(contact_url)
                         contact_emails.extend(contact_page.get("public_emails") or [])
@@ -1367,7 +1368,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                 website_audit["public_emails"] = sorted(set(contact_emails))[:10]
                 website_audit["public_phones"] = sorted(set(contact_phones))[:10]
                 website_audit["contact_sources"] = contact_sources
-                website_audit["contact_pages_checked"] = len(contact_links[:2])
+                website_audit["contact_pages_checked"] = len(contact_pages_to_check)
                 status = int(website_audit.get("http_status") or 0)
                 if status in {404, 410} or status >= 500:
                     website_state = "broken"
