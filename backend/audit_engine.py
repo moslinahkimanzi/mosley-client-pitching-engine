@@ -508,6 +508,14 @@ def advanced_site_audit(initial_url: str, fetcher, max_pages: int = 10) -> dict:
         },
         "score_disclaimer": "The health score is a prioritisation indicator for the issues this bounded static audit detected. It is not a security rating, accessibility certification, search ranking prediction or proof that untested areas are healthy.",
         "pages": pages,
+        "limitations": [
+            "Only a bounded number of publicly linked pages on the starting hostname were inspected; other routes and subdomains may not be included.",
+            "JavaScript-rendered, browser-only, authenticated and personalised content may not be visible in the fetched HTML.",
+            "Response-time observations are individual server requests, not Core Web Vitals or representative real-user performance measurements.",
+            "Static accessibility signals are not a WCAG conformance audit; keyboard, screen-reader and user testing remain necessary.",
+            "Missing HSTS or Content-Security-Policy headers are hardening observations, not proof of an exploitable vulnerability.",
+            "MCAS does not scan ports, exploit vulnerabilities, submit forms, test private APIs or provide penetration-test certification.",
+        ],
         "scope_note": (
             "Bounded public-page audit only. MCAS does not execute JavaScript, submit forms, sign in, test private APIs, "
             "scan ports, exploit vulnerabilities, verify business ownership, or provide a penetration-test certification. "
