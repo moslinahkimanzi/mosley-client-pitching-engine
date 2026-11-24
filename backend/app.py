@@ -1903,8 +1903,8 @@ def update_workspace_preferences(payload: WorkspacePreferencesIn, user=Depends(c
     timezone_name = payload.timezone.strip()
     if country not in ISO_COUNTRY_CODES:
         raise HTTPException(422, "Choose a valid ISO country.")
-    if not re.fullmatch(r"[A-Z]{3}", currency):
-        raise HTTPException(422, "Choose a valid three-letter currency code.")
+    if currency not in set(COUNTRY_CURRENCIES.values()) | {"USD", "EUR", "GBP", "KES"}:
+        raise HTTPException(422, "Choose a supported ISO currency.")
     if timezone_name != "auto":
         try:
             ZoneInfo(timezone_name)
