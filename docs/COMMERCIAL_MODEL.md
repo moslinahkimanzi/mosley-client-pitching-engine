@@ -40,23 +40,24 @@ These are proposed USD launch prices, not market-validated willingness-to-pay. R
 
 ## Revenue target scenario
 
-At an illustrative planning exchange rate of KES 130 per USD, USD 10,000 gross monthly revenue is about KES 1.3 million. One hypothetical mix:
-- 60 Agency accounts × KES 9,999 = KES 599,940
-- 100 Growth accounts × KES 3,999 = KES 399,900
-- 200 Starter accounts × KES 1,499 = KES 299,800
-- Total = KES 1,299,640 gross monthly billings (about USD 9,997 at that illustrative rate).
+An illustrative USD 10,000 gross monthly revenue mix:
+- 60 Agency accounts × $79 = $4,740
+- 100 Growth accounts × $29 = $2,900
+- 200 Starter accounts × $12 = $2,400
+- Total = **$10,040 gross monthly billings**.
 
 This is arithmetic, not a forecast. It excludes payment fees, taxes, refunds, failed renewals, discounts, infrastructure and support costs. Reaching this level requires customer acquisition, retention, product reliability and support capacity; it is not guaranteed by the pricing design.
 
 ## Payments and subscription lifecycle
 
-- Flutterwave hosted checkout is used for one-time KES payments with M-Pesa (`mpesa`) and card (`card`) options.
-- The server records a pending transaction before checkout. A redirect back to the browser never grants credits.
-- The webhook secret hash is checked, then MCAS independently verifies the transaction with the provider API and matches status, amount, currency, reference and purchase metadata before applying an entitlement.
+- All catalogue prices and subscription/credit entitlements are denominated in USD.
+- USD card checkout sends a USD transaction to Flutterwave.
+- Kenyan M-Pesa checkout sends KES only. MCAS converts the USD list price using an explicitly configured USD/KES rate dated within the last three days; the rate and resulting KES amount are recorded on the payment. If the rate is absent or stale, M-Pesa checkout is disabled.
+- The server records a pending transaction before checkout. A browser redirect never grants credits.
+- The webhook secret hash is checked, then MCAS independently verifies transaction status, exact expected currency, amount, reference and purchase metadata before applying an entitlement.
 - Provider transaction IDs and payment references are unique/idempotent. Credits are granted through an append-only ledger.
-- Monthly subscriptions currently grant 30-day access and credits only after a verified payment. A customer must complete a renewal payment in this release. Flutterwave Payment Plans document recurring billing for cards only; the current MCAS checkout does not create a payment plan or tokenise cards. Automatic M-Pesa debits are not enabled.
-- Automatic recurring card billing or Safaricom Ratiba requires separate setup, customer consent/mandates, provider approval, retry/cancellation logic and webhook tests.
-- Bank settlement account changes are configured in the Flutterwave merchant dashboard, not by collecting bank credentials in MCAS. Flutterwave documents settlements to an approved bank account and lists KES bank transfers for Kenya; live eligibility, settlement timing, KYC and fees depend on merchant approval.
+- Monthly subscriptions currently grant 30-day access and credits only after a verified payment. Renewal requires another payment in this release. Automatic M-Pesa debits are not enabled.
+- Bank settlement currency and account eligibility are determined by provider merchant configuration and must be verified before launch; USD customer pricing does not guarantee USD bank settlement.
 
 ## Production prerequisites
 
