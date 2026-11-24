@@ -265,6 +265,13 @@ def debit_credits(user_id: str, amount: int, reason: str, reference: Optional[st
         c.execute("INSERT INTO billing_credit_ledger(id,user_id,delta_monthly,delta_purchased,reason,reference,created_at) VALUES(?,?,?,?,?,?,?)", (secrets.token_urlsafe(16), user_id, -used_monthly, -used_purchased, reason[:100], reference, now()))
         audit(c, user_id, "billing.credits_debited", {"amount": amount, "reason": reason[:100]})
 
+def billing_provider_ready() -> bool:
+    enabled = os.getenv("MCAS_BILLING_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+    return bool(enabled and os.getenv("FLW_SECRET_KEY", "").strip()
+                and os.getenv("FLW_SECRET_HASH", "").strip()
+                and os.getenv("MCAS_PUBLIC_URL", "").strip())
+
+
 def flutterwave_request(method: str, path: str, payload: Optional[dict] = None):
     key = os.getenv("FLW_SECRET_KEY", "").strip()
     if not key: raise HTTPException(503, "Payment processing is not configured.")
@@ -3115,11 +3122,12 @@ def billing_status(user=Depends(current_user)):
     with db() as c:
         account = ensure_billing_account(c, user['id'])
         orders = c.execute('SELECT id,item_type,item_code,amount_kes,currency,status,created_at FROM billing_orders WHERE user_id=? ORDER BY created_at DESC LIMIT 10', (user['id'],)).fetchall()
-    configured = bool(os.getenv('FLW_SECRET_KEY','').strip() and os.getenv('FLW_SECRET_HASH','').strip() and os.getenv('MCAS_PUBLIC_URL','').strip())
+    configured = billing_provider_ready()
     return {'plan':account['plan_code'],'monthly_credits':int(account['monthly_credits']),'purchased_credits':int(account['purchased_credits']),'total_credits':int(account['monthly_credits'])+int(account['purchased_credits']),'period_start':account['period_start'],'period_end':account['period_end'],'billing_enabled':configured,'provider':'Flutterwave' if configured else None,'payment_methods':['M-Pesa','Card'],'renewal_policy':'Monthly renewal is customer-initiated. Automatic M-Pesa renewal is not enabled.','plans':PLANS,'credit_packs':CREDIT_PACKS,'recent_orders':[dict(row) for row in orders],'message':'Checkout is configured; sandbox verification and merchant approval are still required before live sales.' if configured else 'Payments are disabled until server-side Flutterwave keys, webhook secret hash and public URL are configured.'}
 
 @app.post('/api/billing/checkout')
 def billing_checkout(payload: BillingCheckoutIn, user=Depends(current_user)):
+    if not billing_provider_ready(): raise HTTPException(503, 'MCAS billing is disabled until the operator enables it after sandbox testing and merchant approval.')
     product = product_for_order(payload.item_type, payload.item_code)
     if not product or int(product.get('amount_kes',0)) <= 0: raise HTTPException(422, 'Choose a valid paid subscription or credit pack.')
     public_url = os.getenv('MCAS_PUBLIC_URL','').strip().rstrip('/')
