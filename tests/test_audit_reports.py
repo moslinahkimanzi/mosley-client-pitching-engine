@@ -85,6 +85,25 @@ class AuditPdfTests(unittest.TestCase):
         self.assertIn(b"Website improvement opportunities", pdf)
         self.assertIn(b"example.test", pdf)
 
+        # Validate the PDF cross-reference table and every listed object offset.
+        import re
+        startxref_match = re.search(rb"startxref\\s+(\\d+)", pdf)
+        self.assertIsNotNone(startxref_match)
+        xref_offset = int(startxref_match.group(1))
+        xref_lines = pdf[xref_offset:].splitlines()
+        self.assertEqual(xref_lines[0], b"xref")
+        first_object, object_count = xref_lines[1].split()
+        self.assertEqual(first_object, b"0")
+        object_count = int(object_count)
+        object_entries = xref_lines[3:3 + object_count - 1]
+        self.assertEqual(len(object_entries), object_count - 1)
+        for object_id, entry in enumerate(object_entries, start=1):
+            object_offset = int(entry[:10])
+            self.assertTrue(
+                pdf[object_offset:].startswith(f"{object_id} 0 obj".encode()),
+                f"Bad PDF xref offset for object {object_id}",
+            )
+
     def test_filename_is_host_based_and_sanitized(self):
         name = audit_pdf_filename(self.sample_report())
         self.assertEqual(name, "mcas-audit-example.test-20261124.pdf")
