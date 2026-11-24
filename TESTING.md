@@ -93,3 +93,6 @@ Manual website-check tests: try localhost, a private LAN address, a non-standard
 - Backups, restore procedure, environment secrets or HTTPS settings have not been verified.
 
 This checklist is not a penetration test and cannot prove the system is immune to attacks. A qualified security review is still required before a public multi-customer launch.
+
+
+<!-- Temporary CI validation trigger; do not merge this branch. -->
