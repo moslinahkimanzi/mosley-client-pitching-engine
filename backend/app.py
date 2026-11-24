@@ -34,7 +34,14 @@ from pydantic import BaseModel, Field
 
 from backend.audit_engine import advanced_site_audit
 from backend.google_auth import verify_google_id_token
-from backend.billing import PLANS, CREDIT_PACKS, product_for_order, credits_for_audit, credits_for_competitors
+from backend.billing import PLANS as LEGACY_PLANS, CREDIT_PACKS as LEGACY_CREDIT_PACKS, product_for_order, credits_for_audit, credits_for_competitors
+from backend.commercial import (
+    PLANS as USD_PLANS, CREDIT_PACKS as USD_CREDIT_PACKS,
+    public_catalog as usd_billing_catalog, payment_quote as usd_payment_quote,
+    get_usd_kes_rate, flutterwave_ready as usd_flutterwave_ready,
+    initialize_flutterwave_checkout as initialize_usd_checkout,
+    verify_flutterwave_transaction as verify_usd_transaction,
+)
 
 try:
     from cryptography.fernet import Fernet, InvalidToken
@@ -214,6 +221,12 @@ def init_db():
         add_column(c, "leads", "business_verification_json", "TEXT NOT NULL DEFAULT '{}'")
         add_column(c, "leads", "business_verified_at", "TEXT")
         c.execute("UPDATE leads SET status='Unverified',business_verification_status='unverified',business_verified_at=NULL WHERE status='Verified' AND business_verification_status!='human_confirmed'")
+        add_column(c, "billing_orders", "amount_usd_cents", "INTEGER")
+        add_column(c, "billing_orders", "provider_amount", "TEXT")
+        add_column(c, "billing_orders", "provider_currency", "TEXT")
+        add_column(c, "billing_orders", "payment_method", "TEXT")
+        add_column(c, "billing_orders", "exchange_rate", "TEXT")
+        add_column(c, "billing_orders", "phone_number", "TEXT")
         add_column(c, "users", "google_subject", "TEXT")
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_subject ON users(google_subject) WHERE google_subject IS NOT NULL")
         add_column(c, "leads", "contact_phone", "TEXT")
@@ -316,15 +329,30 @@ def grant_verified_order(order_id: str, transaction_id: str):
         account = ensure_billing_account(c, order['user_id'])
         stamp = now()
         if order['item_type'] == 'subscription':
-            plan = PLANS.get(order['item_code'])
-            if not plan or plan['amount_kes'] != int(order['amount_kes']): raise HTTPException(409, "Stored subscription order does not match catalogue.")
-            period_end = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
-            monthly_delta = int(plan['monthly_credits']) - int(account['monthly_credits'])
-            c.execute("UPDATE billing_accounts SET plan_code=?,monthly_credits=?,period_start=?,period_end=?,updated_at=? WHERE user_id=?", (order['item_code'], plan['monthly_credits'], stamp, period_end, stamp, order['user_id']))
+            if order['amount_usd_cents'] is not None:
+                plan = USD_PLANS.get(order['item_code'])
+                if not plan or int(plan['amount_usd_cents']) != int(order['amount_usd_cents']):
+                    raise HTTPException(409, "Stored USD subscription order does not match the current catalogue.")
+                period_end = (datetime.now(timezone.utc) + timedelta(days=int(plan.get('period_days', 30)))).isoformat()
+                monthly_delta = int(plan['credits']) - int(account['monthly_credits'])
+                c.execute("UPDATE billing_accounts SET plan_code=?,monthly_credits=?,period_start=?,period_end=?,updated_at=? WHERE user_id=?", (order['item_code'], plan['credits'], stamp, period_end, stamp, order['user_id']))
+            else:
+                plan = LEGACY_PLANS.get(order['item_code'])
+                if not plan or plan['amount_kes'] != int(order['amount_kes']):
+                    raise HTTPException(409, "Stored legacy KES subscription order does not match catalogue.")
+                period_end = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+                monthly_delta = int(plan['monthly_credits']) - int(account['monthly_credits'])
+                c.execute("UPDATE billing_accounts SET plan_code=?,monthly_credits=?,period_start=?,period_end=?,updated_at=? WHERE user_id=?", (order['item_code'], plan['monthly_credits'], stamp, period_end, stamp, order['user_id']))
             purchased_delta = 0
         elif order['item_type'] == 'credits':
-            pack = CREDIT_PACKS.get(order['item_code'])
-            if not pack or pack['amount_kes'] != int(order['amount_kes']): raise HTTPException(409, "Stored credit order does not match catalogue.")
+            if order['amount_usd_cents'] is not None:
+                pack = USD_CREDIT_PACKS.get(order['item_code'])
+                if not pack or int(pack['amount_usd_cents']) != int(order['amount_usd_cents']):
+                    raise HTTPException(409, "Stored USD credit order does not match the current catalogue.")
+            else:
+                pack = LEGACY_CREDIT_PACKS.get(order['item_code'])
+                if not pack or pack['amount_kes'] != int(order['amount_kes']):
+                    raise HTTPException(409, "Stored legacy KES credit order does not match catalogue.")
             c.execute("UPDATE billing_accounts SET purchased_credits=purchased_credits+?,updated_at=? WHERE user_id=?", (pack['credits'], stamp, order['user_id']))
             monthly_delta, purchased_delta = 0, int(pack['credits'])
         else: raise HTTPException(409, "Unsupported billing order type.")
@@ -3127,77 +3155,172 @@ class BillingCheckoutIn(BaseModel):
     payment_method: Literal['card', 'mpesa'] = 'mpesa'
     phone_number: Optional[str] = Field(default=None, min_length=9, max_length=20)
 
+
+def billing_provider_ready() -> bool:
+    return usd_flutterwave_ready()
+
+
 @app.get('/api/billing/status')
 def billing_status(user=Depends(current_user)):
     with db() as c:
         account = ensure_billing_account(c, user['id'])
-        orders = c.execute('SELECT id,item_type,item_code,amount_kes,currency,status,created_at FROM billing_orders WHERE user_id=? ORDER BY created_at DESC LIMIT 10', (user['id'],)).fetchall()
+        orders = c.execute(
+            'SELECT id,item_type,item_code,amount_kes,currency,status,created_at,amount_usd_cents,provider_amount,provider_currency,payment_method,exchange_rate FROM billing_orders WHERE user_id=? ORDER BY created_at DESC LIMIT 10',
+            (user['id'],)
+        ).fetchall()
     configured = billing_provider_ready()
-    return {'plan':account['plan_code'],'monthly_credits':int(account['monthly_credits']),'purchased_credits':int(account['purchased_credits']),'total_credits':int(account['monthly_credits'])+int(account['purchased_credits']),'period_start':account['period_start'],'period_end':account['period_end'],'billing_enabled':configured,'provider':'Flutterwave' if configured else None,'payment_methods':['M-Pesa','Card'],'renewal_policy':'Monthly renewal is customer-initiated. Automatic M-Pesa renewal is not enabled.','plans':PLANS,'credit_packs':CREDIT_PACKS,'recent_orders':[dict(row) for row in orders],'message':'Checkout is configured; sandbox verification and merchant approval are still required before live sales.' if configured else 'Payments are disabled until server-side Flutterwave keys, webhook secret hash and public URL are configured.'}
+    catalog = usd_billing_catalog()
+    return {
+        'plan': account['plan_code'],
+        'monthly_credits': int(account['monthly_credits']),
+        'purchased_credits': int(account['purchased_credits']),
+        'total_credits': int(account['monthly_credits']) + int(account['purchased_credits']),
+        'period_start': account['period_start'],
+        'period_end': account['period_end'],
+        'billing_enabled': configured,
+        'provider': 'Flutterwave' if configured else None,
+        'payment_methods': catalog['payment_methods'],
+        'mpesa_quote': catalog['mpesa_quote'],
+        'currency': 'USD',
+        'renewal_policy': 'Subscriptions last 30 days and renew only after a new customer-initiated, verified payment. Automatic recurring charges are not enabled.',
+        'plans': catalog['plans'],
+        'credit_packs': catalog['credit_packs'],
+        'credit_costs': catalog['credit_costs'],
+        'recent_orders': [dict(row) for row in orders],
+        'message': 'USD card checkout and converted KES M-Pesa checkout are configured. Complete sandbox testing and merchant approval before live sales.' if configured else 'Payments are disabled. Configure the provider, HTTPS public URL and explicit MCAS_BILLING_ENABLED=true only after sandbox testing and merchant approval.'
+    }
+
 
 @app.post('/api/billing/checkout')
 def billing_checkout(payload: BillingCheckoutIn, user=Depends(current_user)):
-    product = product_for_order(payload.item_type, payload.item_code)
-    if not product or int(product.get('amount_kes',0)) <= 0: raise HTTPException(422, 'Choose a valid paid subscription or credit pack.')
-    if not billing_provider_ready(): raise HTTPException(503, 'MCAS billing is disabled until the operator enables it after sandbox testing and merchant approval.')
-    public_url = os.getenv('MCAS_PUBLIC_URL','').strip().rstrip('/')
-    if IS_PROD and not public_url.startswith('https://'): raise HTTPException(503, 'Production checkout requires a public HTTPS MCAS_PUBLIC_URL.')
-    if not public_url: raise HTTPException(503, 'MCAS_PUBLIC_URL is not configured. Payments remain disabled.')
-    if payload.payment_method == 'mpesa' and not payload.phone_number: raise HTTPException(422, 'Enter the M-Pesa phone number for the payment request.')
-    if payload.phone_number and not re.fullmatch(r'\\+?\\d{9,15}', payload.phone_number.strip()): raise HTTPException(422, 'Enter a valid international phone number.')
-    tx_ref, order_id, stamp = 'MCAS-'+secrets.token_urlsafe(18), secrets.token_urlsafe(18), now()
-    with db() as c:
-        c.execute("INSERT INTO billing_orders(id,user_id,tx_ref,item_type,item_code,amount_kes,currency,status,created_at,updated_at) VALUES(?,?,?,?,?,?,'KES','pending',?,?)", (order_id,user['id'],tx_ref,payload.item_type,payload.item_code,int(product['amount_kes']),stamp,stamp))
-    request_data = {'tx_ref':tx_ref,'amount':int(product['amount_kes']),'currency':'KES','redirect_url':public_url+'/?payment_return='+urllib.parse.quote(order_id),'payment_options':'card' if payload.payment_method == 'card' else 'mpesa','customer':{'email':user['email'],'phone_number':payload.phone_number or ''},'customizations':{'title':'Mosley Client Acquisition System','description':product['name']},'meta':{'mcas_order_id':order_id,'mcas_item_type':payload.item_type,'mcas_item_code':payload.item_code}}
+    catalog = USD_PLANS if payload.item_type == 'subscription' else USD_CREDIT_PACKS
+    product = catalog.get(payload.item_code)
+    if not product:
+        raise HTTPException(422, 'Choose a valid paid subscription or credit pack.')
+    if not billing_provider_ready():
+        raise HTTPException(503, 'MCAS billing is disabled until sandbox testing and merchant approval are complete.')
+    public_url = os.getenv('MCAS_PUBLIC_URL', '').strip().rstrip('/')
+    if not public_url.startswith('https://'):
+        raise HTTPException(503, 'Secure public HTTPS MCAS_PUBLIC_URL is required.')
+    if payload.payment_method == 'mpesa':
+        if not payload.phone_number:
+            raise HTTPException(422, 'Enter the M-Pesa phone number including country code.')
+        if not re.fullmatch(r'\\+?\\d{9,15}', payload.phone_number.strip()):
+            raise HTTPException(422, 'Enter a valid international phone number.')
+    elif payload.phone_number:
+        raise HTTPException(422, 'A phone number is accepted only for M-Pesa checkout.')
     try:
-        result = flutterwave_request('POST','payments',request_data)
-        checkout_url = result.get('data',{}).get('link') if isinstance(result.get('data'),dict) else None
-        if result.get('status') != 'success' or not isinstance(checkout_url,str) or not checkout_url.startswith('https://'): raise HTTPException(502,'Payment provider did not return a valid hosted checkout URL.')
-    except Exception:
-        with db() as c: c.execute("UPDATE billing_orders SET status='failed',updated_at=? WHERE id=? AND status='pending'", (now(),order_id))
-        raise
+        rate = get_usd_kes_rate() if payload.payment_method == 'mpesa' else None
+        quote = usd_payment_quote(int(product['amount_usd_cents']), payload.payment_method, rate)
+    except ValueError as exc:
+        raise HTTPException(503 if payload.payment_method == 'mpesa' else 422, str(exc))
+    tx_ref = 'MCAS-' + secrets.token_urlsafe(18)
+    order_id, stamp = secrets.token_urlsafe(18), now()
     with db() as c:
-        c.execute('UPDATE billing_orders SET checkout_url=?,updated_at=? WHERE id=?',(checkout_url,now(),order_id))
-        audit(c,user['id'],'billing.checkout_created',{'order_id':order_id,'item_type':payload.item_type,'item_code':payload.item_code,'payment_method':payload.payment_method})
-    return {'order_id':order_id,'tx_ref':tx_ref,'checkout_url':checkout_url,'amount_kes':int(product['amount_kes']),'currency':'KES','message':'Checkout created. Paid access and credits are granted only after server-side transaction verification.'}
+        c.execute(
+            """INSERT INTO billing_orders
+            (id,user_id,tx_ref,item_type,item_code,amount_kes,currency,status,created_at,updated_at,
+             amount_usd_cents,provider_amount,provider_currency,payment_method,exchange_rate,phone_number)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (order_id, user['id'], tx_ref, payload.item_type, payload.item_code,
+             int(quote['amount_kes']), quote['provider_currency'], 'pending', stamp, stamp,
+             int(quote['base_amount_usd_cents']), str(quote['provider_amount']),
+             quote['provider_currency'], payload.payment_method, quote['exchange_rate'],
+             payload.phone_number.strip() if payload.phone_number else None)
+        )
+    try:
+        result = initialize_usd_checkout(
+            tx_ref=tx_ref, amount=str(quote['provider_amount']),
+            currency=quote['provider_currency'], payment_method=payload.payment_method,
+            email=user['email'], customer_id=user['id'], item_type=payload.item_type,
+            item_code=payload.item_code, phone_number=payload.phone_number,
+            order_id=order_id,
+            redirect_url=public_url + '/?payment_return=' + urllib.parse.quote(order_id)
+        )
+        checkout_url = result.get('checkout_url')
+    except Exception:
+        with db() as c:
+            c.execute("UPDATE billing_orders SET status='failed',updated_at=? WHERE id=? AND status='pending'", (now(), order_id))
+        raise HTTPException(502, 'Secure payment checkout could not be initialized. No credits or subscription were granted.')
+    with db() as c:
+        c.execute('UPDATE billing_orders SET checkout_url=?,updated_at=? WHERE id=?', (checkout_url, now(), order_id))
+        audit(c, user['id'], 'billing.checkout_created', {
+            'order_id': order_id, 'item_type': payload.item_type, 'item_code': payload.item_code,
+            'payment_method': payload.payment_method, 'provider_currency': quote['provider_currency'],
+            'base_amount_usd': quote['base_amount_usd']
+        })
+    return {
+        'order_id': order_id, 'tx_ref': tx_ref, 'checkout_url': checkout_url,
+        'amount_usd': quote['base_amount_usd'], 'provider_amount': quote['provider_amount'],
+        'provider_currency': quote['provider_currency'], 'payment_method': payload.payment_method,
+        'exchange_rate': quote['exchange_rate'],
+        'message': 'Checkout created. Credits and subscription access are granted only after server-side provider verification.'
+    }
+
 
 @app.post('/api/billing/flutterwave/webhook')
 async def flutterwave_webhook(request: Request):
-    secret = os.getenv('FLW_SECRET_HASH','').strip()
-    signature = request.headers.get('verif-hash','').strip()
+    secret = os.getenv('FLW_SECRET_HASH', '').strip()
+    signature = request.headers.get('verif-hash', '').strip()
     if not secret or not signature or not hmac.compare_digest(signature, secret):
-        raise HTTPException(401,'Invalid payment webhook signature.')
-    try: payload = await request.json()
-    except Exception: raise HTTPException(400,'Invalid webhook payload.')
-    data = payload.get('data') if isinstance(payload,dict) else None
-    if not isinstance(data,dict): return {'status':'ignored'}
-    transaction_id = data.get('id')
-    if not transaction_id: return {'status':'ignored'}
-    event_key = str(payload.get('id') or (str(transaction_id)+':'+str(payload.get('type') or payload.get('event') or 'charge.completed')))
+        raise HTTPException(401, 'Invalid payment webhook signature.')
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, 'Invalid webhook payload.')
+    if not isinstance(payload, dict):
+        raise HTTPException(400, 'Invalid webhook payload.')
+    data = payload.get('data')
+    if not isinstance(data, dict) or not str(data.get('id', '')).isdigit():
+        return {'status': 'ignored'}
+    transaction_id = str(data['id'])
+    event_key = str(payload.get('id') or (transaction_id + ':' + str(payload.get('type') or payload.get('event') or 'charge.completed')))[:200]
     with db() as c:
-        if c.execute('SELECT 1 FROM billing_webhook_events WHERE event_key=?',(event_key,)).fetchone(): return {'status':'duplicate'}
-    if str(data.get('status','')).lower() not in {'successful','succeeded'}:
-        with db() as c: c.execute("INSERT OR IGNORE INTO billing_webhook_events(event_key,received_at,outcome) VALUES(?,?,?)",(event_key,now(),'not_successful'))
-        return {'status':'not_successful'}
-    metadata = data.get('meta') if isinstance(data.get('meta'),dict) else {}
-    order_id_hint = str(metadata.get('mcas_order_id') or '')
+        if c.execute('SELECT 1 FROM billing_webhook_events WHERE event_key=?', (event_key,)).fetchone():
+            return {'status': 'duplicate'}
+    if str(data.get('status', '')).lower() not in {'successful', 'succeeded'}:
+        with db() as c:
+            c.execute("INSERT OR IGNORE INTO billing_webhook_events(event_key,received_at,outcome) VALUES(?,?,?)", (event_key, now(), 'not_successful'))
+        return {'status': 'not_successful'}
     tx_ref_hint = str(data.get('tx_ref') or data.get('reference') or '')
+    metadata = data.get('meta') if isinstance(data.get('meta'), dict) else {}
+    order_id_hint = str(metadata.get('mcas_order_id') or '')
     with db() as c:
-        order = c.execute('SELECT * FROM billing_orders WHERE id=?',(order_id_hint,)).fetchone() if order_id_hint else None
+        order = c.execute('SELECT * FROM billing_orders WHERE id=?', (order_id_hint,)).fetchone() if order_id_hint else None
         if not order and tx_ref_hint:
-            order = c.execute('SELECT * FROM billing_orders WHERE tx_ref=?',(tx_ref_hint,)).fetchone()
-    if not order: return {'status':'ignored'}
-    verify_path = 'transactions/verify_by_reference?' + urllib.parse.urlencode({'tx_ref':order['tx_ref']})
-    verified = flutterwave_request('GET',verify_path)
-    tx = verified.get('data') if isinstance(verified.get('data'),dict) else {}
-    if verified.get('status') != 'success' or str(tx.get('status','')).lower() != 'successful' or str(tx.get('tx_ref','')) != order['tx_ref'] or str(tx.get('currency','')).upper() != 'KES':
-        raise HTTPException(400,'Payment could not be verified against the MCAS order.')
-    try: paid_amount = float(tx.get('amount'))
-    except (TypeError,ValueError): raise HTTPException(400,'Verified payment amount is invalid.')
-    if paid_amount != float(order['amount_kes']): raise HTTPException(400,'Verified payment amount does not match the MCAS order.')
-    grant_verified_order(order['id'],str(tx.get('id') or transaction_id))
-    with db() as c: c.execute('INSERT OR IGNORE INTO billing_webhook_events(event_key,received_at,outcome) VALUES(?,?,?)',(event_key,now(),'fulfilled'))
-    return {'status':'fulfilled'}
+            order = c.execute('SELECT * FROM billing_orders WHERE tx_ref=?', (tx_ref_hint,)).fetchone()
+    if not order:
+        return {'status': 'ignored'}
+    if order['status'] == 'paid':
+        return {'status': 'duplicate'}
+    try:
+        verified = verify_usd_transaction(transaction_id)
+        from decimal import Decimal, InvalidOperation
+        expected_currency = str(order['provider_currency'] or order['currency'] or 'KES').upper()
+        expected_amount = Decimal(str(order['provider_amount'] if order['provider_amount'] is not None else order['amount_kes']))
+        actual_amount = Decimal(str(verified.get('amount', '0')))
+        if (str(verified.get('status', '')).lower() != 'successful'
+                or str(verified.get('tx_ref', '')) != order['tx_ref']
+                or str(verified.get('currency', '')).upper() != expected_currency
+                or not actual_amount.is_finite() or actual_amount != expected_amount
+                or str(verified.get('id', '')) != transaction_id):
+            raise ValueError('Verified provider payment does not exactly match the MCAS order.')
+        if order['amount_usd_cents'] is not None:
+            verified_meta = verified.get('meta') if isinstance(verified.get('meta'), dict) else {}
+            if (str(verified_meta.get('customer_id', '')) != str(order['user_id'])
+                    or str(verified_meta.get('item_type', '')) != str(order['item_type'])
+                    or str(verified_meta.get('item_code', '')) != str(order['item_code'])
+                    or str(verified_meta.get('payment_method', '')) != str(order['payment_method'])
+                    or str(verified_meta.get('mcas_order_id', '')) != str(order['id'])):
+                raise ValueError('Verified payment metadata does not match the MCAS order.')
+        grant_verified_order(order['id'], transaction_id)
+    except Exception:
+        SECURITY_LOGGER.exception('MCAS payment webhook verification failed')
+        raise HTTPException(400, 'Payment could not be verified against the MCAS order; no entitlement was granted.')
+    with db() as c:
+        c.execute('INSERT OR IGNORE INTO billing_webhook_events(event_key,received_at,outcome) VALUES(?,?,?)', (event_key, now(), 'fulfilled'))
+    return {'status': 'fulfilled'}
+
 
 @app.get('/api/billing/return')
 def billing_return(order_id: str = Query(min_length=1,max_length=100), user=Depends(current_user)):
