@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - recovery/mcas-complete-product
+      - "release/**"
   pull_request:
     branches:
       - recovery/mcas-complete-product
