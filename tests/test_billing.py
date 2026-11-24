@@ -1,5 +1,9 @@
 import os
 import unittest
+import base64
+import hashlib
+import hmac
+import json
 import uuid
 from unittest.mock import patch
 
@@ -97,7 +101,7 @@ class BillingTest(unittest.TestCase):
             response = client.post(
                 "/api/billing/flutterwave/webhook",
                 json={"event": "charge.completed", "data": {"id": 123, "tx_ref": "unknown"}},
-                headers={"verif-hash": "wrong-secret"},
+                headers={"flutterwave-signature": "wrong-secret"},
             )
         self.assertEqual(response.status_code, 401)
 
@@ -119,9 +123,11 @@ class BillingTest(unittest.TestCase):
         ) as provider:
             payload = {"id": "evt-" + uuid.uuid4().hex, "event": "charge.completed",
                        "data": {"id": 987654, "tx_ref": tx_ref, "status": "successful"}}
-            headers = {"verif-hash": "test-secret"}
-            first = client.post("/api/billing/flutterwave/webhook", json=payload, headers=headers)
-            second = client.post("/api/billing/flutterwave/webhook", json=payload, headers=headers)
+            raw_body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            signature = base64.b64encode(hmac.new(b"test-secret", raw_body, hashlib.sha256).digest()).decode("ascii")
+            headers = {"flutterwave-signature": signature}
+            first = client.post("/api/billing/flutterwave/webhook", content=raw_body, headers=headers)
+            second = client.post("/api/billing/flutterwave/webhook", content=raw_body, headers=headers)
         self.assertEqual(first.status_code, 200, first.text)
         self.assertEqual(first.json()["status"], "fulfilled")
         self.assertEqual(second.status_code, 200, second.text)
