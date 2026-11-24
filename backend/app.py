@@ -3127,9 +3127,9 @@ def billing_status(user=Depends(current_user)):
 
 @app.post('/api/billing/checkout')
 def billing_checkout(payload: BillingCheckoutIn, user=Depends(current_user)):
-    if not billing_provider_ready(): raise HTTPException(503, 'MCAS billing is disabled until the operator enables it after sandbox testing and merchant approval.')
     product = product_for_order(payload.item_type, payload.item_code)
     if not product or int(product.get('amount_kes',0)) <= 0: raise HTTPException(422, 'Choose a valid paid subscription or credit pack.')
+    if not billing_provider_ready(): raise HTTPException(503, 'MCAS billing is disabled until the operator enables it after sandbox testing and merchant approval.')
     public_url = os.getenv('MCAS_PUBLIC_URL','').strip().rstrip('/')
     if IS_PROD and not public_url.startswith('https://'): raise HTTPException(503, 'Production checkout requires a public HTTPS MCAS_PUBLIC_URL.')
     if not public_url: raise HTTPException(503, 'MCAS_PUBLIC_URL is not configured. Payments remain disabled.')
