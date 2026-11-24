@@ -96,6 +96,49 @@ class BillingTest(unittest.TestCase):
                                          (user_id,)).fetchone()
         self.assertEqual(account["purchased_credits"], 100)
 
+    def test_paid_subscription_grants_allowance_and_expiry_downgrades(self):
+        client, _ = self._client()
+        user_id = client.get("/api/auth/me").json()["id"]
+        order_id = uuid.uuid4().hex
+        tx_ref = "MCAS-PLAN-" + uuid.uuid4().hex
+        with mcas.db() as connection:
+            connection.execute(
+                """INSERT INTO billing_orders(id,user_id,tx_ref,item_type,item_code,amount_kes,currency,status,created_at,updated_at)
+                   VALUES(?,?,?,'subscription','starter',2500,'KES','pending',?,?)""",
+                (order_id, user_id, tx_ref, mcas.now(), mcas.now()),
+            )
+        self.assertTrue(mcas.grant_verified_order(order_id, "test-plan-transaction"))
+        with mcas.db() as connection:
+            connection.execute("UPDATE billing_accounts SET period_end='2000-01-01T00:00:00+00:00' WHERE user_id=?", (user_id,))
+        status = client.get("/api/billing/status").json()
+        self.assertEqual(status["plan"], "free")
+        self.assertEqual(status["monthly_credits"], 20)
+
+    def test_webhook_amount_mismatch_does_not_grant_credits(self):
+        client, _ = self._client()
+        user_id = client.get("/api/auth/me").json()["id"]
+        order_id = uuid.uuid4().hex
+        tx_ref = "MCAS-WRONG-AMOUNT-" + uuid.uuid4().hex
+        with mcas.db() as connection:
+            connection.execute(
+                """INSERT INTO billing_orders(id,user_id,tx_ref,item_type,item_code,amount_kes,currency,status,created_at,updated_at)
+                   VALUES(?,?,?,'credits','small',1500,'KES','pending',?,?)""",
+                (order_id, user_id, tx_ref, mcas.now(), mcas.now()),
+            )
+        verified = {"status":"success","data":{"status":"successful","tx_ref":tx_ref,"currency":"KES","amount":1600}}
+        payload = {"id":"evt-"+uuid.uuid4().hex,"type":"charge.completed",
+                   "data":{"id":987655,"tx_ref":tx_ref,"status":"succeeded"}}
+        raw_body = json.dumps(payload,separators=(",",":")).encode("utf-8")
+        signature = base64.b64encode(hmac.new(b"test-secret",raw_body,hashlib.sha256).digest()).decode("ascii")
+        with patch.dict(os.environ,{"FLW_SECRET_HASH":"test-secret"}), patch.object(mcas,"flutterwave_request",return_value=verified):
+            response = client.post("/api/billing/flutterwave/webhook",content=raw_body,headers={"flutterwave-signature":signature})
+        self.assertEqual(response.status_code,400)
+        with mcas.db() as connection:
+            account = connection.execute("SELECT purchased_credits FROM billing_accounts WHERE user_id=?",(user_id,)).fetchone()
+            order = connection.execute("SELECT status FROM billing_orders WHERE id=?",(order_id,)).fetchone()
+        self.assertEqual(account["purchased_credits"],0)
+        self.assertEqual(order["status"],"pending")
+
     def test_webhook_requires_shared_secret_hash(self):
         client, _ = self._client()
         with patch.dict(os.environ, {"FLW_SECRET_HASH": "correct-secret"}):
