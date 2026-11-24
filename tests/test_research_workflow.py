@@ -105,7 +105,15 @@ class ResearchWorkflowTest(unittest.TestCase):
                 "cid": "987654321",
             }]
         }
-        with patch.object(mcas, "serper_request", return_value=listing) as mocked:
+        web_results = {"organic": [{
+            "title": "Verification Test Dental Clinic Nairobi",
+            "link": "https://verification-test-clinic.example/about",
+            "snippet": "Verification Test Dental Clinic at 1 Test Road, Nairobi. Contact +254700123456.",
+        }]}
+        with patch.object(
+            mcas, "serper_request",
+            side_effect=lambda endpoint, payload: listing if endpoint == "places" else web_results,
+        ) as mocked:
             csrf = client.get("/api/auth/csrf").json()["csrf_token"]
             checked = client.post(
                 f"/api/leads/{lead_id}/verify-business",
@@ -116,7 +124,11 @@ class ResearchWorkflowTest(unittest.TestCase):
         self.assertTrue(checked.json()["checks"]["business_name_match"])
         self.assertTrue(checked.json()["checks"]["address_match"])
         self.assertTrue(checked.json()["checks"]["phone_match"])
-        mocked.assert_called_once()
+        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual(mocked.call_args_list[0].args[0], "places")
+        self.assertEqual(mocked.call_args_list[1].args[0], "search")
+        self.assertTrue(checked.json()["checks"]["independent_web_source"])
+        self.assertEqual(len(checked.json()["independent_sources"]), 1)
 
         lead = next(item for item in client.get("/api/leads").json() if item["id"] == lead_id)
         self.assertEqual(lead["status"], "Unverified")
@@ -156,7 +168,15 @@ class ResearchWorkflowTest(unittest.TestCase):
             "address": "99 Different Avenue, Mombasa, Kenya",
             "phoneNumber": "+254711999999",
         }]}
-        with patch.object(mcas, "serper_request", return_value=listing):
+        web_results = {"organic": [{
+            "title": "Verification Test Dental Clinic Nairobi",
+            "link": "https://verification-test-clinic.example",
+            "snippet": "Verification Test Dental Clinic in Nairobi.",
+        }]}
+        with patch.object(
+            mcas, "serper_request",
+            side_effect=lambda endpoint, payload: listing if endpoint == "places" else web_results,
+        ):
             csrf = client.get("/api/auth/csrf").json()["csrf_token"]
             checked = client.post(
                 f"/api/leads/{lead_id}/verify-business",
