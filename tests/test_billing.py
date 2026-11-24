@@ -13,6 +13,10 @@ import backend.app as mcas
 
 
 class BillingTest(unittest.TestCase):
+    def setUp(self):
+        with mcas.db() as connection:
+            connection.execute('DELETE FROM security_rate_limits')
+
     def _client(self):
         client = TestClient(mcas.app)
         csrf = client.get("/api/auth/csrf").json()["csrf_token"]
@@ -117,6 +121,7 @@ class BillingTest(unittest.TestCase):
     def test_webhook_amount_mismatch_does_not_grant_credits(self):
         client, _ = self._client()
         user_id = client.get("/api/auth/me").json()["id"]
+        client.get("/api/billing/status")
         order_id = uuid.uuid4().hex
         tx_ref = "MCAS-WRONG-AMOUNT-" + uuid.uuid4().hex
         with mcas.db() as connection:
