@@ -63,7 +63,7 @@ def initialize_flutterwave_checkout(*, tx_ref: str, amount_kes: int, email: str,
     payload = {
         "tx_ref": tx_ref, "amount": str(amount_kes), "currency": "KES",
         "redirect_url": public_url + "/?billing=return",
-        "payment_options": "card,mobilemoneykenya",
+        "payment_options": "card,mpesa",
         "customer": {"email": email, "name": email.split("@")[0]},
         "customizations": {"title": "MCAS", "description": "MCAS " + item_type.replace("_", " ")},
         "meta": {"customer_id": customer_id, "item_type": item_type, "item_code": item_code},
