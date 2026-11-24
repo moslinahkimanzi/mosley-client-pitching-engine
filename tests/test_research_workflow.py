@@ -149,6 +149,66 @@ class ResearchWorkflowTest(unittest.TestCase):
         self.assertEqual(drafts[0]["state"], "pending_approval")
         self.assertIn("does not necessarily mean", drafts[0]["body"].lower())
 
+    def test_identity_edits_invalidate_prior_business_verification(self):
+        client, csrf = self._registered_client()
+        created = client.post(
+            "/api/leads",
+            json={
+                "name": "Identity Change Test Business",
+                "market": "Nairobi",
+                "business_address": "1 Test Road, Nairobi, Kenya",
+                "contact_phone": "+254700123456",
+            },
+            headers={"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        lead_id = created.json()["id"]
+        listing = {"places": [{
+            "title": "Identity Change Test Business",
+            "address": "1 Test Road, Nairobi, Kenya",
+            "phoneNumber": "+254700123456",
+        }]}
+        web_results = {"organic": [{
+            "title": "Identity Change Test Business Nairobi",
+            "link": "https://identity-change-test.example",
+            "snippet": "Identity Change Test Business in Nairobi.",
+        }]}
+        with patch.object(
+            mcas, "serper_request",
+            side_effect=lambda endpoint, payload: listing if endpoint == "places" else web_results,
+        ):
+            csrf = client.get("/api/auth/csrf").json()["csrf_token"]
+            checked = client.post(
+                f"/api/leads/{lead_id}/verify-business",
+                headers={"X-CSRF-Token": csrf},
+            )
+        self.assertEqual(checked.json()["status"], "provider_reconfirmed")
+        csrf = client.get("/api/auth/csrf").json()["csrf_token"]
+        client.post(
+            f"/api/leads/{lead_id}/confirm-business",
+            headers={"X-CSRF-Token": csrf},
+        )
+        lead = next(item for item in client.get("/api/leads").json() if item["id"] == lead_id)
+        self.assertEqual(lead["status"], "Verified")
+
+        csrf = client.get("/api/auth/csrf").json()["csrf_token"]
+        updated = client.patch(
+            f"/api/leads/{lead_id}",
+            json={
+                "name": lead["name"], "website": lead["website"], "market": lead["market"],
+                "business_address": lead["business_address"], "evidence": lead["evidence"],
+                "status": "Verified", "contact_email": lead["contact_email"],
+                "contact_phone": "+254711999999", "source_url": lead["source_url"],
+                "do_not_contact": False,
+            },
+            headers={"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(updated.status_code, 200, updated.text)
+        lead = next(item for item in client.get("/api/leads").json() if item["id"] == lead_id)
+        self.assertEqual(lead["status"], "Unverified")
+        self.assertEqual(lead["business_verification_status"], "unverified")
+        self.assertIsNone(lead["business_verified_at"])
+
     def test_business_verification_does_not_accept_a_name_only_match(self):
         client, csrf = self._registered_client()
         created = client.post(
