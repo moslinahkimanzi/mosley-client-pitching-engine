@@ -1584,6 +1584,31 @@ def verify_lead_business(lead_id: str, user=Depends(current_user)):
         "hl": preferences["language_code"],
     })
     candidates = data.get("places") if isinstance(data.get("places"), list) else []
+    web_data = serper_request("search", {
+        "q": '"' + lead["name"] + '" "' + lead["market"] + '" official website contact',
+        "num": 8, "gl": preferences["country_code"].lower(),
+        "hl": preferences["language_code"],
+    })
+    organic = web_data.get("organic") if isinstance(web_data.get("organic"), list) else []
+    independent_sources = []
+    market_tokens = _identity_tokens(lead["market"])
+    for result in organic:
+        if not isinstance(result, dict):
+            continue
+        title = str(result.get("title") or "")[:200]
+        snippet = str(result.get("snippet") or "")[:600]
+        link = result.get("link")
+        combined = title + " " + snippet
+        name_match = _identity_overlap(lead["name"], title) >= 0.45
+        market_match = bool(market_tokens & _identity_tokens(combined))
+        host = urllib.parse.urlparse(link).hostname if isinstance(link, str) else None
+        if name_match and market_match and host and not host.lower().endswith("google.com"):
+            independent_sources.append({
+                "title": title, "url": link, "domain": host.lower(),
+                "snippet": snippet,
+            })
+        if len(independent_sources) >= 5:
+            break
     saved_phone = _phone_digits(lead["contact_phone"] or "")
     saved_address = lead["business_address"] or ""
     best = None
@@ -1601,9 +1626,10 @@ def verify_lead_business(lead_id: str, user=Depends(current_user)):
                            (saved_phone.endswith(candidate_digits[-8:]) or candidate_digits.endswith(saved_phone[-8:])))
         exact_name = bool(_identity_tokens(lead["name"]) and
                           _identity_tokens(lead["name"]) <= _identity_tokens(candidate_name))
+        address_match = bool(saved_address and candidate_address and address_score >= 0.35)
         corroborated = (exact_name or name_score >= 0.75) and (
-            phone_match or (bool(saved_address) and address_score >= 0.35)
-        )
+            phone_match or address_match
+        ) and bool(independent_sources)
         score = name_score + (0.5 if phone_match else 0.0) + (0.35 * address_score)
         if score > best_score:
             best, best_score = (item, corroborated), score
@@ -1621,7 +1647,9 @@ def verify_lead_business(lead_id: str, user=Depends(current_user)):
                                   _identity_overlap(saved_address, str(listing.get("address") or "")) >= 0.35),
             "phone_match": bool(matched and saved_phone and
                                 _phone_digits(str(listing.get("phoneNumber") or listing.get("phone") or "")).endswith(saved_phone[-8:])),
+            "independent_web_source": bool(matched and independent_sources),
         },
+        "independent_sources": independent_sources,
         "listing": {
             "name": str(listing.get("title") or listing.get("name") or "")[:160],
             "address": str(listing.get("address") or "")[:300],
