@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 
 from backend.audit_engine import advanced_site_audit
 from backend.google_auth import verify_google_id_token
+from backend.billing import PLANS, CREDIT_PACKS, product_for_order, credits_for_audit, credits_for_competitors
 
 try:
     from cryptography.fernet import Fernet, InvalidToken
@@ -190,6 +191,12 @@ def init_db():
             feedback_id TEXT NOT NULL REFERENCES customer_feedback(id) ON DELETE CASCADE,
             PRIMARY KEY(review_id,feedback_id)
         );
+        CREATE TABLE IF NOT EXISTS billing_accounts(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, plan_code TEXT NOT NULL DEFAULT 'free', monthly_credits INTEGER NOT NULL DEFAULT 20, purchased_credits INTEGER NOT NULL DEFAULT 0, period_start TEXT, period_end TEXT, updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS billing_orders(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, tx_ref TEXT NOT NULL UNIQUE, item_type TEXT NOT NULL CHECK(item_type IN ('subscription','credits')), item_code TEXT NOT NULL, amount_kes INTEGER NOT NULL, currency TEXT NOT NULL DEFAULT 'KES', status TEXT NOT NULL DEFAULT 'pending', checkout_url TEXT, provider_transaction_id TEXT UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS billing_webhook_events(event_key TEXT PRIMARY KEY, received_at TEXT NOT NULL, outcome TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS billing_credit_ledger(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, delta_monthly INTEGER NOT NULL DEFAULT 0, delta_purchased INTEGER NOT NULL DEFAULT 0, reason TEXT NOT NULL, reference TEXT, created_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_billing_orders_user_created ON billing_orders(user_id,created_at);
+        CREATE INDEX IF NOT EXISTS idx_billing_ledger_user_created ON billing_credit_ledger(user_id,created_at);
         CREATE INDEX IF NOT EXISTS idx_feedback_user_created ON customer_feedback(user_id,created_at);
         CREATE INDEX IF NOT EXISTS idx_feedback_status_created ON customer_feedback(status,created_at);
         CREATE INDEX IF NOT EXISTS idx_leads_user_updated ON leads(user_id,updated_at);
@@ -215,6 +222,7 @@ def init_db():
         add_column(c, "drafts", "to_email", "TEXT")
         add_column(c, "drafts", "gmail_draft_id", "TEXT")
         add_column(c, "customer_feedback", "ai_analysis_consent", "INTEGER NOT NULL DEFAULT 0")
+        c.execute("INSERT OR IGNORE INTO billing_accounts(user_id,plan_code,monthly_credits,purchased_credits,updated_at) SELECT id,'free',20,0,? FROM users", (now(),))
 
 init_db()
 
@@ -368,7 +376,7 @@ async def security_middleware(request: Request, call_next):
         log_security_event("request.origin_missing", request)
         return Response("Origin required", status_code=403, headers={"Cache-Control": "no-store"})
 
-    if unsafe and request.url.path not in {"/api/integrations/gmail/callback", "/api/auth/google"}:
+    if unsafe and request.url.path not in {"/api/integrations/gmail/callback", "/api/auth/google", "/api/billing/flutterwave/webhook"}:
         cookie_token = request.cookies.get(CSRF_COOKIE, "")
         header_token = request.headers.get("x-csrf-token", "")
         if not cookie_token or not header_token or not hmac.compare_digest(cookie_token, header_token) or not valid_csrf(header_token):
@@ -389,6 +397,10 @@ async def security_middleware(request: Request, call_next):
         category, cap = "improvement_analysis", 3
     elif path in {"/api/research/search", "/api/research/run"}:
         category, cap = "search", 5
+    elif path == "/api/billing/flutterwave/webhook":
+        category, cap = "billing_webhook", 60
+    elif path == "/api/billing/checkout":
+        category, cap = "billing", 10
     elif path == "/api/competitor-intelligence":
         category, cap = "competitor", 5
     elif path == "/api/audit-website" or path == "/api/admin/test-lab/audit" or path.endswith("/verify-website"):
