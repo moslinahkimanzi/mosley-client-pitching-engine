@@ -1797,16 +1797,26 @@ def confirm_lead_business(lead_id: str, user=Depends(current_user)):
                WHERE id=? AND user_id=?""",
             (stamp, confirmed_address, confirmed_phone, confirmed_website, stamp, lead_id, user["id"]),
         )
-        try:
-            website_audit = json.loads(lead["website_audit_json"] or "{}")
-        except (TypeError, ValueError):
-            website_audit = {}
-        website_state = (
-            "not_listed" if not lead["website"] else
-            "broken" if lead["website_status"] == "broken" else
-            "needs_improvement" if lead["website_status"] == "needs_improvement" else
-            "working" if lead["website_status"] == "verified" else "needs_review"
-        )
+        if confirmed_website_audit:
+            website_audit = confirmed_website_audit
+            website_state = (
+                "needs_improvement" if (
+                    website_audit.get("has_viewport_meta") is False
+                    or website_audit.get("has_meta_description") is False
+                    or website_audit.get("title") is None
+                ) else "working"
+            )
+        else:
+            try:
+                website_audit = json.loads(lead["website_audit_json"] or "{}")
+            except (TypeError, ValueError):
+                website_audit = {}
+            website_state = (
+                "not_listed" if not confirmed_website else
+                "broken" if lead["website_status"] == "broken" else
+                "needs_improvement" if lead["website_status"] == "needs_improvement" else
+                "working" if lead["website_status"] == "verified" else "needs_review"
+            )
         strategy = business_strategy({})
         subject, body = make_outreach_copy(
             lead["name"], lead["market"] or "the selected market",
