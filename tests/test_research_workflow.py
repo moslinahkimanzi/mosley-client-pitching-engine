@@ -62,9 +62,11 @@ class ResearchWorkflowTest(unittest.TestCase):
         self.assertEqual(result["results"][0]["website_state"], "not_listed")
         self.assertGreaterEqual(result["results"][0]["opportunity_score"], 0)
         self.assertIn("highest_opportunity_score", result["summary"])
-        self.assertTrue(result["results"][0]["proposal_created"])
-        self.assertTrue(result["results"][0]["draft_created"])
+        self.assertFalse(result["results"][0]["proposal_created"])
+        self.assertFalse(result["results"][0]["draft_created"])
         self.assertFalse(result["results"][0]["gmail_draft_created"])
+        self.assertEqual(result["results"][0]["business_verification_status"], "unverified")
+        self.assertIn("confirm", result["workflow"].lower())
         self.assertIn("Serper", result["results"][0]["evidence"])
         self.assertIn("does not prove", result["results"][0]["evidence"])
         self.assertIn("google.com/maps", result["results"][0]["source_url"])
@@ -76,11 +78,8 @@ class ResearchWorkflowTest(unittest.TestCase):
         self.assertIn("Nairobi", mocked.call_args.args[1]["q"])
 
         self.assertEqual(len(client.get("/api/leads").json()), 1)
-        self.assertEqual(len(client.get("/api/proposals").json()), 1)
-        drafts = client.get("/api/drafts").json()
-        self.assertEqual(len(drafts), 1)
-        self.assertEqual(drafts[0]["state"], "pending_approval")
-        self.assertIn("does not necessarily mean", drafts[0]["body"].lower())
+        self.assertEqual(len(client.get("/api/proposals").json()), 0)
+        self.assertEqual(len(client.get("/api/drafts").json()), 0)
 
     def test_business_verification_requires_fresh_listing_and_human_confirmation(self):
         client, csrf = self._registered_client()
@@ -132,6 +131,11 @@ class ResearchWorkflowTest(unittest.TestCase):
         self.assertEqual(confirmed.json()["status"], "Verified")
         lead = next(item for item in client.get("/api/leads").json() if item["id"] == lead_id)
         self.assertEqual(lead["business_verification_status"], "human_confirmed")
+        self.assertEqual(len(client.get("/api/proposals").json()), 1)
+        drafts = client.get("/api/drafts").json()
+        self.assertEqual(len(drafts), 1)
+        self.assertEqual(drafts[0]["state"], "pending_approval")
+        self.assertIn("does not necessarily mean", drafts[0]["body"].lower())
 
     def test_business_verification_does_not_accept_a_name_only_match(self):
         client, csrf = self._registered_client()
