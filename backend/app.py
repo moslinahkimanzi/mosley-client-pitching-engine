@@ -1343,6 +1343,31 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                 website = "https://" + website
             try:
                 website_audit = safe_site_fetch(website)
+                contact_emails = list(website_audit.get("public_emails") or [])
+                contact_phones = list(website_audit.get("public_phones") or [])
+                contact_sources = []
+                root_host = urllib.parse.urlparse(website_audit.get("url") or website).hostname
+                contact_links = []
+                for href in website_audit.get("links") or []:
+                    candidate_url = urllib.parse.urljoin(website_audit.get("url") or website, href)
+                    candidate_parts = urllib.parse.urlparse(candidate_url)
+                    if (candidate_parts.scheme == "https" and candidate_parts.hostname == root_host
+                        and re.search(r"(contact|about|location|reach-us|support)", candidate_parts.path, re.I)
+                        and candidate_url not in contact_links):
+                        contact_links.append(candidate_url)
+                for contact_url in contact_links[:2]:
+                    try:
+                        contact_page = safe_site_fetch(contact_url)
+                        contact_emails.extend(contact_page.get("public_emails") or [])
+                        contact_phones.extend(contact_page.get("public_phones") or [])
+                        if contact_page.get("public_emails") or contact_page.get("public_phones"):
+                            contact_sources.append(contact_page.get("url") or contact_url)
+                    except HTTPException:
+                        continue
+                website_audit["public_emails"] = sorted(set(contact_emails))[:10]
+                website_audit["public_phones"] = sorted(set(contact_phones))[:10]
+                website_audit["contact_sources"] = contact_sources
+                website_audit["contact_pages_checked"] = len(contact_links[:2])
                 status = int(website_audit.get("http_status") or 0)
                 if status in {404, 410} or status >= 500:
                     website_state = "broken"
@@ -1359,9 +1384,13 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             except HTTPException:
                 website_state = "needs_review"
 
-        phone_value = place.get("phoneNumber") or place.get("phone")
+        phone_value = place.get("phoneNumber") or place.get("phone") or (
+            (website_audit.get("public_phones") or [None])[0] if website_audit else None
+        )
         phone = str(phone_value).strip() if phone_value else None
-        email_value = place.get("email")
+        email_value = place.get("email") or (
+            (website_audit.get("public_emails") or [None])[0] if website_audit else None
+        )
         email = str(email_value).strip() if email_value and re.fullmatch(
             r"[^\s@]+@[^\s@]+\.[^\s@]+", str(email_value).strip()
         ) else None
@@ -1382,7 +1411,15 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
         if address:
             facts.append("Public listing address: " + address + ".")
         if phone:
-            facts.append("Public listing phone: " + phone + ".")
+            facts.append("Public business phone: " + phone + ".")
+            if website_audit.get("public_phones"):
+                facts.append("Telephone link was published on the business website or its same-domain contact page.")
+        if email:
+            facts.append("Public business email: " + email + ".")
+            if website_audit.get("public_emails"):
+                facts.append("Email link was published on the business website or its same-domain contact page.")
+        for contact_source in website_audit.get("contact_sources", []):
+            facts.append("Contact detail source page: " + contact_source + ".")
         if place.get("rating") is not None:
             facts.append("Provider-listed rating: " + str(place.get("rating")) +
                          ((" from " + str(place.get("ratingCount")) + " reviews") if place.get("ratingCount") is not None else "") + ".")
