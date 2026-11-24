@@ -206,6 +206,7 @@ def init_db():
         add_column(c, "leads", "business_verification_status", "TEXT NOT NULL DEFAULT 'unverified'")
         add_column(c, "leads", "business_verification_json", "TEXT NOT NULL DEFAULT '{}'")
         add_column(c, "leads", "business_verified_at", "TEXT")
+        c.execute("UPDATE leads SET status='Unverified',business_verification_status='unverified',business_verified_at=NULL WHERE status='Verified' AND business_verification_status!='human_confirmed'")
         add_column(c, "users", "google_subject", "TEXT")
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_subject ON users(google_subject) WHERE google_subject IS NOT NULL")
         add_column(c, "leads", "contact_phone", "TEXT")
