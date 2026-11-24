@@ -282,6 +282,10 @@ class BillingTest(unittest.TestCase):
     def test_usd_webhook_rejects_wrong_currency_without_credit_grant(self):
         client, _ = self._client()
         user_id=client.get("/api/auth/me").json()["id"]
+        # Materialise the free billing account before asserting that a rejected
+        # payment leaves its credit balance unchanged.
+        status_response = client.get("/api/billing/status")
+        self.assertEqual(status_response.status_code, 200, status_response.text)
         order_id=uuid.uuid4().hex
         tx_ref="MCAS-USD-WRONG-"+uuid.uuid4().hex
         with mcas.db() as connection:
