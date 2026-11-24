@@ -337,7 +337,7 @@ async def security_middleware(request: Request, call_next):
     if unsafe and origin and origin not in origins:
         log_security_event("request.origin_rejected", request)
         return Response("Origin not allowed", status_code=403, headers={"Cache-Control": "no-store"})
-    if unsafe and request.url.path not in {"/api/integrations/gmail/callback"}:
+    if unsafe and request.url.path not in {"/api/integrations/gmail/callback", "/api/billing/flutterwave/webhook"}:
         cookie_token = request.cookies.get(CSRF_COOKIE, "")
         header_token = request.headers.get("x-csrf-token", "")
         if not cookie_token or not header_token or not hmac.compare_digest(cookie_token, header_token) or not valid_csrf(header_token):
@@ -1126,6 +1126,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             tags["addr:street"] = address
         strategy = business_strategy(tags)
         score, score_reasons = opportunity_score(tags, website_state, website_audit, email, phone)
+        intelligence = assess_website(website_audit, website_state, {"phone": phone, "email": email})
 
         facts = [
             "Discovered through Serper Places for the search: " + query + ".",
@@ -1177,7 +1178,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                     "website": website, "website_state": website_state, "evidence": evidence,
                     "source_url": source_url, "recommendation": strategy["type"],
                     "pages": strategy["pages"], "opportunity_score": score,
-                    "score_reasons": score_reasons, "contact_email": email,
+                    "score_reasons": score_reasons, "intelligence": intelligence, "contact_email": email,
                     "contact_phone": phone, "website_audit": website_audit,
                     "draft_created": False, "proposal_created": False,
                 })
@@ -1243,7 +1244,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             "website": website, "website_state": website_state, "evidence": evidence,
             "source_url": source_url, "contact_email": email, "contact_phone": phone,
             "recommendation": strategy["type"], "pages": strategy["pages"],
-            "opportunity_score": score, "score_reasons": score_reasons,
+            "opportunity_score": score, "score_reasons": score_reasons, "intelligence": intelligence,
             "website_audit": website_audit, "draft_created": True, "proposal_created": True,
             "gmail_draft_created": gmail_draft_created, "gmail_draft_error": gmail_draft_error,
             "rating": place.get("rating"), "rating_count": place.get("ratingCount"),
@@ -1326,7 +1327,10 @@ def audit_website(payload: dict, user=Depends(current_user)):
     raw = str(payload.get("url", ""))[:2048].strip()
     result = safe_site_fetch(raw)
     result["checked_at"] = now()
+    state = "broken" if result.get("http_status") in {404, 410, 500, 502, 503, 504} else ("working" if isinstance(result.get("http_status"), int) and 200 <= result["http_status"] < 400 else "needs_review")
+    result["intelligence"] = assess_website(result, state)
     with db() as c:
+        debit_credits(c, user["id"], CREDIT_COSTS["website_audit"], "website_audit", secrets.token_urlsafe(12))
         audit(c, user["id"], "website.audit", {"url": result.get("url"), "status": result.get("http_status")})
     return result
 
