@@ -206,28 +206,86 @@ class BillingTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             payment_quote(1200, "mpesa", None)
 
-    def test_checkout_uses_usd_for_card_and_stores_quote(self):
+    def test_card_checkout_is_rejected_during_mpesa_only_launch(self):
         client, csrf = self._client()
-        user_id = client.get("/api/auth/me").json()["id"]
         future_date = datetime.now(timezone.utc).date().isoformat()
         env = {
             "MCAS_BILLING_ENABLED": "true", "FLW_SECRET_KEY": "test-key",
             "FLW_SECRET_HASH": "test-hash", "MCAS_PUBLIC_URL": "https://mcas.example.test",
             "MCAS_USD_KES_RATE": "130.00", "MCAS_USD_KES_RATE_DATE": future_date,
         }
-        with patch.dict(os.environ, env), patch.object(mcas, "initialize_usd_checkout",
-            return_value={"checkout_url": "https://checkout.flutterwave.com/test-session"}):
+        with patch.dict(os.environ, env):
             response = client.post("/api/billing/checkout",
                 json={"item_type":"subscription","item_code":"starter","payment_method":"card"},
                 headers={"X-CSRF-Token":csrf})
+        self.assertEqual(response.status_code, 422, response.text)
+
+    def test_billing_status_exposes_only_mpesa_as_available_method(self):
+        client, _ = self._client()
+        future_date = datetime.now(timezone.utc).date().isoformat()
+        env = {
+            "MCAS_BILLING_ENABLED": "true", "FLW_SECRET_KEY": "test-key",
+            "FLW_SECRET_HASH": "test-hash", "MCAS_PUBLIC_URL": "https://mcas.example.test",
+            "MCAS_USD_KES_RATE": "130.00", "MCAS_USD_KES_RATE_DATE": future_date,
+        }
+        with patch.dict(os.environ, env):
+            response = client.get("/api/billing/status")
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["amount_usd"], "12.00")
-        self.assertEqual(response.json()["provider_currency"], "USD")
+        methods = response.json()["payment_methods"]
+        self.assertTrue(methods["mpesa"]["available"])
+        self.assertFalse(methods["card"]["available"])
+
+
+    def test_credit_history_reports_ledger_deltas_and_usage_totals(self):
+        client, _ = self._client()
+        user_id = client.get("/api/auth/me").json()["id"]
+        client.get("/api/billing/status")
+        mcas.debit_credits(user_id, 4, "prospect_research", "lead-ref")
         with mcas.db() as connection:
-            order = connection.execute("SELECT * FROM billing_orders WHERE user_id=? ORDER BY created_at DESC LIMIT 1",(user_id,)).fetchone()
-        self.assertEqual(order["provider_currency"], "USD")
-        self.assertEqual(order["provider_amount"], "12.00")
-        self.assertEqual(order["amount_usd_cents"], 1200)
+            connection.execute(
+                "UPDATE billing_accounts SET purchased_credits=12 WHERE user_id=?",
+                (user_id,),
+            )
+            connection.execute(
+                """INSERT INTO billing_credit_ledger
+                   (id,user_id,delta_monthly,delta_purchased,reason,reference,created_at)
+                   VALUES(?,?,0,12,'credits:mini','order-ref',?)""",
+                (uuid.uuid4().hex,user_id,mcas.now()),
+            )
+        response = client.get("/api/billing/credit-history")
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
+        self.assertEqual(data["monthly_balance"], 16)
+        self.assertEqual(data["purchased_balance"], 12)
+        self.assertEqual(data["total_balance"], 28)
+        self.assertEqual(data["monthly_used_this_period"], 4)
+        self.assertEqual(data["purchased_used_this_period"], 0)
+        self.assertEqual(data["total_used_this_period"], 4)
+        self.assertEqual(data["total"], 3)
+        reasons = {item["reason"] for item in data["items"]}
+        self.assertIn("prospect_research", reasons)
+        self.assertIn("credits:mini", reasons)
+
+    def test_credit_history_is_tenant_scoped_and_paginated(self):
+        first_client, _ = self._client()
+        second_client, _ = self._client()
+        first_user = first_client.get("/api/auth/me").json()["id"]
+        second_user = second_client.get("/api/auth/me").json()["id"]
+        first_client.get("/api/billing/status")
+        second_client.get("/api/billing/status")
+        mcas.debit_credits(first_user, 1, "private_first_user_activity", "private-ref")
+        mcas.debit_credits(second_user, 2, "private_second_user_activity", "other-ref")
+        response = first_client.get("/api/billing/credit-history?limit=1&offset=0")
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
+        self.assertEqual(data["total"], 2)
+        self.assertEqual(len(data["items"]), 1)
+        self.assertTrue(data["has_more"])
+        self.assertNotIn("private_second_user_activity", {item["reason"] for item in data["items"]})
+        next_page = first_client.get("/api/billing/credit-history?limit=1&offset=1")
+        self.assertEqual(next_page.status_code, 200, next_page.text)
+        self.assertEqual(len(next_page.json()["items"]), 1)
+        self.assertFalse(next_page.json()["has_more"])
 
     def test_mpesa_checkout_rejects_stale_fx_rate(self):
         client, csrf = self._client()
