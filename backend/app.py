@@ -1695,10 +1695,32 @@ def confirm_lead_business(lead_id: str, user=Depends(current_user)):
         if not checked_epoch or time.time() - checked_epoch > 7 * 24 * 60 * 60:
             raise HTTPException(409, "The listing check is older than seven days. Recheck it before confirming.")
         stamp = now()
+        listing = verification.get("listing") or {}
+        confirmed_address = str(listing.get("address") or lead["business_address"] or "")[:300] or None
+        confirmed_phone = str(listing.get("phone") or lead["contact_phone"] or "")[:60] or None
+        confirmed_website = lead["website"]
+        confirmed_website_audit = None
+        candidate_website = listing.get("website")
+        independent_domains = {
+            str(item.get("domain") or "").lower()
+            for item in verification.get("independent_sources", [])
+            if isinstance(item, dict)
+        }
+        candidate_host = urllib.parse.urlparse(candidate_website).hostname if isinstance(candidate_website, str) else None
+        if candidate_website and candidate_host and candidate_host.lower() in independent_domains:
+            try:
+                confirmed_website_audit = safe_site_fetch(candidate_website)
+                if classify_website_status(confirmed_website_audit) == "verified":
+                    confirmed_website = confirmed_website_audit.get("url") or candidate_website
+            except HTTPException:
+                confirmed_website_audit = None
+        if confirmed_website_audit:
+            store_website_audit(c, lead_id, user["id"], confirmed_website_audit)
         c.execute(
             """UPDATE leads SET status='Verified',business_verification_status='human_confirmed',
-               business_verified_at=?,updated_at=? WHERE id=? AND user_id=?""",
-            (stamp, stamp, lead_id, user["id"]),
+               business_verified_at=?,business_address=?,contact_phone=?,website=?,updated_at=?
+               WHERE id=? AND user_id=?""",
+            (stamp, confirmed_address, confirmed_phone, confirmed_website, stamp, lead_id, user["id"]),
         )
         try:
             website_audit = json.loads(lead["website_audit_json"] or "{}")
