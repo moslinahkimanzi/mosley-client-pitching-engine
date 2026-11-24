@@ -11,6 +11,7 @@ import os
 import re
 import urllib.error
 import urllib.request
+import urllib.parse
 from urllib.parse import urlsplit
 from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
@@ -186,7 +187,7 @@ def verify_flutterwave_transaction(transaction_id: str, tx_ref: str | None = Non
     if str(transaction_id).isdigit():
         endpoint = "transactions/" + str(transaction_id) + "/verify"
     elif tx_ref and re.fullmatch(r"[A-Za-z0-9_-]{12,100}", tx_ref):
-        endpoint = "transactions/verify_by_reference?" + __import__("urllib.parse", fromlist=["urlencode"]).urlencode({"tx_ref": tx_ref})
+        endpoint = "transactions/verify_by_reference?" + urllib.parse.urlencode({"tx_ref": tx_ref})
     else:
         raise RuntimeError("Payment transaction identifier or reference is invalid.")
     request = urllib.request.Request(
