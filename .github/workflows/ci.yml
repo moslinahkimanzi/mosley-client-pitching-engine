@@ -1,7 +1,7 @@
 name: MCAS checks
 on:
   push:
-    branches: [main, "build/**", "feature/**"]
+    branches: [main, "build/**", "feature/**", "release/**"]
   pull_request:
     branches: [main, "build/**", "feature/**"]
 permissions:
