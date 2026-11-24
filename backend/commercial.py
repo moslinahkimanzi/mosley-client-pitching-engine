@@ -178,12 +178,19 @@ def initialize_flutterwave_checkout(*, tx_ref: str, amount: str, currency: str,
     return {"checkout_url": link}
 
 
-def verify_flutterwave_transaction(transaction_id: str) -> dict[str, Any]:
+def verify_flutterwave_transaction(transaction_id: str, tx_ref: str | None = None) -> dict[str, Any]:
+    """Verify by numeric v3 transaction ID, or by our unique reference when the event ID is opaque."""
     key = os.getenv("FLW_SECRET_KEY", "").strip()
-    if not key or not str(transaction_id).isdigit():
-        raise RuntimeError("Payment verification is not configured or transaction ID is invalid.")
+    if not key:
+        raise RuntimeError("Payment verification is not configured.")
+    if str(transaction_id).isdigit():
+        endpoint = "transactions/" + str(transaction_id) + "/verify"
+    elif tx_ref and re.fullmatch(r"[A-Za-z0-9_-]{12,100}", tx_ref):
+        endpoint = "transactions/verify_by_reference?" + __import__("urllib.parse", fromlist=["urlencode"]).urlencode({"tx_ref": tx_ref})
+    else:
+        raise RuntimeError("Payment transaction identifier or reference is invalid.")
     request = urllib.request.Request(
-        "https://api.flutterwave.com/v3/transactions/" + str(transaction_id) + "/verify",
+        "https://api.flutterwave.com/v3/" + endpoint,
         headers={"Authorization": "Bearer " + key, "Accept": "application/json",
                  "User-Agent": "MCAS/1.4"},
         method="GET",
