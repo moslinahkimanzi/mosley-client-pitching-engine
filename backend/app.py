@@ -2083,7 +2083,130 @@ def review_customer_feedback(feedback_id: str, payload: FeedbackReviewIn, user=D
         audit(c, user["id"], "feedback.reviewed", {"feedback_id": feedback_id, "status": payload.status})
     return {"ok": True, "status": payload.status}
 
+def debit_credits(c, uid, amount, reason, reference):
+    c.execute("BEGIN IMMEDIATE")
+    row = c.execute("SELECT credit_balance FROM billing_accounts WHERE user_id=?", (uid,)).fetchone()
+    if not row:
+        raise HTTPException(402, "Billing account is not initialized.")
+    balance = int(row["credit_balance"])
+    if balance < amount:
+        raise HTTPException(402, "Insufficient credits. Required: " + str(amount) + "; available: " + str(balance) + ".")
+    balance -= amount
+    c.execute("UPDATE billing_accounts SET credit_balance=?,updated_at=? WHERE user_id=?", (balance, now(), uid))
+    c.execute("INSERT INTO credit_ledger(id,user_id,amount,balance_after,reason,reference,created_at) VALUES(?,?,?,?,?,?,?)",
+              (secrets.token_urlsafe(16), uid, -amount, balance, reason, reference, now()))
+
+
+@app.get("/api/billing/catalog")
+def billing_catalog(user=Depends(current_user)):
+    return public_catalog()
+
+
 @app.get("/api/billing/status")
 def billing_status(user=Depends(current_user)):
-    return {"plan": "beta", "billing_enabled": False,
-            "message": "Subscription checkout is not enabled in this build. Do not accept customer payments until a payment provider and webhook verification are configured."}
+    with db() as c:
+        row = c.execute("SELECT * FROM billing_accounts WHERE user_id=?", (user["id"],)).fetchone()
+        ledger = c.execute("SELECT amount,balance_after,reason,created_at FROM credit_ledger WHERE user_id=? ORDER BY created_at DESC LIMIT 15", (user["id"],)).fetchall()
+    if not row:
+        raise HTTPException(500, "Billing account is not initialized.")
+    return {"plan": row["plan"], "subscription_status": row["subscription_status"],
+            "current_period_end": row["current_period_end"], "credits": row["credit_balance"],
+            "billing_enabled": flutterwave_ready(), "provider": "Flutterwave" if flutterwave_ready() else None,
+            "message": "M-Pesa and card checkout available." if flutterwave_ready() else "Checkout not configured; trial credits remain available.",
+            "recent_activity": [dict(x) for x in ledger]}
+
+
+class CheckoutIn(BaseModel):
+    item_type: Literal["subscription", "credit_pack"]
+    item_code: str = Field(min_length=2, max_length=30)
+
+
+@app.post("/api/billing/checkout")
+def billing_checkout(payload: CheckoutIn, user=Depends(current_user)):
+    if not flutterwave_ready():
+        raise HTTPException(503, "Set FLW_SECRET_KEY, FLW_SECRET_HASH and MCAS_PUBLIC_URL (HTTPS) on the server.")
+    catalog = PLANS if payload.item_type == "subscription" else CREDIT_PACKS
+    item = catalog.get(payload.item_code)
+    if not item:
+        raise HTTPException(422, "Unknown subscription or credit pack.")
+    tx_ref = "mcas_" + secrets.token_urlsafe(18)
+    payment_id = secrets.token_urlsafe(18)
+    with db() as c:
+        c.execute("INSERT INTO billing_payments(id,user_id,tx_ref,item_type,item_code,amount_kes,currency,status,created_at) VALUES(?,?,?,?,?,?,'KES','pending',?)",
+                  (payment_id, user["id"], tx_ref, payload.item_type, payload.item_code, item["amount_kes"], now()))
+        audit(c, user["id"], "billing.checkout_started", {"payment_id": payment_id, "item_type": payload.item_type, "item_code": payload.item_code})
+    try:
+        result = initialize_flutterwave_checkout(tx_ref=tx_ref, amount_kes=item["amount_kes"],
+            email=user["email"], customer_id=user["id"], item_type=payload.item_type, item_code=payload.item_code)
+    except Exception:
+        with db() as c:
+            c.execute("UPDATE billing_payments SET status='initialization_failed' WHERE id=?", (payment_id,))
+        raise HTTPException(502, "Checkout initialization failed. No entitlement was granted.")
+    return {"checkout_url": result["checkout_url"], "tx_ref": tx_ref, "amount_kes": item["amount_kes"], "currency": "KES"}
+
+
+def apply_verified_payment(payment, verified):
+    tx_ref = str(verified.get("tx_ref") or "")
+    transaction_id = str(verified.get("id") or "")
+    if str(verified.get("status") or "").lower() != "successful" or str(verified.get("currency") or "").upper() != "KES":
+        raise ValueError("Payment is not successful in KES.")
+    if float(verified.get("amount") or 0) < float(payment["amount_kes"]) or tx_ref != payment["tx_ref"] or not transaction_id:
+        raise ValueError("Verified payment amount or reference mismatch.")
+    meta = verified.get("meta") or {}
+    if meta.get("customer_id") != payment["user_id"] or meta.get("item_type") != payment["item_type"] or meta.get("item_code") != payment["item_code"]:
+        raise ValueError("Payment metadata mismatch.")
+    with db() as c:
+        c.execute("BEGIN IMMEDIATE")
+        row = c.execute("SELECT status FROM billing_payments WHERE id=?", (payment["id"],)).fetchone()
+        if not row:
+            raise ValueError("Pending payment does not exist.")
+        if row["status"] == "paid":
+            return
+        if c.execute("SELECT 1 FROM billing_payments WHERE provider_transaction_id=? AND status='paid'", (transaction_id,)).fetchone():
+            raise ValueError("Transaction already applied.")
+        account = c.execute("SELECT * FROM billing_accounts WHERE user_id=?", (payment["user_id"],)).fetchone()
+        if payment["item_type"] == "credit_pack":
+            credits = int(CREDIT_PACKS[payment["item_code"]]["credits"])
+        else:
+            credits = int(PLANS[payment["item_code"]]["credits"])
+            from datetime import timedelta
+            end = account["current_period_end"]
+            base = datetime.fromisoformat(end) if end and datetime.fromisoformat(end) > datetime.now(timezone.utc) else datetime.now(timezone.utc)
+            period_end = (base + timedelta(days=30)).isoformat()
+            c.execute("UPDATE billing_accounts SET plan=?,subscription_status='active',current_period_end=? WHERE user_id=?",
+                      (payment["item_code"], period_end, payment["user_id"]))
+        balance = int(account["credit_balance"]) + credits
+        c.execute("UPDATE billing_accounts SET credit_balance=?,updated_at=? WHERE user_id=?", (balance, now(), payment["user_id"]))
+        c.execute("INSERT INTO credit_ledger(id,user_id,amount,balance_after,reason,reference,created_at) VALUES(?,?,?,?,?,?,?)",
+                  (secrets.token_urlsafe(16), payment["user_id"], credits, balance,
+                   "credit_pack_purchase" if payment["item_type"] == "credit_pack" else "subscription_credit_grant",
+                   payment["tx_ref"], now()))
+        c.execute("UPDATE billing_payments SET status='paid',provider_transaction_id=?,paid_at=? WHERE id=?",
+                  (transaction_id, now(), payment["id"]))
+        audit(c, payment["user_id"], "billing.payment_verified", {"payment_id": payment["id"], "item_type": payment["item_type"], "item_code": payment["item_code"]})
+
+
+@app.post("/api/billing/flutterwave/webhook")
+async def flutterwave_webhook(request: Request):
+    secret = os.getenv("FLW_SECRET_HASH", "")
+    supplied = request.headers.get("verif-hash", "")
+    if not secret or not supplied or not hmac.compare_digest(secret, supplied):
+        raise HTTPException(401, "Invalid payment webhook signature.")
+    try:
+        event = await request.json()
+        data = event.get("data") or {}
+        tx_id, tx_ref = str(data.get("id") or ""), str(data.get("tx_ref") or "")
+        if not tx_id or not tx_ref:
+            raise ValueError("Missing transaction identifiers.")
+        with db() as c:
+            payment = c.execute("SELECT * FROM billing_payments WHERE tx_ref=?", (tx_ref,)).fetchone()
+        if not payment:
+            raise ValueError("Pending payment not found.")
+        verified = verify_flutterwave_transaction(tx_id)
+        apply_verified_payment(dict(payment), verified)
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception:
+        SECURITY_LOGGER.exception("MCAS payment webhook verification failed")
+        raise HTTPException(400, "Payment notification could not be verified; no entitlement was granted.")
