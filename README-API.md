@@ -9,7 +9,7 @@ Use Python 3.12 or later and Node.js 22 for the full test suite.
 ```bash
 git clone https://github.com/moslinahkimanzi/mosley-client-pitching-engine.git
 cd mosley-client-pitching-engine
-git checkout feature/mcas-research-completion
+git checkout release/mcas-prelaunch-2026-11
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -121,7 +121,7 @@ Follow the step-by-step manual checklist in [TESTING.md](TESTING.md). GitHub Act
 
 ## Production limitations — do not skip this section
 
-This branch is a testable release candidate, **not a security-certified commercial SaaS**.
+This branch is a pre-launch release candidate, **not a security-certified commercial SaaS**. The repository branch is not a production deployment.
 
 Before accepting public users or customer data:
 1. Move from SQLite to managed PostgreSQL and test database migrations/backups. SQLite is intended for one instance and a persistent disk.
@@ -129,7 +129,7 @@ Before accepting public users or customer data:
 3. Add email verification, password reset, MFA, session/device management and account deletion.
 4. Add a production secret manager, HTTPS-only deployment, exact `MCAS_ALLOWED_HOSTS` and `MCAS_ALLOWED_ORIGINS`, persistent encrypted backups, monitoring and alerting.
 5. Complete an independent security review / penetration test and resolve all findings.
-6. Add real payment-provider checkout, signed webhook verification, subscription lifecycle handling and tax/receipt requirements before enabling paid plans. Billing is intentionally disabled.
+6. Complete payment-provider sandbox tests, merchant approval, HTTPS webhook verification, settlement reconciliation, refund/reversal handling and tax/receipt requirements before enabling paid plans. Keep `MCAS_BILLING_ENABLED=false`; billing is intentionally disabled until these external gates pass.
 7. Add provider-specific live integration tests with credentials in a non-production staging environment.
 
 Other boundaries: MCAS is not a whole-internet crawler. Serper results can be incomplete, stale or unavailable. Missing website URLs do not prove a business has no website. It does not harvest private contacts. It never sends outreach or follow-ups. It does not read incoming Gmail messages; customer replies must be supplied manually. Automated proposals and emails are rules-based templates unless you explicitly use the separately configured AI assistant, which may incur provider charges. Website checks are lightweight technical observations, not full SEO, accessibility or security audits.
@@ -144,3 +144,11 @@ The Research Command Centre sends the entered location, business category and op
 Each research result includes an explainable opportunity-priority score (0–100) and the signals that contributed to it. The score ranks research work; it does not represent buying intent, prove a business lacks a website, or replace human verification. The score is stored in the prospect CRM score field.
 
 For business websites returned by Serper Places, the result displays limited HTTP/title/mobile viewport/meta description/H1/form observations available to MCAS. This is not a full performance, SEO, accessibility, security, or conversion audit. Search coverage depends on Serper results and the configured account quota. MCAS does not claim to crawl the entire internet.
+
+## Release candidate safety notes
+
+- Use `release/mcas-prelaunch-2026-11` as the candidate branch for review; do not deploy it directly to production until the full CI pipeline and the production checklist above pass.
+- Billing tests use disposable temporary databases. Do not point automated tests at a production database.
+- An administrator receives unlimited usage only when the signed-in server-side user record matches `MCAS_ADMIN_EMAILS`; production additionally requires a linked verified Google identity. Admin usage is written to the audit log. Never trust a role, email or admin flag supplied by the browser.
+- Gmail is restricted in application behavior to creating drafts. The Google `gmail.compose` OAuth scope is broader than draft-only at provider permission level, so review that scope warning during Google OAuth verification. MCAS does not request inbox-reading scopes and does not implement a send operation.
+- Feedback-driven product improvement is a human-reviewed proposal workflow. It never edits, merges or deploys application code autonomously.
