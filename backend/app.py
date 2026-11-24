@@ -2050,17 +2050,20 @@ def verify_lead_website(lead_id: str, user=Depends(current_user)):
 @app.post("/api/audit-website")
 def audit_website(payload: WebsiteAuditIn, user=Depends(current_user)):
     # Validate prospect ownership and URL association before spending credits or performing requests.
+    business_name = None
     if payload.lead_id:
         with db() as c:
             lead = owned_lead(c, payload.lead_id, user["id"])
             if (lead["website"] or "").rstrip("/") != payload.url.rstrip("/"):
                 raise HTTPException(422, "Audit URL must match the selected prospect's saved website URL.")
+            business_name = lead["name"]
     credit_cost = credits_for_audit(payload.max_pages)
     require_credits(user["id"], credit_cost)
 
     result = advanced_site_audit(payload.url, safe_site_fetch, payload.max_pages)
     result["checked_at"] = now()
     result["lead_id"] = payload.lead_id
+    result["business_name"] = business_name
     report_id = secrets.token_urlsafe(18)
     result["report_id"] = report_id
     serialized_report = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
