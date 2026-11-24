@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field
 
 from backend.audit_engine import advanced_site_audit
 from backend.google_auth import verify_google_id_token
-from backend.billing import PLANS as LEGACY_PLANS, CREDIT_PACKS as LEGACY_CREDIT_PACKS, product_for_order, credits_for_audit, credits_for_competitors
+from backend.billing import PLANS as LEGACY_PLANS, CREDIT_PACKS as LEGACY_CREDIT_PACKS, credits_for_audit, credits_for_competitors
 from backend.commercial import (
     PLANS as USD_PLANS, CREDIT_PACKS as USD_CREDIT_PACKS,
     public_catalog as usd_billing_catalog, payment_quote as usd_payment_quote,
@@ -286,37 +286,6 @@ def debit_credits(user_id: str, amount: int, reason: str, reference: Optional[st
         c.execute("UPDATE billing_accounts SET monthly_credits=?,purchased_credits=?,updated_at=? WHERE user_id=?", (monthly-used_monthly, purchased-used_purchased, now(), user_id))
         c.execute("INSERT INTO billing_credit_ledger(id,user_id,delta_monthly,delta_purchased,reason,reference,created_at) VALUES(?,?,?,?,?,?,?)", (secrets.token_urlsafe(16), user_id, -used_monthly, -used_purchased, reason[:100], reference, now()))
         audit(c, user_id, "billing.credits_debited", {"amount": amount, "reason": reason[:100]})
-
-def billing_provider_ready() -> bool:
-    enabled = os.getenv("MCAS_BILLING_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
-    return bool(enabled and os.getenv("FLW_SECRET_KEY", "").strip()
-                and os.getenv("FLW_SECRET_HASH", "").strip()
-                and os.getenv("MCAS_PUBLIC_URL", "").strip())
-
-
-def flutterwave_request(method: str, path: str, payload: Optional[dict] = None):
-    key = os.getenv("FLW_SECRET_KEY", "").strip()
-    if not key: raise HTTPException(503, "Payment processing is not configured.")
-    body = json.dumps(payload).encode('utf-8') if payload is not None else None
-    req = urllib.request.Request("https://api.flutterwave.com/v3/" + path.lstrip('/'), data=body, headers={"Authorization":"Bearer "+key,"Content-Type":"application/json","Accept":"application/json"}, method=method.upper())
-    try:
-        with urllib.request.urlopen(req, timeout=20) as response: result = json.loads(response.read(1000000))
-    except urllib.error.HTTPError as exc:
-        raise HTTPException(502, "Payment provider rejected the request (HTTP " + str(exc.code) + ").")
-    except Exception:
-        raise HTTPException(502, "Payment provider could not be reached. No payment has been confirmed.")
-    if not isinstance(result, dict): raise HTTPException(502, "Payment provider returned an invalid response.")
-    return result
-
-def verify_flutterwave_transaction(transaction_id: str, expected_ref: str, expected_amount: int):
-    result = flutterwave_request("GET", "transactions/" + urllib.parse.quote(str(transaction_id), safe='') + "/verify")
-    data = result.get('data') if isinstance(result.get('data'), dict) else {}
-    if result.get('status') != 'success' or str(data.get('status','')).lower() != 'successful' or str(data.get('tx_ref','')) != expected_ref or str(data.get('currency','')).upper() != 'KES':
-        raise HTTPException(400, "Payment could not be verified against this MCAS order.")
-    try: amount = float(data.get('amount'))
-    except (TypeError, ValueError): raise HTTPException(400, "Verified payment amount is invalid.")
-    if amount != float(expected_amount): raise HTTPException(400, "Verified payment amount does not match the MCAS order.")
-    return data
 
 def grant_verified_order(order_id: str, transaction_id: str):
     with db() as c:
