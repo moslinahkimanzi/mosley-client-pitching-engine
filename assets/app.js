@@ -68,7 +68,25 @@ function renderBilling(){
  $('billingPeriod').textContent=data.plan==='free'?(data.period_end?'Free allowance refreshes '+new Date(data.period_end).toLocaleDateString():'Free plan'):(data.period_end?'Paid through '+new Date(data.period_end).toLocaleDateString():'Paid plan period not active');
  const method=$('billingMethod')?.value||'mpesa';
  const methodAvailable=billingMethodAvailable(method);
- const price=plan=>'
+ const price=plan=>{
+  const cents=Number(plan.amount_usd_cents||0);
+  const usd='USD '+(cents/100).toFixed(2);
+  const rate=Number(data.mpesa_quote?.usd_kes_rate);
+  return method==='mpesa'&&Number.isFinite(rate)&&rate>0?usd+' · approx. KES '+Math.round((cents/100)*rate).toLocaleString():usd;
+ };
+ $('billingPlanCards').innerHTML=Object.entries(data.plans||{}).map(([code,plan])=>'<article class="card"><h3>'+esc(plan.name)+'</h3><div class="metric">'+price(plan)+'/30 days</div><p>'+Number(plan.credits||0).toLocaleString()+' included credits</p><button class="primary" data-billing-type="subscription" data-billing-code="'+esc(code)+'" '+(!methodAvailable?'disabled':'')+'>Choose '+esc(plan.name)+'</button></article>').join('');
+ $('billingCreditCards').innerHTML=Object.entries(data.credit_packs||{}).map(([code,pack])=>'<article class="card"><h3>'+esc(pack.name)+'</h3><div class="metric">'+price(pack)+'</div><p>'+Number(pack.credits||0).toLocaleString()+' prepaid credits</p><button data-billing-type="credits" data-billing-code="'+esc(code)+'" '+(!methodAvailable?'disabled':'')+'>Buy credits</button></article>').join('');
+ $('billingOrders').innerHTML=(data.recent_orders||[]).map(order=>{
+  const amount=order.amount_usd_cents!==null&&order.amount_usd_cents!==undefined?'USD '+(Number(order.amount_usd_cents)/100).toFixed(2)+' base · '+esc(order.provider_currency||order.currency||'USD')+' '+esc(order.provider_amount||''):'KES '+Number(order.amount_kes||0).toLocaleString();
+  return '<div class="item"><div class="itemtop"><strong>'+esc(order.item_type)+' · '+esc(order.item_code)+'</strong><span class="badge '+(order.status==='paid'?'green':'amber')+'">'+esc(order.status)+'</span></div><p>'+amount+' · '+esc(order.created_at)+'</p></div>';
+ }).join('')||'<div class="empty">No payment orders yet.</div>';
+ const quote=data.mpesa_quote;
+ const quoteText=quote?'M-Pesa reference rate: 1 USD = '+esc(quote.usd_kes_rate)+' KES (dated '+esc(quote.rate_date)+').':'M-Pesa is unavailable until a current, dated USD/KES rate is configured.';
+ const noteText=quoteText+' Card payments are charged in USD; M-Pesa payments are charged in KES. Final provider amount is confirmed at checkout.';
+ if($('billingPriceNote'))$('billingPriceNote').textContent=noteText;
+ if($('billingStatus'))$('billingStatus').textContent=(data.message||'')+' '+quoteText;
+ document.querySelectorAll('[data-billing-type]').forEach(button=>{button.disabled=!methodAvailable;});
+}
 async function startBillingCheckout(type,code){
  const method=$('billingMethod').value,phone=$('billingPhone').value.trim();
  if(method==='mpesa'&&!phone){note('billingNotice','Enter the M-Pesa phone number, including country code.',true);return;}
