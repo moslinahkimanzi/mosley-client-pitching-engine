@@ -2,6 +2,9 @@ import os
 import unittest
 import json
 import uuid
+import base64
+import hashlib
+import hmac
 from unittest.mock import patch
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -303,6 +306,47 @@ class BillingTest(unittest.TestCase):
             order=connection.execute("SELECT status FROM billing_orders WHERE id=?",(order_id,)).fetchone()
         self.assertEqual(account["purchased_credits"],0)
         self.assertEqual(order["status"],"pending")
+
+
+    def test_webhook_accepts_flutterwave_hmac_signature(self):
+        client, _ = self._client()
+        raw = json.dumps({"id":"wbk-test","type":"charge.completed",
+                          "data":{"id":12345,"tx_ref":"not-an-mcas-order","status":"successful"}},
+                         separators=(",",":")).encode("utf-8")
+        secret = "hmac-test-secret"
+        signature = base64.b64encode(hmac.new(secret.encode(),raw,hashlib.sha256).digest()).decode()
+        with patch.dict(os.environ,{"FLW_SECRET_HASH":secret}):
+            response=client.post("/api/billing/flutterwave/webhook",content=raw,
+                                 headers={"Content-Type":"application/json","flutterwave-signature":signature})
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertEqual(response.json()["status"],"ignored")
+
+    def test_usd_webhook_accepts_opaque_event_id_and_null_verified_metadata(self):
+        client,_=self._client()
+        user_id=client.get("/api/auth/me").json()["id"]
+        order_id=uuid.uuid4().hex
+        tx_ref="MCAS-OPAQUE-"+uuid.uuid4().hex
+        with mcas.db() as connection:
+            connection.execute(
+                """INSERT INTO billing_orders
+                   (id,user_id,tx_ref,item_type,item_code,amount_kes,currency,status,created_at,updated_at,
+                    amount_usd_cents,provider_amount,provider_currency,payment_method)
+                   VALUES(?,?,?,'credits','mini',0,'USD','pending',?, ?,500,'5.00','USD','card')""",
+                (order_id,user_id,tx_ref,mcas.now(),mcas.now()),
+            )
+        verified={"id":765432,"status":"successful","tx_ref":tx_ref,"currency":"USD","amount":"5.00","meta":None}
+        event={"id":"wbk-"+uuid.uuid4().hex,"type":"charge.completed",
+               "data":{"id":"chg_opaque_identifier","reference":tx_ref,"status":"succeeded"}}
+        with patch.dict(os.environ,{"FLW_SECRET_HASH":"test-secret"}), patch.object(
+            mcas,"verify_usd_transaction",return_value=verified
+        ) as verifier:
+            response=client.post("/api/billing/flutterwave/webhook",json=event,headers={"verif-hash":"test-secret"})
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertEqual(response.json()["status"],"fulfilled")
+        verifier.assert_called_once_with("chg_opaque_identifier",tx_ref)
+        with mcas.db() as connection:
+            account=connection.execute("SELECT purchased_credits FROM billing_accounts WHERE user_id=?",(user_id,)).fetchone()
+        self.assertEqual(account["purchased_credits"],30)
 
 if __name__ == "__main__":
     unittest.main()
