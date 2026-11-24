@@ -196,6 +196,14 @@ def init_db():
         add_column(c, "drafts", "to_email", "TEXT")
         add_column(c, "drafts", "gmail_draft_id", "TEXT")
         add_column(c, "customer_feedback", "ai_analysis_consent", "INTEGER NOT NULL DEFAULT 0")
+        # Backfill billing for accounts created before credit billing was introduced.
+        c.execute("""INSERT OR IGNORE INTO billing_accounts(user_id,credit_balance,plan,subscription_status,updated_at)
+                     SELECT id,10,'trial','trial',? FROM users""", (now(),))
+        c.execute("""INSERT INTO credit_ledger(id,user_id,amount,balance_after,reason,reference,created_at)
+                     SELECT 'trial-migration-' || users.id,users.id,10,10,'trial_grant','migration',?
+                     FROM users WHERE NOT EXISTS(
+                       SELECT 1 FROM credit_ledger WHERE credit_ledger.user_id=users.id AND reason='trial_grant'
+                     )""", (now(),))
 
 init_db()
 
