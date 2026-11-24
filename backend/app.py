@@ -3215,6 +3215,8 @@ def billing_checkout(payload: BillingCheckoutIn, user=Depends(current_user)):
             redirect_url=public_url + '/?payment_return=' + urllib.parse.quote(order_id)
         )
         checkout_url = result.get('checkout_url')
+        if not isinstance(checkout_url, str) or not checkout_url.startswith('https://checkout.flutterwave.com/'):
+            raise ValueError('Payment provider returned an invalid hosted checkout URL.')
     except Exception:
         with db() as c:
             c.execute("UPDATE billing_orders SET status='failed',updated_at=? WHERE id=? AND status='pending'", (now(), order_id))
