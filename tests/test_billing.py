@@ -240,5 +240,69 @@ class BillingTest(unittest.TestCase):
                 headers={"X-CSRF-Token":csrf})
         self.assertEqual(response.status_code, 503, response.text)
 
+
+    def test_usd_card_webhook_grants_subscription_only_after_exact_verification(self):
+        client, _ = self._client()
+        user_id = client.get("/api/auth/me").json()["id"]
+        order_id = uuid.uuid4().hex
+        tx_ref = "MCAS-USD-" + uuid.uuid4().hex
+        with mcas.db() as connection:
+            connection.execute(
+                """INSERT INTO billing_orders
+                   (id,user_id,tx_ref,item_type,item_code,amount_kes,currency,status,created_at,updated_at,
+                    amount_usd_cents,provider_amount,provider_currency,payment_method)
+                   VALUES(?,?,?,'subscription','starter',0,'USD','pending',?, ?,1200,'12.00','USD','card')""",
+                (order_id,user_id,tx_ref,mcas.now(),mcas.now()),
+            )
+        verified = {
+            "id": 246810, "status": "successful", "tx_ref": tx_ref,
+            "currency": "USD", "amount": "12.00",
+            "meta": {"customer_id":user_id,"item_type":"subscription","item_code":"starter",
+                     "payment_method":"card","mcas_order_id":order_id},
+        }
+        event = {"id":"usd-event-"+uuid.uuid4().hex,"type":"charge.completed",
+                 "data":{"id":246810,"tx_ref":tx_ref,"status":"successful"}}
+        with patch.dict(os.environ,{"FLW_SECRET_HASH":"test-secret"}), patch.object(
+            mcas,"verify_usd_transaction",return_value=verified
+        ):
+            response=client.post("/api/billing/flutterwave/webhook",json=event,headers={"verif-hash":"test-secret"})
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertEqual(response.json()["status"],"fulfilled")
+        with mcas.db() as connection:
+            account=connection.execute("SELECT plan_code,monthly_credits FROM billing_accounts WHERE user_id=?",(user_id,)).fetchone()
+            order=connection.execute("SELECT status,provider_transaction_id FROM billing_orders WHERE id=?",(order_id,)).fetchone()
+        self.assertEqual(account["plan_code"],"starter")
+        self.assertEqual(account["monthly_credits"],100)
+        self.assertEqual(order["status"],"paid")
+        self.assertEqual(order["provider_transaction_id"],"246810")
+
+    def test_usd_webhook_rejects_wrong_currency_without_credit_grant(self):
+        client, _ = self._client()
+        user_id=client.get("/api/auth/me").json()["id"]
+        order_id=uuid.uuid4().hex
+        tx_ref="MCAS-USD-WRONG-"+uuid.uuid4().hex
+        with mcas.db() as connection:
+            connection.execute(
+                """INSERT INTO billing_orders
+                   (id,user_id,tx_ref,item_type,item_code,amount_kes,currency,status,created_at,updated_at,
+                    amount_usd_cents,provider_amount,provider_currency,payment_method)
+                   VALUES(?,?,?,'credits','mini',0,'USD','pending',?, ?,500,'5.00','USD','card')""",
+                (order_id,user_id,tx_ref,mcas.now(),mcas.now()),
+            )
+        verified={"id":135790,"status":"successful","tx_ref":tx_ref,"currency":"KES","amount":"5.00",
+                  "meta":{"customer_id":user_id,"item_type":"credits","item_code":"mini",
+                          "payment_method":"card","mcas_order_id":order_id}}
+        event={"id":"wrong-currency-"+uuid.uuid4().hex,"data":{"id":135790,"tx_ref":tx_ref,"status":"successful"}}
+        with patch.dict(os.environ,{"FLW_SECRET_HASH":"test-secret"}), patch.object(
+            mcas,"verify_usd_transaction",return_value=verified
+        ):
+            response=client.post("/api/billing/flutterwave/webhook",json=event,headers={"verif-hash":"test-secret"})
+        self.assertEqual(response.status_code,400)
+        with mcas.db() as connection:
+            account=connection.execute("SELECT purchased_credits FROM billing_accounts WHERE user_id=?",(user_id,)).fetchone()
+            order=connection.execute("SELECT status FROM billing_orders WHERE id=?",(order_id,)).fetchone()
+        self.assertEqual(account["purchased_credits"],0)
+        self.assertEqual(order["status"],"pending")
+
 if __name__ == "__main__":
     unittest.main()
