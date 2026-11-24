@@ -364,6 +364,12 @@ $('advancedAuditResult').addEventListener('click',async e=>{
  if(attach){const id=attach.dataset.attachAudit,leadId=attach.dataset.auditLead||null;state.pendingAuditReport={id,leadId};if(leadId){const lead=selectedLead(leadId);if(lead){$('emailLead').value=leadId;if(lead.contact_email)$('emailTo').value=lead.contact_email;}}$('emailReportAttachment').innerHTML='Selected audit report: <b>'+esc(id)+'</b> <button type="button" data-remove-audit-report>Remove</button>. Save the email draft, then create it in Gmail to include the PDF.';$('studio').scrollIntoView({behavior:'smooth',block:'start'});note('emailNotice','Audit PDF selected. Save your email as a pending draft to attach it.');return;}
  if(remove){state.pendingAuditReport=null;$('emailReportAttachment').textContent='No audit PDF selected.';return;}
 });
+$('emailReportAttachment').addEventListener('click',e=>{
+ const remove=e.target.closest('[data-remove-audit-report]');
+ if(!remove)return;
+ state.pendingAuditReport=null;
+ $('emailReportAttachment').textContent='No audit PDF selected.';
+});
 $('runCompetitorIntel').addEventListener('click',async()=>{
  const btn=$('runCompetitorIntel'),leadId=$('competitorLead').value;
  if(!leadId)return note('competitorNotice','Select a saved prospect first.',true);
