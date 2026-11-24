@@ -278,8 +278,19 @@ def ensure_billing_account(c, user_id: str):
     return account
 
 
+def user_has_unlimited_access(c, user_id: str) -> bool:
+    """Resolve admin status from the server-side user record, never request data."""
+    row = c.execute(
+        "SELECT id,email,google_subject FROM users WHERE id=?",
+        (user_id,),
+    ).fetchone()
+    return bool(row and user_is_admin(dict(row)))
+
+
 def require_credits(user_id: str, amount: int):
     with db() as c:
+        if user_has_unlimited_access(c, user_id):
+            return
         account = ensure_billing_account(c, user_id)
         if int(account["monthly_credits"]) + int(account["purchased_credits"]) < amount:
             raise HTTPException(402, "Not enough MCAS credits. Choose a monthly plan or buy a credit pack.")
@@ -289,6 +300,11 @@ def debit_credits(user_id: str, amount: int, reason: str, reference: Optional[st
     if amount <= 0: return
     with db() as c:
         c.execute("BEGIN IMMEDIATE")
+        if user_has_unlimited_access(c, user_id):
+            audit(c, user_id, "billing.admin_unlimited_usage", {
+                "amount": amount, "reason": reason[:100], "reference": reference,
+            })
+            return
         account = ensure_billing_account(c, user_id)
         monthly, purchased = int(account['monthly_credits']), int(account['purchased_credits'])
         if monthly + purchased < amount:
@@ -3272,6 +3288,7 @@ def billing_provider_ready() -> bool:
 @app.get('/api/billing/status')
 def billing_status(user=Depends(current_user)):
     with db() as c:
+        is_unlimited_admin = user_has_unlimited_access(c, user['id'])
         account = ensure_billing_account(c, user['id'])
         orders = c.execute(
             'SELECT id,item_type,item_code,amount_kes,currency,status,created_at,amount_usd_cents,provider_amount,provider_currency,payment_method,exchange_rate FROM billing_orders WHERE user_id=? ORDER BY created_at DESC LIMIT 10',
@@ -3290,6 +3307,7 @@ def billing_status(user=Depends(current_user)):
         'monthly_credits': int(account['monthly_credits']),
         'purchased_credits': int(account['purchased_credits']),
         'total_credits': int(account['monthly_credits']) + int(account['purchased_credits']),
+        'is_unlimited_admin': is_unlimited_admin,
         'period_start': account['period_start'],
         'period_end': account['period_end'],
         'billing_enabled': configured,
