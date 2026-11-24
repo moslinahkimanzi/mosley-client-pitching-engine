@@ -1430,52 +1430,11 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                  json.dumps({k: v for k, v in website_audit.items() if k != "links"})[:30000],
                  address or None, "unverified", "{}", None),
             )
-            title = "Website opportunity plan — " + name
-            proposal = (
-                "WEBSITE OPPORTUNITY PLAN\n\nBusiness: " + name + "\nLocation: " + location +
-                "\nDiscovery source: Serper Places / Google Maps result (" + source_url + ")\n\n"
-                "1. DISCOVERY OBSERVATIONS (VERIFY WITH BUSINESS)\n" + evidence + "\n\n"
-                "2. RECOMMENDED DIRECTION\n" + strategy["type"] + "\n\n"
-                "3. SUGGESTED PAGES\n- " + "\n- ".join(strategy["pages"]) + "\n\n"
-                "4. SUGGESTED FEATURES\n- " + "\n- ".join(strategy["features"]) + "\n\n"
-                "5. IMPLEMENTATION ROADMAP\n- " + "\n- ".join(strategy["roadmap"]) + "\n\n"
-                "6. SCOPE TO CONFIRM WITH THE CLIENT\nContent, brand assets, domain, hosting, budget, delivery timeline, "
-                "maintenance, integrations and who will update the site.\n\n"
-                "7. COMMERCIALS\nPrice and dates to be agreed after discovery. Do not invent a quote or promise results.\n\n"
-                "IMPORTANT: Search listings can be incomplete or out of date. A missing website URL is not proof that "
-                "the business has no website. Verify the business identity and all observations before sharing this proposal."
-            )
-            proposal_id = secrets.token_urlsafe(15)
-            c.execute("INSERT INTO proposals VALUES(?,?,?,?,?,?,?,?)",
-                      (proposal_id, user["id"], lead_id, title, proposal, "draft", stamp, stamp))
-            subject, body = make_outreach_copy(
-                name, location, website_state, website_audit, strategy, email
-            )
-            draft_id = secrets.token_urlsafe(15)
-            c.execute(
-                """INSERT INTO drafts(id,user_id,lead_id,kind,subject,body,state,created_at,to_email)
-                   VALUES(?,?,?,?,?,?,?,?,?)""",
-                (draft_id, user["id"], lead_id, "Cold email", subject, body, "pending_approval", stamp, email),
-            )
-            audit(c, user["id"], "research.prospect_prepared", {
+            audit(c, user["id"], "research.prospect_discovered", {
                 "lead_id": lead_id, "website_state": website_state,
-                "draft_id": draft_id, "proposal_id": proposal_id, "provider": "Serper",
+                "business_verification_status": "unverified", "provider": "Serper",
             })
             saved_count += 1
-
-        gmail_draft_created = False
-        gmail_draft_error = None
-        if email:
-            with db() as c:
-                gmail_connected = bool(c.execute(
-                    "SELECT 1 FROM integrations WHERE user_id=? AND provider='gmail'", (user["id"],)
-                ).fetchone())
-            if gmail_connected:
-                try:
-                    create_gmail_draft_for_user(draft_id, user["id"])
-                    gmail_draft_created = True
-                except HTTPException as exc:
-                    gmail_draft_error = str(exc.detail)
 
         discovered.append({
             "name": name, "lead_id": lead_id, "duplicate": False,
@@ -1483,8 +1442,9 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             "source_url": source_url, "contact_email": email, "contact_phone": phone,
             "recommendation": strategy["type"], "pages": strategy["pages"],
             "opportunity_score": score, "score_reasons": score_reasons,
-            "website_audit": website_audit, "draft_created": True, "proposal_created": True,
-            "gmail_draft_created": gmail_draft_created, "gmail_draft_error": gmail_draft_error,
+            "website_audit": website_audit, "business_address": address,
+            "business_category": category, "business_verification_status": "unverified",
+            "draft_created": False, "proposal_created": False, "gmail_draft_created": False,
             "rating": place.get("rating"), "rating_count": place.get("ratingCount"),
         })
 
@@ -1510,7 +1470,8 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
         },
         "saved": saved_count, "source": "Serper Places",
         "attribution": "Business discovery powered by Serper Places.",
-        "warning": "Serper results can be incomplete or out of date. Verify business identity, website, address and contact details before marking a prospect verified or contacting them. MCAS only creates drafts; it never sends email.",
+        "workflow": "Discovered prospects remain unverified until a fresh public listing is matched and a human reviews it. Proposals and outreach drafts are withheld until confirmation.",
+        "warning": "Search listings can be incomplete or out of date. No provider guarantees complete or current business contact details. Website reachability does not prove business ownership. MCAS does not send email.",
     }
 
 
