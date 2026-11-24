@@ -313,7 +313,7 @@ def grant_verified_order(order_id: str, transaction_id: str):
         if order['status'] == 'paid': return False
         if order['status'] != 'pending': raise HTTPException(409, "Payment order is not pending.")
         if c.execute("SELECT 1 FROM billing_orders WHERE provider_transaction_id=?", (str(transaction_id),)).fetchone(): raise HTTPException(409, "Provider transaction was already applied.")
-        ensure_billing_account(c, order['user_id'])
+        account = ensure_billing_account(c, order['user_id'])
         stamp = now()
         if order['item_type'] == 'subscription':
             plan = PLANS.get(order['item_code'])
