@@ -1667,10 +1667,53 @@ def confirm_lead_business(lead_id: str, user=Depends(current_user)):
                business_verified_at=?,updated_at=? WHERE id=? AND user_id=?""",
             (stamp, stamp, lead_id, user["id"]),
         )
-        audit(c, user["id"], "lead.business_human_confirmed", {"lead_id": lead_id})
+        try:
+            website_audit = json.loads(lead["website_audit_json"] or "{}")
+        except (TypeError, ValueError):
+            website_audit = {}
+        website_state = (
+            "not_listed" if not lead["website"] else
+            "broken" if lead["website_status"] == "broken" else
+            "needs_improvement" if lead["website_status"] == "needs_improvement" else
+            "working" if lead["website_status"] == "verified" else "needs_review"
+        )
+        strategy = business_strategy({})
+        subject, body = make_outreach_copy(
+            lead["name"], lead["market"] or "the selected market",
+            website_state, website_audit, strategy, lead["contact_email"],
+        )
+        proposal_id = secrets.token_urlsafe(15)
+        draft_id = secrets.token_urlsafe(15)
+        proposal = (
+            "VERIFIED-PROSPECT OPPORTUNITY PLAN\\n\\n"
+            + "Business: " + lead["name"] + "\\n"
+            + "Market: " + (lead["market"] or "Not specified") + "\\n"
+            + "Address: " + (lead["business_address"] or "Not independently confirmed") + "\\n"
+            + "Public source: " + str(verification.get("listing", {}).get("source_url") or lead["source_url"] or "Not available") + "\\n\\n"
+            + "Verification: a fresh public listing matched the prospect and a human user confirmed the displayed listing. "
+            + "This does not establish legal registration or ownership of contact details.\\n\\n"
+            + "Website opportunity: " + website_state + ". A missing website link is not proof that no website exists.\\n\\n"
+            + "Recommended direction: " + strategy["type"] + "\\n"
+            + "Suggested pages: " + ", ".join(strategy["pages"]) + "\\n"
+            + "Confirm scope, content, budget, timeline and contact permissions directly with the business before quoting."
+        )
+        c.execute(
+            "INSERT INTO proposals VALUES(?,?,?,?,?,?,?,?)",
+            (proposal_id, user["id"], lead_id, "Website opportunity plan — " + lead["name"],
+             proposal, "draft", stamp, stamp),
+        )
+        c.execute(
+            """INSERT INTO drafts(id,user_id,lead_id,kind,subject,body,state,created_at,to_email)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            (draft_id, user["id"], lead_id, "Cold email", subject, body,
+             "pending_approval", stamp, lead["contact_email"]),
+        )
+        audit(c, user["id"], "lead.business_human_confirmed", {
+            "lead_id": lead_id, "proposal_id": proposal_id, "draft_id": draft_id,
+        })
     return {"status": "Verified", "business_verification_status": "human_confirmed",
-            "business_verified_at": stamp,
-            "message": "You confirmed the business after reviewing the fresh public listing. This is not legal-entity or contact-ownership verification."}
+            "business_verified_at": stamp, "proposal_created": True, "draft_created": True,
+            "message": "You confirmed the business after reviewing the fresh public listing. A proposal and pending email draft were created for review. This is not legal-entity or contact-ownership verification."}
 
 
 @app.post("/api/leads/{lead_id}/verify-website")
