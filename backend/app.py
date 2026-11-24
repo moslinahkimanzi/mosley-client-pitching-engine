@@ -3302,7 +3302,7 @@ def billing_status(user=Depends(current_user)):
         'credit_packs': catalog['credit_packs'],
         'credit_costs': catalog['credit_costs'],
         'recent_orders': [dict(row) for row in orders],
-        'message': 'USD card checkout and converted KES M-Pesa checkout are configured. Complete sandbox testing and merchant approval before live sales.' if configured else 'Payments are disabled. Configure the provider, HTTPS public URL and explicit MCAS_BILLING_ENABLED=true only after sandbox testing and merchant approval.'
+        'message': 'Flutterwave configuration is present. M-Pesa checkout still requires a current dated USD/KES rate. Card checkout is disabled for this launch; keep live billing off until sandbox tests and merchant approval are complete.' if configured else 'Payments are disabled. Configure the provider, HTTPS public URL and explicit MCAS_BILLING_ENABLED=true only after sandbox testing and merchant approval.'
     }
 
 
