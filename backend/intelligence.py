@@ -107,6 +107,18 @@ def assess_website(website_audit: dict | None, website_state: str | None = None,
          "Ask whether the owner wants help; do not infer purchase intent from a scan."),
     ]
     opportunity = _score(opportunity_signals)
+    # A missing website URL in a discovery listing is a weak review flag, not a
+    # successful business-health check and not proof that the business lacks a site.
+    if state == "not_listed":
+        listing_finding = next(
+            item for item in opportunity["findings"]
+            if item["signal"] == "Website link absent from discovery listing"
+        )
+        listing_finding["status"] = "issue"
+        listing_finding["recommendation"] = (
+            "Search for the official website and confirm with the business owner "
+            "before suggesting a new website."
+        )
     opportunity["interpretation"] = "Priority for human review only; not a probability of purchase, revenue forecast or claim that the business needs a website."
     opportunity["website_state"] = state
 
