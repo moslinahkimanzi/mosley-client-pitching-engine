@@ -1615,6 +1615,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             "results": len(discovered), "saved": saved_count,
         })
     discovered.sort(key=lambda item: item.get("opportunity_score", 0), reverse=True)
+    debit_credits(user["id"], 5, "prospect_research")
     state_counts = {}
     for item in discovered:
         state_counts[item["website_state"]] = state_counts.get(item["website_state"], 0) + 1
@@ -1832,6 +1833,7 @@ def verify_lead_business(lead_id: str, user=Depends(current_user)):
         audit(c, user["id"], "lead.business_rechecked", {
             "lead_id": lead_id, "status": verification["status"],
         })
+    debit_credits(user["id"], 3, "business_identity_recheck", lead_id)
     return verification
 
 
@@ -1986,6 +1988,7 @@ def audit_website(payload: WebsiteAuditIn, user=Depends(current_user)):
         with db() as c:
             audit(c, user["id"], "website.advanced_audit", {"url": result.get("url"),
                   "pages_checked": result.get("pages_checked")})
+    debit_credits(user["id"], credits_for_audit(payload.max_pages), "advanced_website_audit", payload.lead_id)
     return result
 
 
@@ -2115,6 +2118,7 @@ def competitor_intelligence(payload: CompetitorIn, user=Depends(current_user)):
             "industry": payload.industry,
             "candidate_count": len(competitors),
         })
+    debit_credits(user["id"], credits_for_competitors(payload.max_results), "competitor_intelligence", payload.lead_id)
     return result
 
 
