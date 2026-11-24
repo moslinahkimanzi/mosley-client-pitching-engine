@@ -60,6 +60,7 @@ class BillingTest(unittest.TestCase):
     def test_credit_debit_is_atomic_and_uses_monthly_before_purchased(self):
         client, _ = self._client()
         user_id = client.get("/api/auth/me").json()["id"]
+        client.get("/api/billing/status")
         with mcas.db() as connection:
             connection.execute(
                 "UPDATE billing_accounts SET monthly_credits=3,purchased_credits=10 WHERE user_id=?",
