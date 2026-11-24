@@ -96,9 +96,38 @@ class AdvancedAuditClassificationTests(unittest.TestCase):
             lambda url: data,
             max_pages=1,
         )
-        finding = next(item for item in result["findings"] if item["code"] == "http_error")
+        finding = next(item for item in result["findings"] if item["code"] == "http_access_restricted")
         self.assertEqual(finding["classification"], CLASS_UNVERIFIED)
         self.assertNotIn(finding["classification"], {CLASS_DETECTED, CLASS_RISK})
+
+    def test_http_error_types_are_not_merged_into_one_finding(self):
+        root = "https://example.test/"
+        not_found = "https://example.test/missing"
+        server_error = "https://example.test/server-error"
+
+        def fetcher(url):
+            if url == root:
+                data = page(url, ["/missing", "/server-error"])
+                data["response_time_ms"] = 200
+                return data
+            if url == not_found:
+                data = page(url)
+                data["http_status"] = 404
+                return data
+            if url == server_error:
+                data = page(url)
+                data["http_status"] = 500
+                return data
+            raise AssertionError("Unexpected URL fetched: " + url)
+
+        result = advanced_site_audit(root, fetcher, max_pages=3)
+        findings = {item["code"]: item for item in result["findings"]}
+
+        self.assertEqual(findings["http_not_found"]["classification"], CLASS_DETECTED)
+        self.assertEqual(findings["http_not_found"]["severity"], "medium")
+        self.assertEqual(findings["http_server_error"]["classification"], CLASS_DETECTED)
+        self.assertEqual(findings["http_server_error"]["severity"], "high")
+        self.assertNotEqual(findings["http_not_found"]["code"], findings["http_server_error"]["code"])
 
 
 if __name__ == "__main__":
