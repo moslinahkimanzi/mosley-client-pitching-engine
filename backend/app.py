@@ -910,7 +910,7 @@ def safe_site_fetch(initial_url):
                         "has_lang": None, "images_total": None, "images_missing_alt": None,
                         "forms_total": None, "form_controls_total": None,
                         "form_controls_without_label": None, "mixed_content_references": None,
-                        "canonical_url": None, "links": [],
+                        "canonical_url": None, "links": [], "public_emails": [], "public_phones": [],
                         "note": "Response is not HTML; page structure and metadata were not analysed."}
             body = res.read(512001)
             conn.close()
@@ -937,6 +937,17 @@ def safe_site_fetch(initial_url):
                     unlabelled += 1
             links = re.findall(r"""<a\b[^>]+href\s*=\s*["']([^"'#]+)["']""", document, re.I)
             links = [x.strip() for x in links if x.strip()][:120]
+            public_emails = sorted({
+                value.strip().lower()
+                for value in re.findall(r"""(?i)href\s*=\s*["']mailto:([^"'?]+)""", document)
+                if re.fullmatch(r"[^\s@]+@[^\s@]+\.[A-Za-z]{2,}", value.strip())
+                and not any(flag in value.lower() for flag in ("noreply", "no-reply", "example.com"))
+            })[:10]
+            public_phones = sorted({
+                re.sub(r"[^+0-9]", "", value)
+                for value in re.findall(r"""(?i)href\s*=\s*["']tel:([^"']+)""", document)
+                if len(re.sub(r"\D", "", value)) >= 7
+            })[:10]
             mixed = re.findall(r"""(?:src|href)\s*=\s*["']http://[^"']+["']""", document, re.I)
             canonical_match = re.search(
                 r"""<link\b(?=[^>]*rel\s*=\s*["']canonical["'])[^>]*href\s*=\s*["']([^"']+)""",
@@ -949,8 +960,9 @@ def safe_site_fetch(initial_url):
                     "form_controls_total": len(controls), "form_controls_without_label": unlabelled,
                     "mixed_content_references": len(mixed),
                     "canonical_url": urllib.parse.urljoin(url, canonical_match.group(1)) if canonical_match else None,
-                    "links": links,
-                    "note": "Lightweight HTML and response-header analysis only; not a penetration test or JavaScript/browser audit."}
+                    "links": links, "public_emails": public_emails,
+                    "public_phones": public_phones,
+                    "note": "Lightweight HTML and response-header analysis only; public mailto/tel links are extracted from fetched HTML only. Not a penetration test or JavaScript/browser audit."}
         except HTTPException:
             conn.close()
             raise
