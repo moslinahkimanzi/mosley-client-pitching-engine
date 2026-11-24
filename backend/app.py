@@ -333,7 +333,15 @@ def grant_verified_order(order_id: str, transaction_id: str):
                 plan = USD_PLANS.get(order['item_code'])
                 if not plan or int(plan['amount_usd_cents']) != int(order['amount_usd_cents']):
                     raise HTTPException(409, "Stored USD subscription order does not match the current catalogue.")
-                period_end = (datetime.now(timezone.utc) + timedelta(days=int(plan.get('period_days', 30)))).isoformat()
+                period_base = datetime.now(timezone.utc)
+                if account['plan_code'] != 'free' and account['period_end']:
+                    try:
+                        existing_end = datetime.fromisoformat(str(account['period_end']).replace('Z', '+00:00'))
+                        if existing_end > period_base:
+                            period_base = existing_end
+                    except (TypeError, ValueError):
+                        pass
+                period_end = (period_base + timedelta(days=int(plan.get('period_days', 30)))).isoformat()
                 monthly_delta = int(plan['credits']) - int(account['monthly_credits'])
                 c.execute("UPDATE billing_accounts SET plan_code=?,monthly_credits=?,period_start=?,period_end=?,updated_at=? WHERE user_id=?", (order['item_code'], plan['credits'], stamp, period_end, stamp, order['user_id']))
             else:
