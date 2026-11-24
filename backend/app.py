@@ -3148,7 +3148,7 @@ def billing_checkout(payload: BillingCheckoutIn, user=Depends(current_user)):
     tx_ref, order_id, stamp = 'MCAS-'+secrets.token_urlsafe(18), secrets.token_urlsafe(18), now()
     with db() as c:
         c.execute("INSERT INTO billing_orders(id,user_id,tx_ref,item_type,item_code,amount_kes,currency,status,created_at,updated_at) VALUES(?,?,?,?,?,?,'KES','pending',?,?)", (order_id,user['id'],tx_ref,payload.item_type,payload.item_code,int(product['amount_kes']),stamp,stamp))
-    request_data = {'tx_ref':tx_ref,'amount':str(int(product['amount_kes'])),'currency':'KES','redirect_url':public_url+'/?payment_return='+urllib.parse.quote(order_id),'payment_options':'card' if payload.payment_method == 'card' else 'mpesa','customer':{'email':user['email'],'phone_number':payload.phone_number or ''},'customizations':{'title':'Mosley Client Acquisition System','description':product['name']},'meta':{'mcas_order_id':order_id,'mcas_item_type':payload.item_type,'mcas_item_code':payload.item_code}}
+    request_data = {'tx_ref':tx_ref,'amount':int(product['amount_kes']),'currency':'KES','redirect_url':public_url+'/?payment_return='+urllib.parse.quote(order_id),'payment_options':'card' if payload.payment_method == 'card' else 'mpesa','customer':{'email':user['email'],'phone_number':payload.phone_number or ''},'customizations':{'title':'Mosley Client Acquisition System','description':product['name']},'meta':{'mcas_order_id':order_id,'mcas_item_type':payload.item_type,'mcas_item_code':payload.item_code}}
     try:
         result = flutterwave_request('POST','payments',request_data)
         checkout_url = result.get('data',{}).get('link') if isinstance(result.get('data'),dict) else None
