@@ -3,8 +3,11 @@ import unittest
 import json
 import uuid
 from unittest.mock import patch
+from datetime import datetime, timezone
+from decimal import Decimal
 
 from fastapi.testclient import TestClient
+from backend.commercial import payment_quote, mpesa_kes_amount
 
 import backend.app as mcas
 
@@ -40,7 +43,7 @@ class BillingTest(unittest.TestCase):
 
     def test_checkout_is_disabled_without_public_provider_configuration(self):
         client, csrf = self._client()
-        with patch.dict(os.environ, {"MCAS_PUBLIC_URL": "", "FLW_SECRET_KEY": "", "FLW_SECRET_HASH": ""}):
+        with patch.dict(os.environ, {"MCAS_PUBLIC_URL": "", "FLW_SECRET_KEY": "", "FLW_SECRET_HASH": "", "MCAS_BILLING_ENABLED": "false"}):
             response = client.post(
                 "/api/billing/checkout",
                 json={"item_type": "subscription", "item_code": "starter", "payment_method": "mpesa",
@@ -127,10 +130,10 @@ class BillingTest(unittest.TestCase):
                    VALUES(?,?,?,'credits','small',1500,'KES','pending',?,?)""",
                 (order_id, user_id, tx_ref, mcas.now(), mcas.now()),
             )
-        verified = {"status":"success","data":{"status":"successful","tx_ref":tx_ref,"currency":"KES","amount":1600}}
+        verified = {"id":987655,"status":"successful","tx_ref":tx_ref,"currency":"KES","amount":1600}
         payload = {"id":"evt-"+uuid.uuid4().hex,"type":"charge.completed",
                    "data":{"id":987655,"tx_ref":tx_ref,"status":"succeeded"}}
-        with patch.dict(os.environ,{"FLW_SECRET_HASH":"test-secret"}), patch.object(mcas,"flutterwave_request",return_value=verified):
+        with patch.dict(os.environ,{"FLW_SECRET_HASH":"test-secret"}), patch.object(mcas,"verify_usd_transaction",return_value=verified):
             response = client.post("/api/billing/flutterwave/webhook",json=payload,headers={"verif-hash":"test-secret"})
         self.assertEqual(response.status_code,400)
         with mcas.db() as connection:
@@ -160,10 +163,10 @@ class BillingTest(unittest.TestCase):
                    VALUES(?,?,?,'credits','small',1500,'KES','pending',?,?)""",
                 (order_id, user_id, tx_ref, mcas.now(), mcas.now()),
             )
-        verified = {"status": "success", "data": {"status": "successful", "tx_ref": tx_ref,
-                    "currency": "KES", "amount": 1500}}
+        verified = {"id":987654,"status": "successful", "tx_ref": tx_ref,
+                    "currency": "KES", "amount": 1500}
         with patch.dict(os.environ, {"FLW_SECRET_HASH": "test-secret"}), patch.object(
-            mcas, "flutterwave_request", return_value=verified
+            mcas, "verify_usd_transaction", return_value=verified
         ) as provider:
             payload = {"id": "evt-" + uuid.uuid4().hex, "event": "charge.completed",
                        "data": {"id": 987654, "tx_ref": tx_ref, "status": "successful"}}
@@ -181,6 +184,61 @@ class BillingTest(unittest.TestCase):
         self.assertEqual(account["purchased_credits"], 100)
         self.assertEqual(order["status"], "paid")
 
+
+
+    def test_usd_card_quote_stays_usd(self):
+        quote = payment_quote(1200, "card")
+        self.assertEqual(quote["provider_amount"], "12.00")
+        self.assertEqual(quote["provider_currency"], "USD")
+        self.assertIsNone(quote["exchange_rate"])
+
+    def test_mpesa_quote_converts_usd_using_decimal_rounding(self):
+        quote = payment_quote(1200, "mpesa", Decimal("130.25"))
+        self.assertEqual(quote["provider_currency"], "KES")
+        self.assertEqual(quote["provider_amount"], "1563")
+        self.assertEqual(quote["amount_kes"], 1563)
+        self.assertEqual(quote["exchange_rate"], "130.25")
+
+    def test_mpesa_quote_rejects_missing_rate(self):
+        with self.assertRaises(ValueError):
+            payment_quote(1200, "mpesa", None)
+
+    def test_checkout_uses_usd_for_card_and_stores_quote(self):
+        client, csrf = self._client()
+        user_id = client.get("/api/auth/me").json()["id"]
+        future_date = datetime.now(timezone.utc).date().isoformat()
+        env = {
+            "MCAS_BILLING_ENABLED": "true", "FLW_SECRET_KEY": "test-key",
+            "FLW_SECRET_HASH": "test-hash", "MCAS_PUBLIC_URL": "https://mcas.example.test",
+            "MCAS_USD_KES_RATE": "130.00", "MCAS_USD_KES_RATE_DATE": future_date,
+        }
+        with patch.dict(os.environ, env), patch.object(mcas, "initialize_usd_checkout",
+            return_value={"checkout_url": "https://checkout.flutterwave.com/test-session"}):
+            response = client.post("/api/billing/checkout",
+                json={"item_type":"subscription","item_code":"starter","payment_method":"card"},
+                headers={"X-CSRF-Token":csrf})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["amount_usd"], "12.00")
+        self.assertEqual(response.json()["provider_currency"], "USD")
+        with mcas.db() as connection:
+            order = connection.execute("SELECT * FROM billing_orders WHERE user_id=? ORDER BY created_at DESC LIMIT 1",(user_id,)).fetchone()
+        self.assertEqual(order["provider_currency"], "USD")
+        self.assertEqual(order["provider_amount"], "12.00")
+        self.assertEqual(order["amount_usd_cents"], 1200)
+
+    def test_mpesa_checkout_rejects_stale_fx_rate(self):
+        client, csrf = self._client()
+        env = {
+            "MCAS_BILLING_ENABLED": "true", "FLW_SECRET_KEY": "test-key",
+            "FLW_SECRET_HASH": "test-hash", "MCAS_PUBLIC_URL": "https://mcas.example.test",
+            "MCAS_USD_KES_RATE": "130.00", "MCAS_USD_KES_RATE_DATE": "2020-01-01",
+        }
+        with patch.dict(os.environ, env):
+            response = client.post("/api/billing/checkout",
+                json={"item_type":"subscription","item_code":"starter","payment_method":"mpesa",
+                      "phone_number":"+254712345678"},
+                headers={"X-CSRF-Token":csrf})
+        self.assertEqual(response.status_code, 503, response.text)
 
 if __name__ == "__main__":
     unittest.main()
