@@ -676,6 +676,8 @@ def list_leads(user=Depends(current_user)):
 
 @app.post("/api/leads", status_code=201)
 def add_lead(payload: LeadIn, user=Depends(current_user)):
+    if payload.status == "Verified":
+        raise HTTPException(409, "A prospect cannot be created as verified. Run the business recheck and explicitly confirm its evidence first.")
     lid = secrets.token_urlsafe(15)
     stamp = now()
     validate_email(payload.contact_email)
@@ -1686,15 +1688,16 @@ def confirm_lead_business(lead_id: str, user=Depends(current_user)):
         except (TypeError, ValueError):
             verification = {}
         checked_at = verification.get("checked_at")
-        if not checked_at or checked_at != lead["updated_at"]:
-            # updated_at may change for unrelated edits; the timestamp inside the evidence is authoritative.
-            checked_epoch = 0
+        checked_epoch = 0
+        try:
+            checked_epoch = int(datetime.fromisoformat(checked_at.replace("Z", "+00:00")).timestamp())
+        except Exception:
             try:
-                checked_epoch = int(datetime.fromisoformat(checked_at.replace("Z", "+00:00")).timestamp())
+                checked_epoch = int(time.mktime(time.strptime(checked_at, "%Y-%m-%dT%H:%M:%S")))
             except Exception:
                 pass
-            if not checked_epoch or time.time() - checked_epoch > 7 * 24 * 60 * 60:
-                raise HTTPException(409, "The listing check is older than seven days. Recheck it before confirming.")
+        if not checked_epoch or time.time() - checked_epoch > 7 * 24 * 60 * 60:
+            raise HTTPException(409, "The listing check is older than seven days. Recheck it before confirming.")
         stamp = now()
         c.execute(
             """UPDATE leads SET status='Verified',business_verification_status='human_confirmed',
