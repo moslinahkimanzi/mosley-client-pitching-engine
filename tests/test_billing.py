@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from fastapi.testclient import TestClient
-from backend.commercial import payment_quote, mpesa_kes_amount
+from backend.commercial import payment_quote, public_catalog
 
 import backend.app as mcas
 
@@ -347,6 +347,19 @@ class BillingTest(unittest.TestCase):
         with mcas.db() as connection:
             account=connection.execute("SELECT purchased_credits FROM billing_accounts WHERE user_id=?",(user_id,)).fetchone()
         self.assertEqual(account["purchased_credits"],30)
+
+
+    def test_public_credit_costs_match_metering_catalogue(self):
+        costs = public_catalog()["credit_costs"]
+        self.assertEqual(costs["research"], 5)
+        self.assertEqual(costs["business_recheck"], 3)
+        self.assertEqual(costs["audit_1_5_pages"], 3)
+        self.assertEqual(costs["audit_6_10_pages"], 5)
+        self.assertEqual(costs["audit_11_15_pages"], 7)
+        self.assertEqual(costs["competitors_1_3"], 6)
+        self.assertEqual(costs["competitors_4_5"], 8)
+        self.assertEqual(costs["competitors_6_8"], 11)
+        self.assertEqual(costs["ai_generation"], 1)
 
 if __name__ == "__main__":
     unittest.main()
