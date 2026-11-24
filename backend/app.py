@@ -24,6 +24,9 @@ from email.message import EmailMessage
 from pathlib import Path
 from typing import Optional, Literal
 
+from backend.intelligence import assess_website
+from backend.commercial import PLANS, CREDIT_PACKS, CREDIT_COSTS, public_catalog, flutterwave_ready, initialize_flutterwave_checkout, verify_flutterwave_transaction
+
 from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -180,6 +183,11 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at);
         CREATE INDEX IF NOT EXISTS idx_followups_user_due ON followups(user_id,due_at,state);
         CREATE INDEX IF NOT EXISTS idx_proposals_user ON proposals(user_id,updated_at);
+        CREATE TABLE IF NOT EXISTS billing_accounts(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,credit_balance INTEGER NOT NULL DEFAULT 10 CHECK(credit_balance >= 0),plan TEXT NOT NULL DEFAULT 'trial',subscription_status TEXT NOT NULL DEFAULT 'trial',current_period_end TEXT,updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS credit_ledger(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,amount INTEGER NOT NULL,balance_after INTEGER NOT NULL,reason TEXT NOT NULL,reference TEXT,created_at TEXT NOT NULL,UNIQUE(user_id,reason,reference));
+        CREATE TABLE IF NOT EXISTS billing_payments(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,tx_ref TEXT NOT NULL UNIQUE,item_type TEXT NOT NULL,item_code TEXT NOT NULL,amount_kes INTEGER NOT NULL,currency TEXT NOT NULL DEFAULT 'KES',status TEXT NOT NULL DEFAULT 'pending',provider_transaction_id TEXT UNIQUE,created_at TEXT NOT NULL,paid_at TEXT);
+        CREATE INDEX IF NOT EXISTS idx_credit_ledger_user_created ON credit_ledger(user_id,created_at);
+        CREATE INDEX IF NOT EXISTS idx_billing_payments_user_created ON billing_payments(user_id,created_at);
         """)
         add_column(c, "leads", "contact_email", "TEXT")
         add_column(c, "leads", "contact_phone", "TEXT")
@@ -482,6 +490,7 @@ def register(payload: RegisterIn, response: Response):
         with db() as c:
             c.execute("INSERT INTO users VALUES(?,?,?,?)", (uid, email, password_hash(payload.password), now()))
             c.execute("INSERT INTO sessions VALUES(?,?,?)", (token_hash(session), uid, int(time.time()) + SESSION_SECONDS))
+            c.execute("INSERT INTO billing_accounts(user_id,credit_balance,plan,subscription_status,updated_at) VALUES(?,10,'trial','trial',?)", (uid, now()))
             audit(c, uid, "account.created")
     except sqlite3.IntegrityError:
         raise HTTPException(409, "An account with this email already exists")
