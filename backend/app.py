@@ -3164,14 +3164,10 @@ def billing_checkout(payload: BillingCheckoutIn, user=Depends(current_user)):
 @app.post('/api/billing/flutterwave/webhook')
 async def flutterwave_webhook(request: Request):
     secret = os.getenv('FLW_SECRET_HASH','').strip()
-    raw_body = await request.body()
-    signature = request.headers.get('flutterwave-signature','').strip()
-    expected_signature = base64.b64encode(
-        hmac.new(secret.encode('utf-8'), raw_body, hashlib.sha256).digest()
-    ).decode('ascii')
-    if not secret or not signature or not hmac.compare_digest(signature, expected_signature):
+    signature = request.headers.get('verif-hash','').strip()
+    if not secret or not signature or not hmac.compare_digest(signature, secret):
         raise HTTPException(401,'Invalid payment webhook signature.')
-    try: payload = json.loads(raw_body.decode('utf-8'))
+    try: payload = await request.json()
     except Exception: raise HTTPException(400,'Invalid webhook payload.')
     data = payload.get('data') if isinstance(payload,dict) else None
     if not isinstance(data,dict): return {'status':'ignored'}
