@@ -1929,6 +1929,27 @@ def competitor_intelligence(payload: CompetitorIn, user=Depends(current_user)):
     if target_url and not re.match(r"^https?://", target_url, re.I):
         target_url = "https://" + target_url
     target_host = (urllib.parse.urlparse(target_url).hostname or "").lower().removeprefix("www.")
+    target_state = "not_listed"
+    target_audit_summary = None
+    if target_url:
+        try:
+            target_audit = advanced_site_audit(target_url, safe_site_fetch, 3)
+            target_status = int(target_audit.get("http_status") or 0)
+            target_state = "responding" if 200 <= target_status < 400 else (
+                "restricted" if target_status in {401, 403, 429} else "needs_review"
+            )
+            target_summary = target_audit.get("summary") or {}
+            target_audit_summary = {
+                "health_score": target_summary.get("health_score"),
+                "findings": target_summary.get("total", 0),
+                "high": target_summary.get("high", 0),
+                "medium": target_summary.get("medium", 0),
+                "low": target_summary.get("low", 0),
+                "pages_checked": target_audit.get("pages_checked", 0),
+            }
+        except (HTTPException, ValueError, TypeError):
+            target_state = "needs_review"
+
     competitors = []
     seen = set()
 
@@ -1981,7 +2002,6 @@ def competitor_intelligence(payload: CompetitorIn, user=Depends(current_user)):
             "audit_summary": audit_summary,
         })
 
-    target_state = "not_listed" if not target_url else "not_audited_in_competitor_search"
     result = {
         "target": {
             "lead_id": payload.lead_id,
@@ -1989,6 +2009,7 @@ def competitor_intelligence(payload: CompetitorIn, user=Depends(current_user)):
             "market": market,
             "website": lead["website"],
             "website_state": target_state,
+            "audit_summary": target_audit_summary,
         },
         "query": query,
         "competitors": competitors,
