@@ -22,15 +22,20 @@ function renderAll(){renderMetrics();renderLeads();renderDrafts();renderFollowup
 function renderBillingCatalog(){
  const root=$('billingCatalog');if(!root||!state.billingCatalog)return;
  const catalog=state.billingCatalog,enabled=!!state.billing?.billing_enabled;
- const plans=Object.entries(catalog.plans||{}).map(([code,p])=>'<div class="item"><div class="itemtop"><strong>'+esc(p.name)+'</strong><span class="badge">'+esc(p.credits)+' credits / 30 days</span></div><div class="metric" style="font-size:22px">KES '+Number(p.amount_kes).toLocaleString('en-KE')+' / month</div><p>'+esc((p.features||[]).join(' · '))+'</p><button class="primary" data-billing-type="subscription" data-billing-code="'+esc(code)+'" '+(enabled?'':'disabled')+'>Choose monthly plan</button></div>').join('');
- const packs=Object.entries(catalog.credit_packs||{}).map(([code,p])=>'<div class="item"><div class="itemtop"><strong>'+esc(p.name)+'</strong><span class="badge">'+esc(p.credits)+' credits</span></div><div class="metric" style="font-size:22px">KES '+Number(p.amount_kes).toLocaleString('en-KE')+'</div><button data-billing-type="credit_pack" data-billing-code="'+esc(code)+'" '+(enabled?'':'disabled')+'>Buy credits</button></div>').join('');
- root.innerHTML='<h3>Monthly subscriptions</h3>'+plans+'<h3 style="margin-top:14px">One-time credit packs</h3>'+packs+'<p class="tiny">Usage: research run '+catalog.credit_costs.research_run+' credits · website audit '+catalog.credit_costs.website_audit+' · AI draft '+catalog.credit_costs.ai_draft+'.</p>';
+ const methodButtons=(type,code)=>'<div class="actions"><button class="primary" data-billing-type="'+type+'" data-billing-code="'+code+'" data-payment-method="card" '+(enabled?'':'disabled')+'>Pay by card · USD</button><button data-billing-type="'+type+'" data-billing-code="'+code+'" data-payment-method="mpesa" '+(catalog.payment_methods?.mpesa?.available?'':'disabled')+'>Pay by M-Pesa · KES equivalent</button></div>';
+ const plans=Object.entries(catalog.plans||{}).map(([code,p])=>'<div class="item"><div class="itemtop"><strong>'+esc(p.name)+'</strong><span class="badge">'+esc(p.credits)+' credits / 30 days</span></div><div class="metric" style="font-size:22px">$'+Number(p.amount_usd).toFixed(2)+' / month</div><p>'+esc((p.features||[]).join(' · '))+'</p>'+methodButtons('subscription',code)+'</div>').join('');
+ const packs=Object.entries(catalog.credit_packs||{}).map(([code,p])=>'<div class="item"><div class="itemtop"><strong>'+esc(p.name)+'</strong><span class="badge">'+esc(p.credits)+' credits</span></div><div class="metric" style="font-size:22px">$'+Number(p.amount_usd).toFixed(2)+'</div>'+methodButtons('credit_pack',code)+'</div>').join('');
+ const fx=catalog.mpesa_quote?'<p class="tiny">M-Pesa conversion: $1 = KES '+esc(catalog.mpesa_quote.usd_kes_rate)+' (rate dated '+esc(catalog.mpesa_quote.rate_date)+'). Your checkout shows the KES amount before payment.</p>':'<p class="tiny">M-Pesa checkout is unavailable until the operator configures a current USD/KES rate.</p>';
+ root.innerHTML='<h3>Monthly subscriptions (USD)</h3>'+plans+'<h3 style="margin-top:14px">One-time credit packs (USD)</h3>'+packs+fx+'<p class="tiny">Usage: research run '+catalog.credit_costs.research_run+' credits · website audit '+catalog.credit_costs.website_audit+' · AI draft '+catalog.credit_costs.ai_draft+'. All account pricing and credit entitlements are recorded in USD-based catalogue terms.</p>';
 }
 $('billingCatalog').addEventListener('click',async e=>{
  const button=e.target.closest('[data-billing-type]');if(!button)return;
  button.disabled=true;
- try{const result=await api('/api/billing/checkout',{method:'POST',body:JSON.stringify({item_type:button.dataset.billingType,item_code:button.dataset.billingCode})});location.assign(result.checkout_url);}
- catch(err){toast(err.message,true);button.disabled=false;}
+ try{
+  const result=await api('/api/billing/checkout',{method:'POST',body:JSON.stringify({item_type:button.dataset.billingType,item_code:button.dataset.billingCode,payment_method:button.dataset.paymentMethod})});
+  toast('Opening checkout: '+(result.amount_usd?'$'+result.amount_usd:'')+(result.provider_currency==='KES'?' · KES '+result.provider_amount:''));
+  location.assign(result.checkout_url);
+ }catch(err){toast(err.message,true);button.disabled=false;}
 });
 
 
