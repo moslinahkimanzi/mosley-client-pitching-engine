@@ -211,9 +211,15 @@ def build_audit_pdf(report: dict) -> bytes:
 
     canvas.rect(MARGIN, canvas.y, CONTENT_W, 102, COLORS["navy"])
     canvas.text(MARGIN + 16, canvas.y + 17, "WEBSITE TECHNICAL AUDIT", 20, True, COLORS["white"])
-    canvas.text(MARGIN + 16, canvas.y + 47, host[:70], 11, True, COLORS["white"])
-    canvas.text(MARGIN + 16, canvas.y + 68, website[:88], 7.5, False, COLORS["white"])
-    canvas.text(MARGIN + 16, canvas.y + 84, "Prepared by MCAS  |  Checked " + checked_at[:40], 7, False, COLORS["white"])
+    business_name = str(report.get("business_name") or "").strip()
+    canvas.text(MARGIN + 16, canvas.y + 43, host[:70], 10, True, COLORS["white"])
+    if business_name:
+        canvas.text(MARGIN + 16, canvas.y + 59, "Prepared for: " + business_name[:72], 8, False, COLORS["white"])
+        canvas.text(MARGIN + 16, canvas.y + 74, website[:88], 7, False, COLORS["white"])
+        canvas.text(MARGIN + 16, canvas.y + 88, "Prepared by MCAS  |  Checked " + checked_at[:40], 6.5, False, COLORS["white"])
+    else:
+        canvas.text(MARGIN + 16, canvas.y + 64, website[:88], 7.5, False, COLORS["white"])
+        canvas.text(MARGIN + 16, canvas.y + 82, "Prepared by MCAS  |  Checked " + checked_at[:40], 7, False, COLORS["white"])
     canvas.y += 116
 
     score = summary.get("health_score", "Not scored")
@@ -238,6 +244,11 @@ def build_audit_pdf(report: dict) -> bytes:
         f"{summary.get('page_occurrences', 0)} page occurrence(s). "
         "Repeated issues across pages are grouped once for scoring, with affected URLs retained.",
         size=8.2,
+    )
+    canvas.paragraph(
+        str(summary.get("score_method") or
+            "Unique issue codes are counted once across checked pages; unverified observations do not reduce the score."),
+        size=7.8, color=COLORS["muted"],
     )
     canvas.paragraph(
         str(report.get("score_disclaimer") or
