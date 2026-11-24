@@ -104,7 +104,7 @@ def build_improvement_opportunities(findings: list[dict]) -> list[dict]:
         },
         {
             "id": "availability",
-            "codes": {"http_error", "page_fetch_failed"},
+            "codes": {"http_not_found", "http_server_error", "page_fetch_failed"},
             "title": "Page availability and navigation review",
             "priority": "high",
             "description": "Investigate pages that returned errors or could not be checked during this bounded crawl.",
@@ -318,19 +318,32 @@ def advanced_site_audit(initial_url: str, fetcher, max_pages: int = 10) -> dict:
         except (TypeError, ValueError):
             numeric_status = None
         if numeric_status is not None and numeric_status >= 400:
-            if numeric_status in {404, 410} or numeric_status >= 500:
-                severity = "high" if numeric_status >= 500 else "medium"
+            if numeric_status in {404, 410}:
                 add_finding(
-                    severity, "http_error", "A page returned HTTP " + str(numeric_status),
-                    "The checked public URL returned an HTTP error response.",
-                    "Confirm the route, hosting configuration and intended access policy; then repeat the check.",
+                    "medium", "http_not_found", "A public page returned a not-found response",
+                    "The checked URL returned HTTP " + str(numeric_status) + ". Confirm whether the route should exist and be publicly reachable.",
+                    "Confirm the URL, repair or redirect a genuinely missing route, and update links that point to it.",
                     final_url, "HTTP " + str(numeric_status), CLASS_DETECTED,
+                )
+            elif numeric_status >= 500:
+                add_finding(
+                    "high", "http_server_error", "A public page returned a server-error response",
+                    "The checked URL returned HTTP " + str(numeric_status) + ". A single response does not establish whether the failure is persistent.",
+                    "Repeat the request, inspect hosting and application logs, and confirm whether the server error persists.",
+                    final_url, "HTTP " + str(numeric_status), CLASS_DETECTED,
+                )
+            elif numeric_status in {401, 403, 429}:
+                add_finding(
+                    "info", "http_access_restricted", "A page response requires access review",
+                    "The URL returned an authentication, access-control or rate-limit response. This may be intentional and does not prove a broken page.",
+                    "Confirm whether the page is intended to be public; repeat the check through an authorised browser session where appropriate.",
+                    final_url, "HTTP " + str(numeric_status), CLASS_UNVERIFIED,
                 )
             else:
                 add_finding(
-                    "info", "http_error", "A page response requires access review",
-                    "The URL returned an access or rate-limit response; this may be intentional and does not prove a broken page.",
-                    "Confirm whether the page is intended to be public, then repeat the check using an authorised browser session.",
+                    "info", "http_response_unverified", "A page returned a client-error response",
+                    "The URL returned HTTP " + str(numeric_status) + ". The static check cannot determine whether this response is intentional or indicates a user-facing defect.",
+                    "Manually review the URL and reproduce the request using the website's normal user journey.",
                     final_url, "HTTP " + str(numeric_status), CLASS_UNVERIFIED,
                 )
             continue
