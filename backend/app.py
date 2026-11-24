@@ -3142,17 +3142,23 @@ async def flutterwave_webhook(request: Request):
     if str(data.get('status','')).lower() not in {'successful','succeeded'}:
         with db() as c: c.execute("INSERT OR IGNORE INTO billing_webhook_events(event_key,received_at,outcome) VALUES(?,?,?)",(event_key,now(),'not_successful'))
         return {'status':'not_successful'}
-    verified = flutterwave_request('GET','transactions/'+urllib.parse.quote(str(transaction_id),safe='')+'/verify')
-    tx = verified.get('data') if isinstance(verified.get('data'),dict) else {}
-    tx_ref = str(tx.get('tx_ref') or data.get('tx_ref') or '')
-    if verified.get('status') != 'success' or str(tx.get('status','')).lower() != 'successful' or not tx_ref or str(tx.get('currency','')).upper() != 'KES':
-        raise HTTPException(400,'Payment could not be verified against the MCAS order.')
-    with db() as c: order = c.execute('SELECT * FROM billing_orders WHERE tx_ref=?',(tx_ref,)).fetchone()
+    metadata = data.get('meta') if isinstance(data.get('meta'),dict) else {}
+    order_id_hint = str(metadata.get('mcas_order_id') or '')
+    tx_ref_hint = str(data.get('tx_ref') or data.get('reference') or '')
+    with db() as c:
+        order = c.execute('SELECT * FROM billing_orders WHERE id=?',(order_id_hint,)).fetchone() if order_id_hint else None
+        if not order and tx_ref_hint:
+            order = c.execute('SELECT * FROM billing_orders WHERE tx_ref=?',(tx_ref_hint,)).fetchone()
     if not order: return {'status':'ignored'}
+    verify_path = 'transactions/verify_by_reference?' + urllib.parse.urlencode({'tx_ref':order['tx_ref']})
+    verified = flutterwave_request('GET',verify_path)
+    tx = verified.get('data') if isinstance(verified.get('data'),dict) else {}
+    if verified.get('status') != 'success' or str(tx.get('status','')).lower() != 'successful' or str(tx.get('tx_ref','')) != order['tx_ref'] or str(tx.get('currency','')).upper() != 'KES':
+        raise HTTPException(400,'Payment could not be verified against the MCAS order.')
     try: paid_amount = float(tx.get('amount'))
     except (TypeError,ValueError): raise HTTPException(400,'Verified payment amount is invalid.')
     if paid_amount != float(order['amount_kes']): raise HTTPException(400,'Verified payment amount does not match the MCAS order.')
-    grant_verified_order(order['id'],str(transaction_id))
+    grant_verified_order(order['id'],str(tx.get('id') or transaction_id))
     with db() as c: c.execute('INSERT OR IGNORE INTO billing_webhook_events(event_key,received_at,outcome) VALUES(?,?,?)',(event_key,now(),'fulfilled'))
     return {'status':'fulfilled'}
 
