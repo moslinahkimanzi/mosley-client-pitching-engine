@@ -11,6 +11,8 @@ PAGE_H = 842
 MARGIN = 46
 CONTENT_W = PAGE_W - 2 * MARGIN
 
+CLASS_UNVERIFIED = "unverified_observation"
+
 CLASS_LABELS = {
     "detected_defect": "DETECTED DEFECT",
     "potential_risk": "POTENTIAL RISK",
