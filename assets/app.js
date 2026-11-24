@@ -431,8 +431,17 @@ function advisorPrice(data,lead){
  }
  return item;
 }
-function kesPerUsd(){const v=Number(state.config?.kes_per_usd||130);return Number.isFinite(v)&&v>=50&&v<=300?v:130;}
-function moneyUSD(n){const value=Math.round((Number(n)/kesPerUsd())/25)*25;return '$'+value.toLocaleString('en-US',{maximumFractionDigits:0});}
+async function prepareRegionalPrice(price){
+ const p=state.preferences||{country_code:'KE',currency_code:'KES',pricing_multiplier:1};
+ const multiplier=Number(p.pricing_multiplier||regionalPriceDefaults[p.country_code]||1);
+ price.market_multiplier=multiplier;price.base_low_kes=price.low;price.base_high_kes=price.high;
+ price.low*=multiplier;price.high*=multiplier;price.display_currency=p.currency_code||'KES';price.fx_updated_at=null;price.fx_source='MCAS planning estimate';
+ const fmt=n=>new Intl.NumberFormat(p.language_code||'en',{style:'currency',currency:price.display_currency,maximumFractionDigits:0}).format(n);
+ if(price.display_currency==='KES'){price.display_low=fmt(price.low);price.display_high=fmt(price.high);return price;}
+ try{const fx=await api('/api/fx/convert?amount_kes=1&currency='+encodeURIComponent(price.display_currency));const rate=Number(fx.amount);if(!Number.isFinite(rate)||rate<=0)throw new Error('Invalid exchange rate');price.display_low=fmt(price.low*rate);price.display_high=fmt(price.high*rate);price.fx_updated_at=fx.updated_at;price.fx_source=fx.source;price.fx_rate=rate;}
+ catch(error){price.fx_error=error.message;price.display_currency='KES';const kesFmt=n=>new Intl.NumberFormat(p.language_code||'en',{style:'currency',currency:'KES',maximumFractionDigits:0}).format(n);price.display_low=kesFmt(price.low);price.display_high=kesFmt(price.high);}
+ return price;
+}
 function buildAdvisorPrompt(data,lead,price){
  const name=lead?.name||'BUSINESS NAME TO CONFIRM';
  const market=lead?.market||'Location to confirm';
@@ -487,16 +496,16 @@ function buildAdvisorPrompt(data,lead,price){
  '- A concise handover note covering how the owner edits content, connects the domain, configures hosting, forms, analytics and any third-party integrations.',
  '',
  'SCOPE AND COMMERCIAL NOTE',
- 'The MCAS estimate for the likely website category is '+price.label+': '+moneyUSD(price.low)+'–'+moneyUSD(price.high)+' USD, converted using '+kesPerUsd().toFixed(2)+' KES per USD. This is indicative planning guidance, not a formal quote. Do not display it on the public website unless the owner requests it.',
+ 'The MCAS estimate for the likely website category is '+price.label+': '+(price.display_low||price.low+' KES')+'–'+(price.display_high||price.high+' KES')+' in '+(price.display_currency||'KES')+'. The workspace pricing adjustment is '+Number(price.market_multiplier||1).toFixed(2)+'×. This is indicative planning guidance, not a formal quote or verified local market survey. Do not display it on the public website unless the owner requests it.',
  '',
  'Before building, state any essential missing information as questions or placeholders. Then create the full website. Prioritise clarity, trust, accessibility, mobile usability, maintainability and a useful customer journey.'
  ].join('\n');
 }
-function generateAdvisorPlan(){
+async function generateAdvisorPlan(){
  const lead=advisorProspect();
  if($('advisorLead').value&&!lead)return note('advisorNotice','The selected prospect could not be found. Refresh the workspace and select it again.',true);
  const data=advisorPlanData();
- const price=advisorPrice(data,lead);
+ const price=await prepareRegionalPrice(advisorPrice(data,lead));
  renderAdvisorDiagnosis(lead,advisorAuditLeadId===lead?.id?advisorLatestAudit:null);
  const pageHtml=data.pages.map((x,i)=>'<li><b>'+esc(x)+'</b><br><span class="tiny">Define the page goal, primary content, proof points and a clear next action. Keep content specific to this business and verify all claims.</span></li>').join('');
  const featuresHtml=data.features.map(x=>'<li>'+esc(x)+'</li>').join('');
@@ -507,11 +516,14 @@ function generateAdvisorPlan(){
  '<div class="item"><h3>Core website requirements</h3><ul>'+universalHtml+'</ul></div>'+
  '<div class="item"><h3>Design direction and quality standard</h3><ul>'+data.quality.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul></div>'+
  '<div class="warning"><b>Before build:</b> Confirm business facts, page content, owner access, integrations, data collected, domain, hosting, maintenance and acceptance criteria with the business. Do not publish placeholder claims or fake testimonials.</div>';
- let marketNote='Published Kenyan 2026 price guides vary substantially by scope: simple business sites commonly appear around KES 15,000–40,000; fuller company sites around KES 35,000–120,000; e-commerce commonly around KES 50,000–250,000; and custom portals around KES 120,000–500,000+. MCAS uses these as broad planning bands, not a guaranteed market price.';
- $('advisorPricingOutput').innerHTML='<div class="item"><span class="badge green">Indicative website project value · USD</span><h3>'+esc(price.label)+'</h3><div class="metric">'+moneyUSD(price.low)+' – '+moneyUSD(price.high)+'</div><p>'+esc(price.scope)+'</p><p class="tiny">Converted at '+kesPerUsd().toFixed(2)+' KES per USD. Update MCAS_KES_PER_USD on the server when the planning rate changes; excludes tax and third-party charges.</p><p class="tiny">'+esc(marketNote)+'</p></div>'+
- '<div class="item"><h3>Possible recurring costs (budget separately)</h3><p>Domain and hosting: approximately KES 3,500–15,000 per year. Optional maintenance: approximately KES 5,000–25,000 per month, depending on provider and scope.</p><p class="tiny">Indicative published guide figures; renewals, traffic, email, premium plugins, payment fees, content production and taxes may be additional.</p></div>'+
- '<div class="item"><h3>Pricing references (Kenya, 2026)</h3><p><a href="https://wfw.co.ke/blog/how-much-does-a-website-cost-in-kenya" target="_blank" rel="noopener noreferrer">Wallflower Agency — business, company and e-commerce price guide (13 September 2026)</a></p><p><a href="https://www.thabititechnologies.com/blog/website-cost-in-kenya" target="_blank" rel="noopener noreferrer">Thabiti Technologies — website types and custom system ranges (4 October 2026)</a></p><p><a href="https://digital4africa.com/website-cost-kenya/" target="_blank" rel="noopener noreferrer">Digital4Africa — website and running-cost guide (October 2026)</a></p><p><a href="https://edgecom.co.ke/website-cost-kenya" target="_blank" rel="noopener noreferrer">Edgecom — published starting prices and VAT notes (October 2026)</a></p></div>'+
- '<div class="warning"><b>Estimate only:</b> Actual value depends on the final page count, design, copywriting, integrations, e-commerce/booking workflow, data migration, hosting, support and developer experience. Confirm scope before quoting. Some published prices exclude VAT; check tax treatment and third-party charges separately.</div>';
+ const isKenya=(state.preferences?.country_code||'KE')==='KE';
+ let marketNote=isKenya?'Published Kenyan 2026 price guides vary substantially by scope. MCAS uses broad Kenya-based planning bands, not a guaranteed market price.':'No independently verified local market-price survey is built in for this country. MCAS starts from its Kenya scope bands and applies your editable regional multiplier; validate these figures with local suppliers before quoting.';
+ const fxNote=price.display_currency==='KES'?'Shown in KES base currency.':(price.fx_updated_at?'Exchange rates last updated '+price.fx_updated_at+'.':'Exchange-rate conversion was unavailable; shown in KES instead.');
+ const recurringCostNote=isKenya?'Indicative Kenya operating costs only; not applicable as a local quote elsewhere.':'MCAS does not contain a verified local hosting or maintenance survey for this country.';
+ $('advisorPricingOutput').innerHTML='<div class="item"><span class="badge green">Indicative website project value · '+esc(price.display_currency)+'</span><h3>'+esc(price.label)+'</h3><div class="metric">'+esc(price.display_low)+' – '+esc(price.display_high)+'</div><p>'+esc(price.scope)+'</p><p class="tiny">Workspace country: '+esc(countryDisplay(state.preferences?.country_code||'KE'))+' · Regional pricing adjustment: '+Number(price.market_multiplier||1).toFixed(2)+'× · '+esc(fxNote)+' Excludes tax and third-party charges.</p><p class="tiny">'+esc(marketNote)+'</p>'+(price.fx_error?'<p class="tiny">Currency conversion note: '+esc(price.fx_error)+'</p>':'')+'</div>'+
+ '<div class="item"><h3>Possible recurring costs (budget separately)</h3><p>'+esc(recurringCostNote)+'</p><p class="tiny">Check local domain, hosting, email, payment fees, content production, tax and support costs before quoting.</p></div>'+
+ (isKenya? '<div class="item"><h3>Pricing references (Kenya, 2026)</h3><p><a href="https://wfw.co.ke/blog/how-much-does-a-website-cost-in-kenya" target="_blank" rel="noopener noreferrer">Wallflower Agency — business, company and e-commerce price guide (13 September 2026)</a></p><p><a href="https://www.thabititechnologies.com/blog/website-cost-in-kenya" target="_blank" rel="noopener noreferrer">Thabiti Technologies — website types and custom system ranges (4 October 2026)</a></p><p><a href="https://digital4africa.com/website-cost-kenya/" target="_blank" rel="noopener noreferrer">Digital4Africa — website and running-cost guide (October 2026)</a></p><p><a href="https://edgecom.co.ke/website-cost-kenya" target="_blank" rel="noopener noreferrer">Edgecom — published starting prices and VAT notes (October 2026)</a></p></div>'+ '<div class="item"><h3>Local pricing validation</h3><p>Confirm local rates with at least two or three providers in the selected market. These MCAS figures are not a verified survey of local suppliers.</p></div>'+')+
+ '<div class="warning"><b>Estimate only:</b> Actual value depends on the final page count, design, copywriting, integrations, e-commerce/booking workflow, data migration, hosting, support and developer experience. Confirm scope before quoting. Check applicable local tax treatment and third-party charges.</div>';
  $('advisorPromptText').value=buildAdvisorPrompt(data,lead,price);
  $('advisorPromptPanel').classList.remove('hide');
  note('advisorNotice','Full plan, evidence-led diagnosis, USD estimate and AI-builder prompt generated. Use Copy AI-builder prompt if clipboard access is blocked.');
