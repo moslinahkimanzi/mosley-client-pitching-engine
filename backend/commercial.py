@@ -133,6 +133,7 @@ def initialize_flutterwave_checkout(*, tx_ref: str, amount: str, currency: str,
                                     payment_method: str, email: str, customer_id: str,
                                     item_type: str, item_code: str,
                                     phone_number: str | None = None,
+                                    order_id: str | None = None,
                                     redirect_url: str | None = None) -> dict[str, Any]:
     key = os.getenv("FLW_SECRET_KEY", "").strip()
     public_url = os.getenv("MCAS_PUBLIC_URL", "").strip().rstrip("/")
@@ -154,7 +155,8 @@ def initialize_flutterwave_checkout(*, tx_ref: str, amount: str, currency: str,
                      **({"phone_number": phone_number} if payment_method == "mpesa" and phone_number else {})},
         "customizations": {"title": "MCAS", "description": "MCAS " + item_type.replace("_", " ")},
         "meta": {"customer_id": customer_id, "item_type": item_type, "item_code": item_code,
-                 "base_currency": "USD", "payment_method": payment_method},
+                 "base_currency": "USD", "payment_method": payment_method,
+                 **({"mcas_order_id": order_id} if order_id else {})},
     }
     request = urllib.request.Request(
         "https://api.flutterwave.com/v3/payments",
