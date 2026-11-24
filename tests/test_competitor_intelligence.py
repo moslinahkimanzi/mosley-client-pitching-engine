@@ -77,6 +77,8 @@ class CompetitorIntelligenceTest(unittest.TestCase):
         data = response.json()
         self.assertEqual(data["comparison"]["competitors_found"], 2)
         self.assertEqual(data["comparison"]["with_listed_websites"], 1)
+        self.assertEqual(data["target"]["website_state"], "responding")
+        self.assertEqual(data["target"]["audit_summary"]["health_score"], 92)
         self.assertEqual(data["competitors"][0]["website_state"], "responding")
         self.assertEqual(data["competitors"][0]["audit_summary"]["health_score"], 92)
         self.assertEqual(data["competitors"][1]["website_state"], "not_listed")
@@ -84,7 +86,9 @@ class CompetitorIntelligenceTest(unittest.TestCase):
         search.assert_called_once()
         self.assertEqual(search.call_args.args[0], "places")
         self.assertIn("Nairobi", search.call_args.args[1]["q"])
-        site_audit.assert_called_once_with("https://cafe.example", mcas.safe_site_fetch, 3)
+        self.assertEqual(site_audit.call_count, 2)
+        self.assertEqual(site_audit.call_args_list[0].args, ("https://target.example", mcas.safe_site_fetch, 3))
+        self.assertEqual(site_audit.call_args_list[1].args, ("https://cafe.example", mcas.safe_site_fetch, 3))
 
         # Intelligence is read-only: it must not create proposals or outreach drafts.
         self.assertEqual(client.get("/api/proposals").json(), [])
