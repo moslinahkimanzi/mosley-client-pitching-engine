@@ -74,6 +74,9 @@ class ApiSecurityTest(unittest.TestCase):
                     ("verified-google-subject", user_id),
                 )
             with patch.dict(os.environ, {"MCAS_ADMIN_EMAILS": email}), patch.object(mcas, "IS_PROD", True):
+                billing_status = client.get("/api/billing/status")
+                self.assertEqual(billing_status.status_code, 200, billing_status.text)
+                self.assertTrue(billing_status.json()["is_unlimited_admin"])
                 with mcas.db() as connection:
                     self.assertTrue(mcas.user_has_unlimited_access(connection, user_id))
                 mcas.require_credits(user_id, 1000000)
