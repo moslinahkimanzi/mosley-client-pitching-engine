@@ -26,6 +26,7 @@ class AdminMfaTests(unittest.TestCase):
             "MCAS_ADMIN_EMAILS": self.email,
             "MCAS_ADMIN_BOOTSTRAP_TOKEN": self.bootstrap,
             "MCAS_ADMIN_MFA_ENCRYPTION_KEY": self.encryption_key,
+            "GOOGLE_CLIENT_ID": "test-google-client-id",
         })
         self.env.start()
         self.addCleanup(self.env.stop)
