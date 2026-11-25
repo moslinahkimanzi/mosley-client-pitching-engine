@@ -12,7 +12,7 @@ async function copyTextToClipboard(value,noticeId,successText){
 function cookie(name){const item=document.cookie.split('; ').find(x=>x.startsWith(name+'='));return item?decodeURIComponent(item.split('=').slice(1).join('=')):'';}
 async function refreshCsrf(){const r=await fetch('/api/auth/csrf',{credentials:'same-origin'});if(!r.ok)throw new Error('Unable to initialise security token');const j=await r.json();state.csrf=j.csrf_token||cookie('mcas_csrf');}
 async function api(path,opts={}){const method=(opts.method||'GET').toUpperCase();const headers={'Accept':'application/json',...(opts.headers||{})};if(opts.body!==undefined)headers['Content-Type']='application/json';if(['POST','PATCH','DELETE','PUT'].includes(method)){state.csrf=cookie('mcas_csrf')||state.csrf;headers['X-CSRF-Token']=state.csrf;}const r=await fetch(path,{...opts,method,headers,credentials:'same-origin'});const type=r.headers.get('content-type')||'';const data=type.includes('application/json')?await r.json():await r.text();if(!r.ok)throw new Error(data.detail||data.message||data||('Request failed ('+r.status+')'));return data;}
-function showAuth(){ $('app').classList.add('hide');$('auth').classList.remove('hide');initGoogleSignIn().catch(err=>note('authNotice',err.message,true));}
+function showAuth(){ $('app').classList.add('hide');$('auth').classList.remove('hide');$('adminMfaChallenge').classList.add('hide');$('googleSignInButton').classList.remove('hide');initGoogleSignIn().catch(err=>note('authNotice',err.message,true));}
 function showApp(){ $('auth').classList.add('hide');$('app').classList.remove('hide');$('signedEmail').textContent=state.user.email||'';}
 function applyTheme(theme){const chosen=theme==='system'?(window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):theme;document.body.dataset.theme=chosen==='light'?'light':'dark';}
 if(window.matchMedia){window.matchMedia('(prefers-color-scheme: light)').addEventListener('change',()=>{if(state.preferences?.theme==='system')applyTheme('system');});}
@@ -47,11 +47,33 @@ async function initGoogleSignIn(){
  const nonce=await api('/api/auth/google/nonce');
  container.innerHTML='';
  window.google.accounts.id.initialize({client_id:config.client_id,nonce:nonce.nonce,callback:async response=>{
-  try{if(!response.credential)throw new Error('Google did not return an ID token.');await refreshCsrf();const result=await api('/api/auth/google',{method:'POST',body:JSON.stringify({credential:response.credential,nonce:nonce.nonce})});state.user=result;showApp();await loadAll();}
+  try{if(!response.credential)throw new Error('Google did not return an ID token.');await refreshCsrf();const result=await api('/api/auth/google',{method:'POST',body:JSON.stringify({credential:response.credential,nonce:nonce.nonce})});
+   if(result.mfa_required){
+    $('googleSignInButton').classList.add('hide');
+    $('adminMfaChallenge').classList.remove('hide');
+    $('adminMfaLoginCode').value='';
+    $('adminMfaLoginCode').focus();
+    note('adminMfaLoginNotice','Google identity verified. Complete the administrator MFA challenge.');
+    return;
+   }
+   $('adminMfaChallenge').classList.add('hide');
+   state.user=result;showApp();await loadAll();}
   catch(err){if(state.user){toast('Signed in, but workspace initialisation needs attention: '+err.message,true);}else{note('authNotice',err.message,true);setTimeout(()=>initGoogleSignIn().catch(()=>{}),500);}}
  }});
  window.google.accounts.id.renderButton(container,{type:'standard',theme:'outline',size:'large',text:'continue_with',shape:'rectangular',logo_alignment:'left',width:340});
 }
+$('submitAdminMfaLogin').addEventListener('click',async()=>{
+ const button=$('submitAdminMfaLogin');const code=$('adminMfaLoginCode').value.trim();
+ if(!code)return note('adminMfaLoginNotice','Enter your authenticator or recovery code.',true);
+ button.disabled=true;note('adminMfaLoginNotice','Verifying administrator identity…');
+ try{
+  const result=await api('/api/auth/mfa',{method:'POST',body:JSON.stringify({code})});
+  $('adminMfaChallenge').classList.add('hide');$('googleSignInButton').classList.remove('hide');
+  state.user=result;showApp();await loadAll();
+ }catch(error){note('adminMfaLoginNotice',error.message,true);}
+ finally{button.disabled=false;}
+});
+$('adminMfaLoginCode').addEventListener('keydown',event=>{if(event.key==='Enter')$('submitAdminMfaLogin').click();});
 $('logoutBtn').addEventListener('click',async()=>{try{await api('/api/auth/logout',{method:'POST'});state.user=null;await refreshCsrf();showAuth();}catch(e){toast(e.message,true);}});
 async function boot(){try{await refreshCsrf();state.user=await api('/api/auth/me');showApp();await loadAll();}catch(e){showAuth();}}
 async function loadAll(){try{const values=await Promise.all([api('/api/leads'),api('/api/drafts'),api('/api/followups'),api('/api/proposals'),api('/api/metrics'),api('/api/integrations/gmail/status'),api('/api/billing/status'),api('/api/integrations/status'),api('/api/auth/me'),api('/api/updates'),api('/api/feedback'),api('/api/onboarding'),api('/api/workspace/preferences'),api('/api/regions'),api('/api/workspace/service-prices')]);[state.leads,state.drafts,state.followups,state.proposals,state.metrics,state.gmail,state.billing,state.config,state.user,state.updates,state.feedback,state.onboarding,state.preferences,state.regions,state.servicePrices]=values;$('settingsNavGroup').classList.toggle('hide',!state.user.is_admin);if(state.preferences.timezone==='auto'){const detected=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC';state.preferences.timezone=detected;try{state.preferences=await api('/api/workspace/preferences',{method:'PUT',body:JSON.stringify(state.preferences)});}catch{}}applyTheme(state.preferences.theme);applyLanguage(state.preferences.language_code);$('researchRegionalNote').textContent='Searching in '+countryDisplay(state.preferences.country_code)+' ('+state.preferences.country_code+') using '+state.preferences.language_code.toUpperCase()+'. Change this under My workspace.';renderAll();renderUpdates();renderMyFeedback();$('searchBadge').textContent=state.config.web_search_configured?'Connected':'Needs API key';$('searchBadge').className='badge '+(state.config.web_search_configured?'green':'amber');$('aiBadge').textContent=state.config.ai_configured?'Connected':'Optional';$('aiBadge').className='badge '+(state.config.ai_configured?'green':'amber');$('researchConfig').textContent=state.config.web_search_configured?'Configured':'Set SERPER_API_KEY in .env and restart MCAS';$('aiConfig').textContent=state.config.ai_configured?'Configured':'Set AI_API_KEY in .env and restart MCAS';$('gmailBadge').textContent=state.gmail.connected?'Connected':state.gmail.configured?'Ready to connect':'Not configured';$('gmailDetails').textContent=state.gmail.capability||'Gmail drafts only.';$('gmailConnect').disabled=!state.gmail.configured||state.gmail.connected;$('gmailDisconnect').disabled=!state.gmail.connected;$('billingStatus').textContent=state.billing.message;const returnedOrder=new URLSearchParams(location.search).get('payment_return');if(returnedOrder){try{const returned=await api('/api/billing/return?order_id='+encodeURIComponent(returnedOrder));state.billing=await api('/api/billing/status');renderBilling();note('billingNotice',returned.message);history.replaceState({},'',location.pathname);}catch(error){note('billingNotice',error.message,true);}}}catch(e){toast(e.message,true);}}
@@ -242,8 +264,49 @@ $('feedbackForm').addEventListener('submit',async e=>{
  }catch(err){note('feedbackNotice',err.message,true);}
  finally{btn.disabled=false;}
 });
+async function loadAdminMfaStatus(){
+ try{
+  const status=await api('/api/admin/mfa/status');
+  $('adminMfaStatus').textContent=status.enabled
+   ?'Authenticator MFA is enabled. '+status.unused_recovery_codes+' unused recovery code(s) remain.'
+   :(status.required?'MFA is required before administrator maintenance and unlimited access can be used.':'MFA is optional on this development server.');
+  $('adminMfaSetupFields').classList.toggle('hide',status.enabled);
+  if(status.enabled)$('adminMfaNotice').textContent='Your next administrator sign-in requires the authenticator app or an unused recovery code.';
+  return status;
+ }catch(error){note('adminMfaStatus',error.message,true);return null;}
+}
+$('beginAdminMfaSetup').addEventListener('click',async()=>{
+ const button=$('beginAdminMfaSetup');const token=$('adminMfaBootstrapToken').value.trim();
+ if(token.length<32)return note('adminMfaNotice','Enter the bootstrap token configured in the hosting secret manager. Do not send it in chat.',true);
+ button.disabled=true;note('adminMfaNotice','Preparing authenticator enrollment…');
+ try{
+  const result=await api('/api/admin/mfa/setup',{method:'POST',body:JSON.stringify({bootstrap_token:token})});
+  $('adminMfaBootstrapToken').value='';
+  $('adminMfaSetupResult').classList.remove('hide');
+  $('adminMfaSetupResult').textContent='Add this account manually in your authenticator app using this secret: '+result.secret+'\n\nSetup URI: '+result.otpauth_uri+'\n\nThis secret is displayed once. Complete verification within 10 minutes.';
+  $('verifyAdminMfaSetup').disabled=false;
+  note('adminMfaNotice','Authenticator secret generated. Add it to your authenticator app, then enter its current six-digit code.');
+ }catch(error){note('adminMfaNotice',error.message,true);}
+ finally{button.disabled=false;}
+});
+$('verifyAdminMfaSetup').addEventListener('click',async()=>{
+ const button=$('verifyAdminMfaSetup');const code=$('adminMfaEnrollCode').value.trim();
+ if(!/^\d{6}$/.test(code))return note('adminMfaNotice','Enter the six-digit authenticator code.',true);
+ button.disabled=true;note('adminMfaNotice','Verifying authenticator and creating recovery codes…');
+ try{
+  const result=await api('/api/admin/mfa/verify',{method:'POST',body:JSON.stringify({code})});
+  $('adminMfaEnrollCode').value='';$('verifyAdminMfaSetup').disabled=true;
+  $('adminMfaSetupFields').classList.add('hide');
+  $('adminMfaRecoveryCodes').classList.remove('hide');
+  $('adminMfaRecoveryCodes').textContent='SAVE THESE 10 RECOVERY CODES NOW. Each works once; they will not be shown again. Store them in a password manager or other secure offline location.\n\n'+result.recovery_codes.join('\n')+'\n\nYou have been signed out. Sign in again with Google and the authenticator app.';
+  note('adminMfaNotice',result.message);
+ }catch(error){note('adminMfaNotice',error.message,true);}
+ finally{button.disabled=false;}
+});
 async function loadAdminMaintenance(){
  if(!state.user?.is_admin){return note('adminFeedbackNotice','Administrator access is not enabled for this account.',true);}
+ const mfa=await loadAdminMfaStatus();
+ if(mfa?.required&&!mfa.enabled){return note('adminFeedbackNotice','Complete administrator MFA setup above before opening maintenance tools.',true);}
  try{state.maintenance=await api('/api/admin/maintenance');renderAdminMaintenance();await loadImprovementReviews();}
  catch(e){note('adminFeedbackNotice','Maintenance dashboard could not be loaded: '+e.message,true);}
 }
