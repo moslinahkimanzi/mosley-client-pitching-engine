@@ -1,0 +1,73 @@
+services:
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+
+  web:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    command: gunicorn backend.app:app -k uvicorn.workers.UvicornWorker --workers 4 --bind 0.0.0.0:8000 --timeout 60
+    depends_on:
+      - postgres
+      - redis
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  celery_worker:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    command: celery -A backend.workers.celery_app worker -Q billing,audits_research --concurrency=4 --loglevel=info
+    depends_on:
+      - postgres
+      - redis
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  celery_beat:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    command: celery -A backend.workers.celery_app beat --loglevel=info
+    depends_on:
+      - redis
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mcas}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-mcas}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    command: postgres -c max_connections=200 -c shared_buffers=1GB
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+
+volumes:
+  caddy_data:
+  caddy_config:
+  pg_data:
+  redis_data:
