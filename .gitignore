@@ -12,8 +12,3 @@ __pycache__/
 .env.backup*
 *.before-*
 
-# Local databases, backups and sensitive environment copies
-/data/
-/backups/
-.env.backup*
-*.before-*
