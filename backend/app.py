@@ -72,7 +72,7 @@ if IS_PROD:
         Fernet(mfa_key.encode())
     except Exception as exc:
         raise RuntimeError("MCAS_ADMIN_MFA_ENCRYPTION_KEY must be a valid Fernet key.") from exc
-APP_VERSION = os.getenv("MCAS_VERSION", "1.2.0").strip()
+APP_VERSION = os.getenv("MCAS_VERSION", "1.3.0").strip()
 if not re.fullmatch(r"\d+\.\d+\.\d+", APP_VERSION):
     raise RuntimeError("MCAS_VERSION must use semantic version format, for example 1.1.0.")
 MAX_BODY_BYTES = 1_000_000
@@ -3404,6 +3404,17 @@ def updates_status(user=Depends(current_user)):
             "Software updates are installed centrally by the MCAS operator; customers do not install server code."
         ),
         "releases": [
+            {
+                "version": "1.3.0",
+                "title": "Workspace service pricing and administrator security",
+                "summary": "Adds tenant-owned editable service pricing and production administrator authenticator MFA with one-time recovery codes.",
+                "changes": [
+                    "Administrators can edit their workspace website-service price catalogue; the Services & Pricing view reflects the saved values.",
+                    "Production administrator access requires an allowlisted Google-verified identity and authenticator MFA.",
+                    "Administrator usage is unlimited without subscriptions or credit purchases after MFA enrollment, with usage audit events.",
+                    "Production readiness controls distinguish implemented controls from infrastructure and provider actions that still require external verification."
+                ]
+            },
             {
                 "version": "1.2.0",
                 "title": "AI-assisted Product Improvement",
