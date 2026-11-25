@@ -1,7 +1,7 @@
 (()=>{'use strict';
 const $=id=>document.getElementById(id);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state={csrf:'',user:null,leads:[],drafts:[],followups:[],proposals:[],metrics:{},gmail:null,billing:null,config:{search:false,ai:false},updates:null,feedback:[],maintenance:null,improvements:[],onboarding:null,preferences:null,regions:null,servicePrices:null,authMode:'login',pendingAuditReport:null};
+const state={csrf:'',user:null,leads:[],drafts:[],followups:[],proposals:[],metrics:{},gmail:null,billing:null,config:{search:false,ai:false},updates:null,feedback:[],maintenance:null,improvements:[],onboarding:null,preferences:null,regions:null,servicePrices:null,authMode:'login',mfaChallengeType:'admin',pendingAuditReport:null};
 function toast(msg,error=false){$('toast').textContent=msg;$('toast').className='notice'+(error?' error':'');}
 function note(id,msg,error=false){$(id).textContent=msg;$(id).className='notice'+(error?' error':'');}
 async function copyTextToClipboard(value,noticeId,successText){
@@ -12,7 +12,7 @@ async function copyTextToClipboard(value,noticeId,successText){
 function cookie(name){const item=document.cookie.split('; ').find(x=>x.startsWith(name+'='));return item?decodeURIComponent(item.split('=').slice(1).join('=')):'';}
 async function refreshCsrf(){const r=await fetch('/api/auth/csrf',{credentials:'same-origin'});if(!r.ok)throw new Error('Unable to initialise security token');const j=await r.json();state.csrf=j.csrf_token||cookie('mcas_csrf');}
 async function api(path,opts={}){const method=(opts.method||'GET').toUpperCase();const headers={'Accept':'application/json',...(opts.headers||{})};if(opts.body!==undefined)headers['Content-Type']='application/json';if(['POST','PATCH','DELETE','PUT'].includes(method)){state.csrf=cookie('mcas_csrf')||state.csrf;headers['X-CSRF-Token']=state.csrf;}const r=await fetch(path,{...opts,method,headers,credentials:'same-origin'});const type=r.headers.get('content-type')||'';const data=type.includes('application/json')?await r.json():await r.text();if(!r.ok)throw new Error(data.detail||data.message||data||('Request failed ('+r.status+')'));return data;}
-function showAuth(){ $('app').classList.add('hide');$('auth').classList.remove('hide');$('adminMfaChallenge').classList.add('hide');$('googleSignInButton').classList.remove('hide');initGoogleSignIn().catch(err=>note('authNotice',err.message,true));}
+function showAuth(){ $('app').classList.add('hide');$('auth').classList.remove('hide');$('adminMfaChallenge').classList.add('hide');$('customerMfaEnrollment').classList.add('hide');$('googleSignInButton').classList.remove('hide');initGoogleSignIn().catch(err=>note('authNotice',err.message,true));}
 function showApp(){ $('auth').classList.add('hide');$('app').classList.remove('hide');$('signedEmail').textContent=state.user.email||'';}
 function applyTheme(theme){const chosen=theme==='system'?(window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):theme;document.body.dataset.theme=chosen==='light'?'light':'dark';}
 if(window.matchMedia){window.matchMedia('(prefers-color-scheme: light)').addEventListener('change',()=>{if(state.preferences?.theme==='system')applyTheme('system');});}
@@ -49,14 +49,27 @@ async function initGoogleSignIn(){
  window.google.accounts.id.initialize({client_id:config.client_id,nonce:nonce.nonce,callback:async response=>{
   try{if(!response.credential)throw new Error('Google did not return an ID token.');await refreshCsrf();const result=await api('/api/auth/google',{method:'POST',body:JSON.stringify({credential:response.credential,nonce:nonce.nonce})});
    if(result.mfa_required){
+    state.mfaChallengeType=result.mfa_type||'admin';
     $('googleSignInButton').classList.add('hide');
+    $('customerMfaEnrollment').classList.add('hide');
     $('adminMfaChallenge').classList.remove('hide');
+    $('adminMfaChallenge').querySelector('h3').textContent=state.mfaChallengeType==='customer'?'Customer workspace verification':'Administrator verification';
+    $('adminMfaChallenge').querySelector('p').textContent='Enter the six-digit authenticator code, or one of your unused recovery codes.';
     $('adminMfaLoginCode').value='';
     $('adminMfaLoginCode').focus();
-    note('adminMfaLoginNotice','Google identity verified. Complete the administrator MFA challenge.');
+    note('adminMfaLoginNotice','Google identity verified. Complete your '+state.mfaChallengeType+' MFA challenge.');
+    return;
+   }
+   if(result.customer_mfa_setup_required){
+    state.user=result;
+    $('googleSignInButton').classList.add('hide');
+    $('adminMfaChallenge').classList.add('hide');
+    $('customerMfaEnrollment').classList.remove('hide');
+    note('customerMfaStatus','A second sign-in factor is required before MCAS will open this workspace. Your records remain blocked until setup is complete.');
     return;
    }
    $('adminMfaChallenge').classList.add('hide');
+   $('customerMfaEnrollment').classList.add('hide');
    state.user=result;showApp();await loadAll();}
   catch(err){if(state.user){toast('Signed in, but workspace initialisation needs attention: '+err.message,true);}else{note('authNotice',err.message,true);setTimeout(()=>initGoogleSignIn().catch(()=>{}),500);}}
  }});
@@ -65,15 +78,47 @@ async function initGoogleSignIn(){
 $('submitAdminMfaLogin').addEventListener('click',async()=>{
  const button=$('submitAdminMfaLogin');const code=$('adminMfaLoginCode').value.trim();
  if(!code)return note('adminMfaLoginNotice','Enter your authenticator or recovery code.',true);
- button.disabled=true;note('adminMfaLoginNotice','Verifying administrator identity…');
+ button.disabled=true;note('adminMfaLoginNotice','Verifying '+state.mfaChallengeType+' identity…');
  try{
   const result=await api('/api/auth/mfa',{method:'POST',body:JSON.stringify({code})});
   $('adminMfaChallenge').classList.add('hide');$('googleSignInButton').classList.remove('hide');
+  $('customerMfaEnrollment').classList.add('hide');
   state.user=result;showApp();await loadAll();
  }catch(error){note('adminMfaLoginNotice',error.message,true);}
  finally{button.disabled=false;}
 });
 $('adminMfaLoginCode').addEventListener('keydown',event=>{if(event.key==='Enter')$('submitAdminMfaLogin').click();});
+$('beginCustomerMfaSetup').addEventListener('click',async()=>{
+ const button=$('beginCustomerMfaSetup');button.disabled=true;
+ note('customerMfaNotice','Preparing your authenticator setup…');
+ try{
+  const result=await api('/api/customer/mfa/setup',{method:'POST',body:JSON.stringify({})});
+  $('customerMfaSetupResult').classList.remove('hide');
+  $('customerMfaSetupResult').textContent='Add this account manually to an authenticator app using this secret: '+result.secret+'\n\nSetup URI: '+result.otpauth_uri+'\n\nThis secret is displayed once and expires in 10 minutes. MCAS will ask you for a current six-digit code to finish setup.';
+  $('verifyCustomerMfaSetup').disabled=false;
+  note('customerMfaNotice','Authenticator key created. Add it to your authenticator app, then enter the current six-digit code.');
+ }catch(error){note('customerMfaNotice',error.message,true);}
+ finally{button.disabled=false;}
+});
+$('verifyCustomerMfaSetup').addEventListener('click',async()=>{
+ const button=$('verifyCustomerMfaSetup');const code=$('customerMfaEnrollCode').value.trim();
+ if(!/^\d{6}$/.test(code))return note('customerMfaNotice','Enter the six-digit authenticator code.',true);
+ button.disabled=true;note('customerMfaNotice','Verifying MFA and generating recovery codes…');
+ try{
+  const result=await api('/api/customer/mfa/verify',{method:'POST',body:JSON.stringify({code})});
+  $('customerMfaEnrollCode').value='';$('verifyCustomerMfaSetup').disabled=true;$('beginCustomerMfaSetup').disabled=true;
+  $('customerMfaRecoveryCodes').classList.remove('hide');
+  $('customerMfaRecoveryCodes').textContent='SAVE THESE 10 RECOVERY CODES NOW. Each can be used once and they will not be displayed again. Store them securely in a password manager or offline.\n\n'+result.recovery_codes.join('\n');
+  $('continueAfterCustomerMfa').classList.remove('hide');
+  note('customerMfaNotice','MFA is enabled and your session was rotated. Save the recovery codes before continuing.');
+ }catch(error){note('customerMfaNotice',error.message,true);}
+ finally{button.disabled=false;}
+});
+$('continueAfterCustomerMfa').addEventListener('click',async()=>{
+ $('customerMfaEnrollment').classList.add('hide');
+ showApp();
+ await loadAll();
+});
 $('logoutBtn').addEventListener('click',async()=>{try{await api('/api/auth/logout',{method:'POST'});state.user=null;await refreshCsrf();showAuth();}catch(e){toast(e.message,true);}});
 async function boot(){try{await refreshCsrf();state.user=await api('/api/auth/me');showApp();await loadAll();}catch(e){showAuth();}}
 async function loadAll(){try{const values=await Promise.all([api('/api/leads'),api('/api/drafts'),api('/api/followups'),api('/api/proposals'),api('/api/metrics'),api('/api/integrations/gmail/status'),api('/api/billing/status'),api('/api/integrations/status'),api('/api/auth/me'),api('/api/updates'),api('/api/feedback'),api('/api/onboarding'),api('/api/workspace/preferences'),api('/api/regions'),api('/api/workspace/service-prices')]);[state.leads,state.drafts,state.followups,state.proposals,state.metrics,state.gmail,state.billing,state.config,state.user,state.updates,state.feedback,state.onboarding,state.preferences,state.regions,state.servicePrices]=values;$('settingsNavGroup').classList.toggle('hide',!state.user.is_admin);if(state.preferences.timezone==='auto'){const detected=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC';state.preferences.timezone=detected;try{state.preferences=await api('/api/workspace/preferences',{method:'PUT',body:JSON.stringify(state.preferences)});}catch{}}applyTheme(state.preferences.theme);applyLanguage(state.preferences.language_code);$('researchRegionalNote').textContent='Searching in '+countryDisplay(state.preferences.country_code)+' ('+state.preferences.country_code+') using '+state.preferences.language_code.toUpperCase()+'. Change this under My workspace.';renderAll();renderUpdates();renderMyFeedback();$('searchBadge').textContent=state.config.web_search_configured?'Connected':'Needs API key';$('searchBadge').className='badge '+(state.config.web_search_configured?'green':'amber');$('aiBadge').textContent=state.config.ai_configured?'Connected':'Optional';$('aiBadge').className='badge '+(state.config.ai_configured?'green':'amber');$('researchConfig').textContent=state.config.web_search_configured?'Configured':'Set SERPER_API_KEY in .env and restart MCAS';$('aiConfig').textContent=state.config.ai_configured?'Configured':'Set AI_API_KEY in .env and restart MCAS';$('gmailBadge').textContent=state.gmail.connected?'Connected':state.gmail.configured?'Ready to connect':'Not configured';$('gmailDetails').textContent=state.gmail.capability||'Gmail drafts only.';$('gmailConnect').disabled=!state.gmail.configured||state.gmail.connected;$('gmailDisconnect').disabled=!state.gmail.connected;$('billingStatus').textContent=state.billing.message;const returnedOrder=new URLSearchParams(location.search).get('payment_return');if(returnedOrder){try{const returned=await api('/api/billing/return?order_id='+encodeURIComponent(returnedOrder));state.billing=await api('/api/billing/status');renderBilling();note('billingNotice',returned.message);history.replaceState({},'',location.pathname);}catch(error){note('billingNotice',error.message,true);}}}catch(e){toast(e.message,true);}}
