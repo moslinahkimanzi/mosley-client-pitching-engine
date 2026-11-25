@@ -145,6 +145,20 @@ Each research result includes an explainable opportunity-priority score (0–100
 
 For business websites returned by Serper Places, the result displays limited HTTP/title/mobile viewport/meta description/H1/form observations available to MCAS. This is not a full performance, SEO, accessibility, security, or conversion audit. Search coverage depends on Serper results and the configured account quota. MCAS does not claim to crawl the entire internet.
 
+## Production customer protection
+
+Production requires `MCAS_CUSTOMER_MFA_REQUIRED=true` and a separate stable Fernet key in `MCAS_CUSTOMER_MFA_ENCRYPTION_KEY`. Generate the key with:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Store it only in the production secret manager and keep a protected recovery copy. It must be independent from the administrator MFA encryption key. Production startup fails if the customer MFA requirement or encryption key is missing.
+
+Customers sign in with Google OpenID Connect. MCAS verifies the signed ID token, nonce, audience, validity period and Google's `email_verified` claim. On the first sign-in, a customer receives a limited session that can call only the customer MFA setup/status/verification endpoints. Prospect, report, proposal, billing, integration and other workspace routes remain blocked until TOTP enrollment succeeds. Setup issues ten single-use recovery codes; the session is rotated when enrollment completes. On later sign-ins, customers must enter a current authenticator code or an unused recovery code.
+
+Customers should also enable Google's own account MFA and keep their Google recovery options current. Google remains the account identity and account-recovery provider; MCAS does not store customer Google passwords or implement password-reset emails. If customers lose both their authenticator and every recovery code, an operator-assisted identity re-verification and recovery process is required. Do not edit MFA database columns manually.
+
 ## Production administrator setup
 
 1. Configure `MCAS_ADMIN_EMAILS` with the exact Google account email that will administer MCAS. Do not use a shared mailbox.
