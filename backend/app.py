@@ -3784,7 +3784,12 @@ def billing_provider_ready() -> bool:
 @app.get('/api/billing/status')
 def billing_status(user=Depends(current_user)):
     with db() as c:
+        is_admin_account = user_is_admin(user)
         is_unlimited_admin = user_has_unlimited_access(c, user['id'])
+        admin_mfa_enrolled = bool(c.execute(
+            "SELECT admin_totp_secret FROM users WHERE id=?",
+            (user["id"],),
+        ).fetchone()["admin_totp_secret"])
         account = ensure_billing_account(c, user['id'])
         orders = c.execute(
             'SELECT id,item_type,item_code,amount_kes,currency,status,created_at,amount_usd_cents,provider_amount,provider_currency,payment_method,exchange_rate FROM billing_orders WHERE user_id=? ORDER BY created_at DESC LIMIT 10',
@@ -3803,7 +3808,10 @@ def billing_status(user=Depends(current_user)):
         'monthly_credits': int(account['monthly_credits']),
         'purchased_credits': int(account['purchased_credits']),
         'total_credits': int(account['monthly_credits']) + int(account['purchased_credits']),
+        'is_admin_account': is_admin_account,
         'is_unlimited_admin': is_unlimited_admin,
+        'admin_mfa_required': ADMIN_MFA_REQUIRED if is_admin_account else False,
+        'admin_mfa_enrolled': admin_mfa_enrolled if is_admin_account else False,
         'period_start': account['period_start'],
         'period_end': account['period_end'],
         'billing_enabled': configured,
@@ -3908,9 +3916,8 @@ def billing_credit_history(
 
 @app.post('/api/billing/checkout')
 def billing_checkout(payload: BillingCheckoutIn, user=Depends(current_user)):
-    with db() as c:
-        if user_has_unlimited_access(c, user["id"]):
-            raise HTTPException(403, "Your verified administrator account has unlimited access. Payment is not required.")
+    if user_is_admin(user):
+        raise HTTPException(403, "Administrator accounts do not purchase MCAS plans or credit packs. Complete authenticator enrollment to unlock administrator tools.")
     catalog = USD_PLANS if payload.item_type == 'subscription' else USD_CREDIT_PACKS
     product = catalog.get(payload.item_code)
     if not product:
