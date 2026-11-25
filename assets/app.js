@@ -334,7 +334,7 @@ function renderAdminMaintenance(){
  const open=Number(data.feedback_by_status?.received||0)+Number(data.feedback_by_status?.reviewing||0);
  $('adminFeedbackOpen').textContent=open;$('adminCurrentVersion').textContent='v'+data.current_version;
  $('maintenanceControls').innerHTML=(data.maintenance_controls||[]).map(control=>{
-  const statusLabel={configured:'Configured',not_implemented:'Not implemented',external_action:'External action required',manual:'Manual approval'}[control.status]||control.status;
+  const statusLabel={configured:'Configured',not_configured:'Not configured',not_implemented:'Not implemented',external_action:'External action required',manual:'Manual verification / approval'}[control.status]||control.status;
   const badge=control.status==='configured'?'green':control.status==='not_implemented'?'red':'amber';
   return '<div class="item"><div class="itemtop"><strong>'+esc(control.name)+'</strong><span class="badge '+badge+'">'+esc(statusLabel)+'</span></div><p>'+esc(control.detail)+'</p></div>';
  }).join('');
