@@ -149,7 +149,7 @@ def generate_totp_secret() -> str:
 
 
 def totp_counter_for_code(secret: str, code: str, timestamp: Optional[float] = None):
-    if not re.fullmatch(r"\\d{6}", str(code or "")):
+    if not re.fullmatch(r"\d{6}", str(code or "")):
         return None
     moment = time.time() if timestamp is None else timestamp
     key = base64.b32decode(secret + "=" * ((8 - len(secret) % 8) % 8), casefold=True)
