@@ -44,6 +44,20 @@ Add your Serper key to `.env` as `SERPER_API_KEY=...` (never paste it into brows
 - Follow-up task tracking, audit events, metrics and JSON workspace export.
 - Security headers, Trusted Host validation, basic per-process rate limiting, request-size cap, Docker health check, CI tests and dependency audit workflow.
 
+## Evidence-backed prospect research and business verification
+
+The research run uses Serper Places for local business discovery. If the first query returns no local entities, MCAS retries with a simpler category-and-location Places query. It does **not** turn ordinary organic web links into business records.
+
+Every newly discovered record starts as **Unverified**. MCAS stores the provider listing's name, address, category, phone (when supplied), website URL (when supplied), source link, and a limited website response check. Missing fields remain missing; MCAS must not invent email addresses, phone numbers, addresses, official domains or legal identity.
+
+In Prospects, **Recheck business identity** performs a fresh Places lookup and an independent web search. It only marks the record as provider-reconfirmed when the business name matches, the saved phone or address also matches, and at least one non-Google public web result matches the business name and selected market. The evidence panel displays the listing and independent source URLs/snippets. This is corroboration, not an authoritative business-register check or proof that a person controls the phone/email/domain.
+
+A user must review the evidence and select **I reviewed this listing — confirm business** before the record becomes **Verified**. The confirmation action records the human decision, updates the displayed address/phone from the matched public listing, and may check a website candidate only when its domain also appears among the independent sources. A successful HTTP response verifies reachability only, not website ownership or complete functionality.
+
+Proposals and pending outreach drafts are created only after this human confirmation. Drafts remain approval-only; MCAS does not send messages. A failed or ambiguous match remains unverified and can be manually investigated. Recheck before outreach because public listings and contact details can change.
+
+No search provider guarantees complete or fully up-to-date contact details. Legal registration, contact ownership and consent to contact still require appropriate independent confirmation.
+
 ## Workspace regional preferences
 
 Each authenticated workspace has independent regional preferences saved in the server database:

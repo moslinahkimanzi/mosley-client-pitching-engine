@@ -202,6 +202,11 @@ def init_db():
         add_column(c, "leads", "website_status", "TEXT NOT NULL DEFAULT 'not_checked'")
         add_column(c, "leads", "website_verified_at", "TEXT")
         add_column(c, "leads", "website_audit_json", "TEXT NOT NULL DEFAULT '{}'")
+        add_column(c, "leads", "business_address", "TEXT")
+        add_column(c, "leads", "business_verification_status", "TEXT NOT NULL DEFAULT 'unverified'")
+        add_column(c, "leads", "business_verification_json", "TEXT NOT NULL DEFAULT '{}'")
+        add_column(c, "leads", "business_verified_at", "TEXT")
+        c.execute("UPDATE leads SET status='Unverified',business_verification_status='unverified',business_verified_at=NULL WHERE status='Verified' AND business_verification_status!='human_confirmed'")
         add_column(c, "users", "google_subject", "TEXT")
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_subject ON users(google_subject) WHERE google_subject IS NOT NULL")
         add_column(c, "leads", "contact_phone", "TEXT")
@@ -448,6 +453,7 @@ class LeadIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     website: Optional[str] = Field(default=None, max_length=2048)
     market: str = Field(default="Kenya", max_length=100)
+    business_address: Optional[str] = Field(default=None, max_length=300)
     evidence: str = Field(default="", max_length=5000)
     status: Literal["Unverified", "Verified", "Contacted", "Replied", "Interested", "Negotiating", "Won", "Lost"] = "Unverified"
     contact_email: Optional[str] = Field(default=None, max_length=254)
@@ -672,16 +678,19 @@ def list_leads(user=Depends(current_user)):
 
 @app.post("/api/leads", status_code=201)
 def add_lead(payload: LeadIn, user=Depends(current_user)):
+    if payload.status == "Verified":
+        raise HTTPException(409, "A prospect cannot be created as verified. Run the business recheck and explicitly confirm its evidence first.")
     lid = secrets.token_urlsafe(15)
     stamp = now()
     validate_email(payload.contact_email)
     with db() as c:
         initial_website_status = "not_checked" if payload.website else "not_listed"
         c.execute("""INSERT INTO leads(id,user_id,name,website,market,evidence,status,score,created_at,updated_at,
-            contact_email,contact_phone,source_url,do_not_contact,website_status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            contact_email,contact_phone,source_url,do_not_contact,website_status,business_address)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (lid, user["id"], payload.name.strip(), payload.website, payload.market, payload.evidence,
              payload.status, 0, stamp, stamp, payload.contact_email, payload.contact_phone, payload.source_url,
-             int(payload.do_not_contact), initial_website_status))
+             int(payload.do_not_contact), initial_website_status, payload.business_address))
         audit(c, user["id"], "lead.created", {"lead_id": lid})
     return {"id": lid, "name": payload.name, "status": payload.status}
 
@@ -690,18 +699,36 @@ def update_lead(lead_id: str, payload: LeadIn, user=Depends(current_user)):
     validate_email(payload.contact_email)
     with db() as c:
         current = owned_lead(c, lead_id, user["id"])
+        if payload.status == "Verified" and current["status"] != "Verified":
+            raise HTTPException(409, "Business verification cannot be bypassed. Recheck the public listing and confirm the source evidence in Prospects.")
         changed_website = (current["website"] or "").strip() != (payload.website or "").strip()
-        next_status = ("not_checked" if payload.website else "not_listed") if changed_website else current["website_status"]
-        cur = c.execute("""UPDATE leads SET name=?,website=?,market=?,evidence=?,status=?,contact_email=?,
+        identity_changed = any([
+            (current["name"] or "").strip().casefold() != payload.name.strip().casefold(),
+            (current["market"] or "").strip().casefold() != payload.market.strip().casefold(),
+            (current["business_address"] or "").strip().casefold() != (payload.business_address or "").strip().casefold(),
+            (current["contact_phone"] or "").strip() != (payload.contact_phone or "").strip(),
+            (current["contact_email"] or "").strip().casefold() != (payload.contact_email or "").strip().casefold(),
+        ])
+        next_website_status = ("not_checked" if payload.website else "not_listed") if changed_website else current["website_status"]
+        next_business_status = "unverified" if identity_changed else current["business_verification_status"]
+        next_lead_status = "Unverified" if identity_changed else payload.status
+        cur = c.execute("""UPDATE leads SET name=?,website=?,market=?,business_address=?,evidence=?,status=?,contact_email=?,
             contact_phone=?,source_url=?,do_not_contact=?,website_status=?,website_verified_at=?,website_audit_json=?,
+            business_verification_status=?,business_verification_json=?,business_verified_at=?,
             updated_at=? WHERE id=? AND user_id=?""",
-            (payload.name.strip(), payload.website, payload.market, payload.evidence, payload.status,
+            (payload.name.strip(), payload.website, payload.market, payload.business_address, payload.evidence, next_lead_status,
              payload.contact_email, payload.contact_phone, payload.source_url, int(payload.do_not_contact),
-             next_status, None if changed_website else current["website_verified_at"],
-             "{}" if changed_website else current["website_audit_json"], now(), lead_id, user["id"]))
+             next_website_status, None if changed_website else current["website_verified_at"],
+             "{}" if changed_website else current["website_audit_json"], next_business_status,
+             "{}" if identity_changed else current["business_verification_json"],
+             None if identity_changed else current["business_verified_at"],
+             now(), lead_id, user["id"]))
         if not cur.rowcount:
             raise HTTPException(404, "Prospect not found")
-        audit(c, user["id"], "lead.updated", {"lead_id": lead_id, "website_changed": changed_website})
+        audit(c, user["id"], "lead.updated", {
+            "lead_id": lead_id, "website_changed": changed_website,
+            "identity_changed": identity_changed,
+        })
     return {"ok": True}
 
 @app.delete("/api/leads/{lead_id}")
@@ -900,7 +927,7 @@ def safe_site_fetch(initial_url):
                         "has_lang": None, "images_total": None, "images_missing_alt": None,
                         "forms_total": None, "form_controls_total": None,
                         "form_controls_without_label": None, "mixed_content_references": None,
-                        "canonical_url": None, "links": [],
+                        "canonical_url": None, "links": [], "public_emails": [], "public_phones": [],
                         "note": "Response is not HTML; page structure and metadata were not analysed."}
             body = res.read(512001)
             conn.close()
@@ -927,6 +954,17 @@ def safe_site_fetch(initial_url):
                     unlabelled += 1
             links = re.findall(r"""<a\b[^>]+href\s*=\s*["']([^"'#]+)["']""", document, re.I)
             links = [x.strip() for x in links if x.strip()][:120]
+            public_emails = sorted({
+                value.strip().lower()
+                for value in re.findall(r"""(?i)href\s*=\s*["']mailto:([^"'?]+)""", document)
+                if re.fullmatch(r"[^\s@]+@[^\s@]+\.[A-Za-z]{2,}", value.strip())
+                and not any(flag in value.lower() for flag in ("noreply", "no-reply", "example.com"))
+            })[:10]
+            public_phones = sorted({
+                re.sub(r"[^+0-9]", "", value)
+                for value in re.findall(r"""(?i)href\s*=\s*["']tel:([^"']+)""", document)
+                if len(re.sub(r"\D", "", value)) >= 7
+            })[:10]
             mixed = re.findall(r"""(?:src|href)\s*=\s*["']http://[^"']+["']""", document, re.I)
             canonical_match = re.search(
                 r"""<link\b(?=[^>]*rel\s*=\s*["']canonical["'])[^>]*href\s*=\s*["']([^"']+)""",
@@ -939,8 +977,9 @@ def safe_site_fetch(initial_url):
                     "form_controls_total": len(controls), "form_controls_without_label": unlabelled,
                     "mixed_content_references": len(mixed),
                     "canonical_url": urllib.parse.urljoin(url, canonical_match.group(1)) if canonical_match else None,
-                    "links": links,
-                    "note": "Lightweight HTML and response-header analysis only; not a penetration test or JavaScript/browser audit."}
+                    "links": links, "public_emails": public_emails,
+                    "public_phones": public_phones,
+                    "note": "Lightweight HTML and response-header analysis only; public mailto/tel links are extracted from fetched HTML only. Not a penetration test or JavaScript/browser audit."}
         except HTTPException:
             conn.close()
             raise
@@ -1275,20 +1314,25 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
         request_payload = {"q": query, "gl": country_code, "hl": language_code}
         data = serper_request("places", request_payload)
         places = data.get("places") or []
-        # When Places has no records, use Serper's ordinary web results as a fallback.
-        # These are saved as unverified source links, never assumed to be official websites.
+        # A second, simpler Places query helps when a long keyword phrase returns no map entities.
+        # Organic web links are never converted into business records: they do not establish a local business identity.
         if not places:
-            web_data = serper_request("search", {"q": query, "num": min(10, payload.max_results),
-                                                     "gl": country_code, "hl": language_code})
-            places = [{
-                "title": item.get("title"),
-                "link": item.get("link"),
-                "description": item.get("snippet"),
-                "_source_type": "web",
-            } for item in web_data.get("organic", [])
-              if isinstance(item, dict) and isinstance(item.get("title"), str)
-              and isinstance(item.get("link"), str)
-              and item.get("link", "").startswith(("https://", "http://"))]
+            fallback_terms = {
+                "any": "businesses",
+                "restaurant": "restaurants",
+                "salon": "salons",
+                "retail": "shops",
+                "professional": "professional services",
+                "hotel": "hotels",
+                "healthcare": "clinics",
+                "education": "schools",
+            }
+            fallback_query = fallback_terms.get(payload.industry, "businesses") + " near " + location
+            if fallback_query.casefold() != query.casefold():
+                fallback_data = serper_request("places", {
+                    "q": fallback_query, "gl": country_code, "hl": language_code,
+                })
+                places = fallback_data.get("places") or []
         _SERPER_CACHE[cache_key] = (time.time(), places)
 
     discovered = []
@@ -1316,6 +1360,32 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
                 website = "https://" + website
             try:
                 website_audit = safe_site_fetch(website)
+                contact_emails = list(website_audit.get("public_emails") or [])
+                contact_phones = list(website_audit.get("public_phones") or [])
+                contact_sources = []
+                root_host = urllib.parse.urlparse(website_audit.get("url") or website).hostname
+                contact_links = []
+                for href in website_audit.get("links") or []:
+                    candidate_url = urllib.parse.urljoin(website_audit.get("url") or website, href)
+                    candidate_parts = urllib.parse.urlparse(candidate_url)
+                    if (candidate_parts.scheme == "https" and candidate_parts.hostname == root_host
+                        and re.search(r"(contact|about|location|reach-us|support)", candidate_parts.path, re.I)
+                        and candidate_url not in contact_links):
+                        contact_links.append(candidate_url)
+                contact_pages_to_check = contact_links[:1] if (not contact_emails or not contact_phones) else []
+                for contact_url in contact_pages_to_check:
+                    try:
+                        contact_page = safe_site_fetch(contact_url)
+                        contact_emails.extend(contact_page.get("public_emails") or [])
+                        contact_phones.extend(contact_page.get("public_phones") or [])
+                        if contact_page.get("public_emails") or contact_page.get("public_phones"):
+                            contact_sources.append(contact_page.get("url") or contact_url)
+                    except HTTPException:
+                        continue
+                website_audit["public_emails"] = sorted(set(contact_emails))[:10]
+                website_audit["public_phones"] = sorted(set(contact_phones))[:10]
+                website_audit["contact_sources"] = contact_sources
+                website_audit["contact_pages_checked"] = len(contact_pages_to_check)
                 status = int(website_audit.get("http_status") or 0)
                 if status in {404, 410} or status >= 500:
                     website_state = "broken"
@@ -1332,9 +1402,13 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             except HTTPException:
                 website_state = "needs_review"
 
-        phone_value = place.get("phoneNumber") or place.get("phone")
+        phone_value = place.get("phoneNumber") or place.get("phone") or (
+            (website_audit.get("public_phones") or [None])[0] if website_audit else None
+        )
         phone = str(phone_value).strip() if phone_value else None
-        email_value = place.get("email")
+        email_value = place.get("email") or (
+            (website_audit.get("public_emails") or [None])[0] if website_audit else None
+        )
         email = str(email_value).strip() if email_value and re.fullmatch(
             r"[^\s@]+@[^\s@]+\.[^\s@]+", str(email_value).strip()
         ) else None
@@ -1355,7 +1429,15 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
         if address:
             facts.append("Public listing address: " + address + ".")
         if phone:
-            facts.append("Public listing phone: " + phone + ".")
+            facts.append("Public business phone: " + phone + ".")
+            if website_audit.get("public_phones"):
+                facts.append("Telephone link was published on the business website or its same-domain contact page.")
+        if email:
+            facts.append("Public business email: " + email + ".")
+            if website_audit.get("public_emails"):
+                facts.append("Email link was published on the business website or its same-domain contact page.")
+        for contact_source in website_audit.get("contact_sources", []):
+            facts.append("Contact detail source page: " + contact_source + ".")
         if place.get("rating") is not None:
             facts.append("Provider-listed rating: " + str(place.get("rating")) +
                          ((" from " + str(place.get("ratingCount")) + " reviews") if place.get("ratingCount") is not None else "") + ".")
@@ -1411,59 +1493,20 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             )
             c.execute(
                 """INSERT INTO leads(id,user_id,name,website,market,evidence,status,score,created_at,updated_at,
-                   contact_email,contact_phone,source_url,do_not_contact,website_status,website_verified_at,website_audit_json)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?)""",
+                   contact_email,contact_phone,source_url,do_not_contact,website_status,website_verified_at,website_audit_json,
+                   business_address,business_verification_status,business_verification_json,business_verified_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?)""",
                 (lead_id, user["id"], name, website, location, evidence, "Unverified", score, stamp, stamp,
                  email, phone, source_url, website_verification,
                  stamp if website_verification == "verified" else None,
-                 json.dumps({k: v for k, v in website_audit.items() if k != "links"})[:30000]),
+                 json.dumps({k: v for k, v in website_audit.items() if k != "links"})[:30000],
+                 address or None, "unverified", "{}", None),
             )
-            title = "Website opportunity plan — " + name
-            proposal = (
-                "WEBSITE OPPORTUNITY PLAN\n\nBusiness: " + name + "\nLocation: " + location +
-                "\nDiscovery source: Serper Places / Google Maps result (" + source_url + ")\n\n"
-                "1. DISCOVERY OBSERVATIONS (VERIFY WITH BUSINESS)\n" + evidence + "\n\n"
-                "2. RECOMMENDED DIRECTION\n" + strategy["type"] + "\n\n"
-                "3. SUGGESTED PAGES\n- " + "\n- ".join(strategy["pages"]) + "\n\n"
-                "4. SUGGESTED FEATURES\n- " + "\n- ".join(strategy["features"]) + "\n\n"
-                "5. IMPLEMENTATION ROADMAP\n- " + "\n- ".join(strategy["roadmap"]) + "\n\n"
-                "6. SCOPE TO CONFIRM WITH THE CLIENT\nContent, brand assets, domain, hosting, budget, delivery timeline, "
-                "maintenance, integrations and who will update the site.\n\n"
-                "7. COMMERCIALS\nPrice and dates to be agreed after discovery. Do not invent a quote or promise results.\n\n"
-                "IMPORTANT: Search listings can be incomplete or out of date. A missing website URL is not proof that "
-                "the business has no website. Verify the business identity and all observations before sharing this proposal."
-            )
-            proposal_id = secrets.token_urlsafe(15)
-            c.execute("INSERT INTO proposals VALUES(?,?,?,?,?,?,?,?)",
-                      (proposal_id, user["id"], lead_id, title, proposal, "draft", stamp, stamp))
-            subject, body = make_outreach_copy(
-                name, location, website_state, website_audit, strategy, email
-            )
-            draft_id = secrets.token_urlsafe(15)
-            c.execute(
-                """INSERT INTO drafts(id,user_id,lead_id,kind,subject,body,state,created_at,to_email)
-                   VALUES(?,?,?,?,?,?,?,?,?)""",
-                (draft_id, user["id"], lead_id, "Cold email", subject, body, "pending_approval", stamp, email),
-            )
-            audit(c, user["id"], "research.prospect_prepared", {
+            audit(c, user["id"], "research.prospect_discovered", {
                 "lead_id": lead_id, "website_state": website_state,
-                "draft_id": draft_id, "proposal_id": proposal_id, "provider": "Serper",
+                "business_verification_status": "unverified", "provider": "Serper",
             })
             saved_count += 1
-
-        gmail_draft_created = False
-        gmail_draft_error = None
-        if email:
-            with db() as c:
-                gmail_connected = bool(c.execute(
-                    "SELECT 1 FROM integrations WHERE user_id=? AND provider='gmail'", (user["id"],)
-                ).fetchone())
-            if gmail_connected:
-                try:
-                    create_gmail_draft_for_user(draft_id, user["id"])
-                    gmail_draft_created = True
-                except HTTPException as exc:
-                    gmail_draft_error = str(exc.detail)
 
         discovered.append({
             "name": name, "lead_id": lead_id, "duplicate": False,
@@ -1471,8 +1514,9 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             "source_url": source_url, "contact_email": email, "contact_phone": phone,
             "recommendation": strategy["type"], "pages": strategy["pages"],
             "opportunity_score": score, "score_reasons": score_reasons,
-            "website_audit": website_audit, "draft_created": True, "proposal_created": True,
-            "gmail_draft_created": gmail_draft_created, "gmail_draft_error": gmail_draft_error,
+            "website_audit": website_audit, "business_address": address,
+            "business_category": category, "business_verification_status": "unverified",
+            "draft_created": False, "proposal_created": False, "gmail_draft_created": False,
             "rating": place.get("rating"), "rating_count": place.get("ratingCount"),
         })
 
@@ -1498,7 +1542,8 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
         },
         "saved": saved_count, "source": "Serper Places",
         "attribution": "Business discovery powered by Serper Places.",
-        "warning": "Serper results can be incomplete or out of date. Verify business identity, website, address and contact details before marking a prospect verified or contacting them. MCAS only creates drafts; it never sends email.",
+        "workflow": "Discovered prospects remain unverified until a fresh public listing is matched and a human reviews it. Proposals and outreach drafts are withheld until confirmation.",
+        "warning": "Search listings can be incomplete or out of date. No provider guarantees complete or current business contact details. Website reachability does not prove business ownership. MCAS does not send email.",
     }
 
 
@@ -1573,6 +1618,242 @@ def store_website_audit(c, lead_id: str, uid: str, result: dict) -> str:
                stamp if website_status == "verified" else None,
                json.dumps(safe_result)[:30000], stamp, lead_id, uid))
     return website_status
+
+
+def _identity_tokens(value: str) -> set[str]:
+    words = re.findall(r"[a-z0-9]+", (value or "").casefold())
+    stop = {"the", "and", "of", "in", "at", "limited", "ltd", "llc", "inc", "company", "co"}
+    return {word for word in words if len(word) > 1 and word not in stop}
+
+
+def _identity_overlap(left: str, right: str) -> float:
+    a, b = _identity_tokens(left), _identity_tokens(right)
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def _phone_digits(value: str) -> str:
+    return re.sub(r"\\D", "", value or "")
+
+
+@app.post("/api/leads/{lead_id}/verify-business")
+def verify_lead_business(lead_id: str, user=Depends(current_user)):
+    """Recheck the saved identity against a fresh regional business listing; never silently assert legal identity."""
+    with db() as c:
+        lead = owned_lead(c, lead_id, user["id"])
+    if not lead["name"] or not lead["market"]:
+        raise HTTPException(422, "The prospect needs a business name and location before it can be rechecked.")
+    preferences = workspace_preferences_for(user["id"])
+    query = '"' + lead["name"] + '" ' + lead["market"]
+    data = serper_request("places", {
+        "q": query, "gl": preferences["country_code"].lower(),
+        "hl": preferences["language_code"],
+    })
+    candidates = data.get("places") if isinstance(data.get("places"), list) else []
+    web_data = serper_request("search", {
+        "q": '"' + lead["name"] + '" "' + lead["market"] + '" official website contact',
+        "num": 8, "gl": preferences["country_code"].lower(),
+        "hl": preferences["language_code"],
+    })
+    organic = web_data.get("organic") if isinstance(web_data.get("organic"), list) else []
+    independent_sources = []
+    market_tokens = _identity_tokens(lead["market"])
+    for result in organic:
+        if not isinstance(result, dict):
+            continue
+        title = str(result.get("title") or "")[:200]
+        snippet = str(result.get("snippet") or "")[:600]
+        link = result.get("link")
+        combined = title + " " + snippet
+        name_match = _identity_overlap(lead["name"], title) >= 0.45
+        market_match = bool(market_tokens & _identity_tokens(combined))
+        host = urllib.parse.urlparse(link).hostname if isinstance(link, str) else None
+        if name_match and market_match and host and not host.lower().endswith("google.com"):
+            independent_sources.append({
+                "title": title, "url": link, "domain": host.lower(),
+                "snippet": snippet,
+            })
+        if len(independent_sources) >= 5:
+            break
+    saved_phone = _phone_digits(lead["contact_phone"] or "")
+    saved_address = lead["business_address"] or ""
+    best = None
+    best_score = 0.0
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        candidate_name = str(item.get("title") or item.get("name") or "").strip()
+        candidate_address = str(item.get("address") or "").strip()
+        candidate_phone = str(item.get("phoneNumber") or item.get("phone") or "").strip()
+        name_score = _identity_overlap(lead["name"], candidate_name)
+        address_score = _identity_overlap(saved_address, candidate_address) if saved_address else 0.0
+        candidate_digits = _phone_digits(candidate_phone)
+        phone_match = bool(saved_phone and candidate_digits and
+                           (saved_phone.endswith(candidate_digits[-8:]) or candidate_digits.endswith(saved_phone[-8:])))
+        exact_name = bool(_identity_tokens(lead["name"]) and
+                          _identity_tokens(lead["name"]) <= _identity_tokens(candidate_name))
+        address_match = bool(saved_address and candidate_address and address_score >= 0.35)
+        corroborated = (exact_name or name_score >= 0.75) and (
+            phone_match or address_match
+        ) and bool(independent_sources)
+        score = name_score + (0.5 if phone_match else 0.0) + (0.35 * address_score)
+        if score > best_score:
+            best, best_score = (item, corroborated), score
+    checked_at = now()
+    matched = bool(best and best[1])
+    listing = best[0] if best else {}
+    if matched and not (listing.get("website") or listing.get("websiteUrl")):
+        name_tokens = _identity_tokens(lead["name"])
+        for source in independent_sources:
+            domain_tokens = _identity_tokens(str(source.get("domain") or "").split(".")[0].replace("-", " "))
+            if name_tokens and len(name_tokens & domain_tokens) >= 1:
+                listing["website"] = source["url"]
+                listing["website_candidate_note"] = "Candidate domain discovered in an independent public result; confirm it belongs to the business before use."
+                break
+    verification = {
+        "provider": "Serper Places",
+        "checked_at": checked_at,
+        "query": query,
+        "status": "provider_reconfirmed" if matched else "needs_manual_review",
+        "checks": {
+            "business_name_match": bool(matched),
+            "address_match": bool(matched and saved_address and
+                                  _identity_overlap(saved_address, str(listing.get("address") or "")) >= 0.35),
+            "phone_match": bool(matched and saved_phone and
+                                _phone_digits(str(listing.get("phoneNumber") or listing.get("phone") or "")).endswith(saved_phone[-8:])),
+            "independent_web_source": bool(matched and independent_sources),
+        },
+        "independent_sources": independent_sources,
+        "listing": {
+            "name": str(listing.get("title") or listing.get("name") or "")[:160],
+            "address": str(listing.get("address") or "")[:300],
+            "phone": str(listing.get("phoneNumber") or listing.get("phone") or "")[:60],
+            "website": str(listing.get("website") or listing.get("websiteUrl") or "")[:500],
+            "source_url": serper_source_url(listing, lead["name"], saved_address),
+        } if matched else {},
+        "limitation": "A fresh listing match is provider corroboration, not legal-entity verification or proof that a phone number/email is controlled by the business. A human must inspect the cited listing before confirming.",
+    }
+    with db() as c:
+        c.execute(
+            """UPDATE leads SET business_verification_status=?,business_verification_json=?,
+               business_verified_at=NULL,updated_at=? WHERE id=? AND user_id=?""",
+            ("provider_reconfirmed" if matched else "needs_manual_review",
+             json.dumps(verification)[:12000], checked_at, lead_id, user["id"]),
+        )
+        audit(c, user["id"], "lead.business_rechecked", {
+            "lead_id": lead_id, "status": verification["status"],
+        })
+    return verification
+
+
+@app.post("/api/leads/{lead_id}/confirm-business")
+def confirm_lead_business(lead_id: str, user=Depends(current_user)):
+    """Record an explicit human confirmation after reviewing fresh provider evidence."""
+    with db() as c:
+        lead = owned_lead(c, lead_id, user["id"])
+        if lead["business_verification_status"] != "provider_reconfirmed":
+            raise HTTPException(409, "A fresh matching public listing is required before human confirmation.")
+        try:
+            verification = json.loads(lead["business_verification_json"] or "{}")
+        except (TypeError, ValueError):
+            verification = {}
+        checked_at = verification.get("checked_at")
+        checked_epoch = 0
+        try:
+            checked_epoch = int(datetime.fromisoformat(checked_at.replace("Z", "+00:00")).timestamp())
+        except Exception:
+            try:
+                checked_epoch = int(time.mktime(time.strptime(checked_at, "%Y-%m-%dT%H:%M:%S")))
+            except Exception:
+                pass
+        if not checked_epoch or time.time() - checked_epoch > 7 * 24 * 60 * 60:
+            raise HTTPException(409, "The listing check is older than seven days. Recheck it before confirming.")
+        stamp = now()
+        listing = verification.get("listing") or {}
+        confirmed_address = str(listing.get("address") or lead["business_address"] or "")[:300] or None
+        confirmed_phone = str(listing.get("phone") or lead["contact_phone"] or "")[:60] or None
+        confirmed_website = lead["website"]
+        confirmed_website_audit = None
+        candidate_website = listing.get("website")
+        independent_domains = {
+            str(item.get("domain") or "").lower()
+            for item in verification.get("independent_sources", [])
+            if isinstance(item, dict)
+        }
+        candidate_host = urllib.parse.urlparse(candidate_website).hostname if isinstance(candidate_website, str) else None
+        if candidate_website and candidate_host and candidate_host.lower() in independent_domains:
+            try:
+                confirmed_website_audit = safe_site_fetch(candidate_website)
+                if classify_website_status(confirmed_website_audit) == "verified":
+                    confirmed_website = confirmed_website_audit.get("url") or candidate_website
+            except HTTPException:
+                confirmed_website_audit = None
+        if confirmed_website_audit:
+            store_website_audit(c, lead_id, user["id"], confirmed_website_audit)
+        c.execute(
+            """UPDATE leads SET status='Verified',business_verification_status='human_confirmed',
+               business_verified_at=?,business_address=?,contact_phone=?,website=?,updated_at=?
+               WHERE id=? AND user_id=?""",
+            (stamp, confirmed_address, confirmed_phone, confirmed_website, stamp, lead_id, user["id"]),
+        )
+        if confirmed_website_audit:
+            website_audit = confirmed_website_audit
+            website_state = (
+                "needs_improvement" if (
+                    website_audit.get("has_viewport_meta") is False
+                    or website_audit.get("has_meta_description") is False
+                    or website_audit.get("title") is None
+                ) else "working"
+            )
+        else:
+            try:
+                website_audit = json.loads(lead["website_audit_json"] or "{}")
+            except (TypeError, ValueError):
+                website_audit = {}
+            website_state = (
+                "not_listed" if not confirmed_website else
+                "broken" if lead["website_status"] == "broken" else
+                "needs_improvement" if lead["website_status"] == "needs_improvement" else
+                "working" if lead["website_status"] == "verified" else "needs_review"
+            )
+        strategy = business_strategy({})
+        subject, body = make_outreach_copy(
+            lead["name"], lead["market"] or "the selected market",
+            website_state, website_audit, strategy, lead["contact_email"],
+        )
+        proposal_id = secrets.token_urlsafe(15)
+        draft_id = secrets.token_urlsafe(15)
+        proposal = (
+            "VERIFIED-PROSPECT OPPORTUNITY PLAN\\n\\n"
+            + "Business: " + lead["name"] + "\\n"
+            + "Market: " + (lead["market"] or "Not specified") + "\\n"
+            + "Address: " + (lead["business_address"] or "Not independently confirmed") + "\\n"
+            + "Public source: " + str(verification.get("listing", {}).get("source_url") or lead["source_url"] or "Not available") + "\\n\\n"
+            + "Verification: a fresh public listing matched the prospect and a human user confirmed the displayed listing. "
+            + "This does not establish legal registration or ownership of contact details.\\n\\n"
+            + "Website opportunity: " + website_state + ". A missing website link is not proof that no website exists.\\n\\n"
+            + "Recommended direction: " + strategy["type"] + "\\n"
+            + "Suggested pages: " + ", ".join(strategy["pages"]) + "\\n"
+            + "Confirm scope, content, budget, timeline and contact permissions directly with the business before quoting."
+        )
+        c.execute(
+            "INSERT INTO proposals VALUES(?,?,?,?,?,?,?,?)",
+            (proposal_id, user["id"], lead_id, "Website opportunity plan — " + lead["name"],
+             proposal, "draft", stamp, stamp),
+        )
+        c.execute(
+            """INSERT INTO drafts(id,user_id,lead_id,kind,subject,body,state,created_at,to_email)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            (draft_id, user["id"], lead_id, "Cold email", subject, body,
+             "pending_approval", stamp, lead["contact_email"]),
+        )
+        audit(c, user["id"], "lead.business_human_confirmed", {
+            "lead_id": lead_id, "proposal_id": proposal_id, "draft_id": draft_id,
+        })
+    return {"status": "Verified", "business_verification_status": "human_confirmed",
+            "business_verified_at": stamp, "proposal_created": True, "draft_created": True,
+            "message": "You confirmed the business after reviewing the fresh public listing. A proposal and pending email draft were created for review. This is not legal-entity or contact-ownership verification."}
 
 
 @app.post("/api/leads/{lead_id}/verify-website")
