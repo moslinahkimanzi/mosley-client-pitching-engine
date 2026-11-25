@@ -83,17 +83,17 @@ function billingMethodAvailable(method){
 }
 function renderBilling(){
  const data=state.billing;if(!data)return;
- $('billingPlan').textContent=data.is_unlimited_admin?'Administrator · Unlimited':(data.plan==='free'?'Free':((data.plans?.[data.plan]?.name)||data.plan||'Free'));
- $('billingMonthlyCredits').textContent=data.is_unlimited_admin?'∞':Number(data.monthly_credits||0).toLocaleString();
- $('billingPurchasedCredits').textContent=data.is_unlimited_admin?'∞':Number(data.purchased_credits||0).toLocaleString();
- $('billingTotalCredits').textContent=data.is_unlimited_admin?'Unlimited':Number(data.total_credits||0).toLocaleString();
- $('billingPeriod').textContent=data.is_unlimited_admin?'Verified administrator access · usage audited':(data.plan==='free'?(data.period_end?'Free allowance refreshes '+new Date(data.period_end).toLocaleDateString():'Free plan'):(data.period_end?'Paid through '+new Date(data.period_end).toLocaleDateString():'Paid plan period not active'));
+ $('billingPlan').textContent=data.is_admin_account?(data.is_unlimited_admin?'Administrator · Unlimited':'Administrator · MFA setup required'):(data.plan==='free'?'Free':((data.plans?.[data.plan]?.name)||data.plan||'Free'));
+ $('billingMonthlyCredits').textContent=data.is_unlimited_admin?'∞':(data.is_admin_account?'—':Number(data.monthly_credits||0).toLocaleString());
+ $('billingPurchasedCredits').textContent=data.is_unlimited_admin?'∞':(data.is_admin_account?'—':Number(data.purchased_credits||0).toLocaleString());
+ $('billingTotalCredits').textContent=data.is_unlimited_admin?'Unlimited':(data.is_admin_account?'Setup required':Number(data.total_credits||0).toLocaleString());
+ $('billingPeriod').textContent=data.is_unlimited_admin?'Verified administrator access · usage audited':(data.is_admin_account?'No payment required · complete MFA setup for admin tools':(data.plan==='free'?(data.period_end?'Free allowance refreshes '+new Date(data.period_end).toLocaleDateString():'Free plan'):(data.period_end?'Paid through '+new Date(data.period_end).toLocaleDateString():'Paid plan period not active')));
  const method='mpesa';
  if($('billingMethod'))$('billingMethod').value='mpesa';
  const methodAvailable=billingMethodAvailable(method);
- if(data.is_unlimited_admin){
-  $('billingPlanCards').innerHTML='<article class="card"><h3>Administrator access</h3><div class="metric">Unlimited</div><p class="muted">Your verified administrator account is exempt from subscriptions and prepaid credit purchases. Usage is recorded for audit purposes.</p></article>';
-  $('billingCreditCards').innerHTML='<div class="good">No payment is required for your administrator account.</div>';
+ if(data.is_admin_account){
+  $('billingPlanCards').innerHTML='<article class="card"><h3>Administrator access</h3><div class="metric">'+(data.is_unlimited_admin?'Unlimited':'MFA setup required')+'</div><p class="muted">'+(data.is_unlimited_admin?'Your verified Google administrator identity and authenticator MFA are active. You do not need a subscription or prepaid credits; usage is audited.':'No payment is required for an administrator account. Enrol your authenticator in Administrator maintenance before using privileged tools.')+'</p></article>';
+  $('billingCreditCards').innerHTML='<div class="good">Administrator accounts never need to buy MCAS subscriptions or credit packs.</div>';
  }
  const price=plan=>{
   const cents=Number(plan.amount_usd_cents||0);
@@ -101,7 +101,7 @@ function renderBilling(){
   const rate=Number(data.mpesa_quote?.usd_kes_rate);
   return method==='mpesa'&&Number.isFinite(rate)&&rate>0?usd+' · approx. KES '+Math.round((cents/100)*rate).toLocaleString():usd;
  };
- if(!data.is_unlimited_admin){
+ if(!data.is_admin_account){
   $('billingPlanCards').innerHTML=Object.entries(data.plans||{}).map(([code,plan])=>'<article class="card"><h3>'+esc(plan.name)+'</h3><div class="metric">'+price(plan)+'/30 days</div><p>'+Number(plan.credits||0).toLocaleString()+' included credits</p><button class="primary" data-billing-type="subscription" data-billing-code="'+esc(code)+'" '+(!methodAvailable?'disabled':'')+'>Choose '+esc(plan.name)+'</button></article>').join('');
   $('billingCreditCards').innerHTML=Object.entries(data.credit_packs||{}).map(([code,pack])=>'<article class="card"><h3>'+esc(pack.name)+'</h3><div class="metric">'+price(pack)+'</div><p>'+Number(pack.credits||0).toLocaleString()+' prepaid credits</p><button data-billing-type="credits" data-billing-code="'+esc(code)+'" '+(!methodAvailable?'disabled':'')+'>Buy credits</button></article>').join('');
  }
