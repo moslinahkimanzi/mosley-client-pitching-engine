@@ -1,5 +1,11 @@
 name: MCAS scheduled security maintenance
 on:
+  push:
+    branches:
+      - recovery/mcas-complete-product
+  pull_request:
+    branches:
+      - recovery/mcas-complete-product
   schedule:
     - cron: "41 4 * * 1"
   workflow_dispatch:
@@ -25,6 +31,8 @@ jobs:
       - name: Compile Python
         run: python -m compileall -q backend tests
       - name: Run regression tests
+        env:
+          MCAS_DATABASE_PATH: ${{ runner.temp }}/mcas-test.db
         run: python -m unittest discover -s tests -v
       - name: Check frontend JavaScript syntax
         run: node --check assets/app.js

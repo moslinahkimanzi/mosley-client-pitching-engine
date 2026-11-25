@@ -1,7 +1,7 @@
 (()=>{'use strict';
 const $=id=>document.getElementById(id);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state={csrf:'',user:null,leads:[],drafts:[],followups:[],proposals:[],metrics:{},gmail:null,billing:null,config:{search:false,ai:false},updates:null,feedback:[],maintenance:null,improvements:[],onboarding:null,preferences:null,regions:null,authMode:'login'};
+const state={csrf:'',user:null,leads:[],drafts:[],followups:[],proposals:[],metrics:{},gmail:null,billing:null,config:{search:false,ai:false},updates:null,feedback:[],maintenance:null,improvements:[],onboarding:null,preferences:null,regions:null,authMode:'login',pendingAuditReport:null};
 function toast(msg,error=false){$('toast').textContent=msg;$('toast').className='notice'+(error?' error':'');}
 function note(id,msg,error=false){$(id).textContent=msg;$(id).className='notice'+(error?' error':'');}
 async function copyTextToClipboard(value,noticeId,successText){
@@ -36,7 +36,7 @@ const navTranslations={
  ar:{nav_overview:'نظرة عامة',nav_prospects:'العملاء المحتملون',nav_research:'البحث',nav_advisor:'مستشار المواقع',nav_email:'استوديو البريد',nav_replies:'مساعد الردود',nav_proposals:'العروض',nav_followups:'المتابعات',nav_updates:'التحديثات والملاحظات',nav_gmail:'مسودات Gmail'}
 };
 function applyLanguage(code){const dict={...(navTranslations[code]||navTranslations.en),...(pageTranslations[code]||pageTranslations.en),...(translations[code]||translations.en)};document.documentElement.lang=code;document.documentElement.dir=code==='ar'?'rtl':'ltr';document.querySelectorAll('[data-i18n]').forEach(el=>{const key=el.dataset.i18n;if(dict[key])el.textContent=dict[key];});}
-function page(name){const adminPages=new Set(['integrations','security','admin-maintenance']);if(adminPages.has(name)&&!state.user?.is_admin){toast('Settings are available to administrators only.',true);name='overview';}document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id===name));document.querySelectorAll('[data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===name));if(name==='prospects')renderLeads();if(name==='studio')renderDrafts();if(name==='followups')renderFollowups();if(name==='proposals')renderProposals();if(name==='updates'){loadUpdates();loadMyFeedback();}if(name==='admin-maintenance')loadAdminMaintenance();if(name==='workspace-settings')renderWorkspaceSettings();if(name==='billing')renderBilling();}
+function page(name){const adminPages=new Set(['integrations','security','admin-maintenance']);if(adminPages.has(name)&&!state.user?.is_admin){toast('Settings are available to administrators only.',true);name='overview';}document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id===name));document.querySelectorAll('[data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===name));if(name==='prospects')renderLeads();if(name==='studio')renderDrafts();if(name==='followups')renderFollowups();if(name==='proposals')renderProposals();if(name==='updates'){loadUpdates();loadMyFeedback();}if(name==='admin-maintenance')loadAdminMaintenance();if(name==='workspace-settings')renderWorkspaceSettings();if(name==='billing'){renderBilling();loadCreditHistory(0,false);}}
 document.querySelectorAll('[data-page]').forEach(b=>b.addEventListener('click',()=>page(b.dataset.page)));
 document.querySelectorAll('[data-go]').forEach(b=>b.addEventListener('click',()=>page(b.dataset.go)));
 async function initGoogleSignIn(){
@@ -55,22 +55,41 @@ async function initGoogleSignIn(){
 $('logoutBtn').addEventListener('click',async()=>{try{await api('/api/auth/logout',{method:'POST'});state.user=null;await refreshCsrf();showAuth();}catch(e){toast(e.message,true);}});
 async function boot(){try{await refreshCsrf();state.user=await api('/api/auth/me');showApp();await loadAll();}catch(e){showAuth();}}
 async function loadAll(){try{const values=await Promise.all([api('/api/leads'),api('/api/drafts'),api('/api/followups'),api('/api/proposals'),api('/api/metrics'),api('/api/integrations/gmail/status'),api('/api/billing/status'),api('/api/integrations/status'),api('/api/auth/me'),api('/api/updates'),api('/api/feedback'),api('/api/onboarding'),api('/api/workspace/preferences'),api('/api/regions')]);[state.leads,state.drafts,state.followups,state.proposals,state.metrics,state.gmail,state.billing,state.config,state.user,state.updates,state.feedback,state.onboarding,state.preferences,state.regions]=values;$('settingsNavGroup').classList.toggle('hide',!state.user.is_admin);if(state.preferences.timezone==='auto'){const detected=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC';state.preferences.timezone=detected;try{state.preferences=await api('/api/workspace/preferences',{method:'PUT',body:JSON.stringify(state.preferences)});}catch{}}applyTheme(state.preferences.theme);applyLanguage(state.preferences.language_code);$('researchRegionalNote').textContent='Searching in '+countryDisplay(state.preferences.country_code)+' ('+state.preferences.country_code+') using '+state.preferences.language_code.toUpperCase()+'. Change this under My workspace.';renderAll();renderUpdates();renderMyFeedback();$('searchBadge').textContent=state.config.web_search_configured?'Connected':'Needs API key';$('searchBadge').className='badge '+(state.config.web_search_configured?'green':'amber');$('aiBadge').textContent=state.config.ai_configured?'Connected':'Optional';$('aiBadge').className='badge '+(state.config.ai_configured?'green':'amber');$('researchConfig').textContent=state.config.web_search_configured?'Configured':'Set SERPER_API_KEY in .env and restart MCAS';$('aiConfig').textContent=state.config.ai_configured?'Configured':'Set AI_API_KEY in .env and restart MCAS';$('gmailBadge').textContent=state.gmail.connected?'Connected':state.gmail.configured?'Ready to connect':'Not configured';$('gmailDetails').textContent=state.gmail.capability||'Gmail drafts only.';$('gmailConnect').disabled=!state.gmail.configured||state.gmail.connected;$('gmailDisconnect').disabled=!state.gmail.connected;$('billingStatus').textContent=state.billing.message;const returnedOrder=new URLSearchParams(location.search).get('payment_return');if(returnedOrder){try{const returned=await api('/api/billing/return?order_id='+encodeURIComponent(returnedOrder));state.billing=await api('/api/billing/status');renderBilling();note('billingNotice',returned.message);history.replaceState({},'',location.pathname);}catch(error){note('billingNotice',error.message,true);}}}catch(e){toast(e.message,true);}}
+function billingMethodAvailable(method){
+ const data=state.billing;
+ return !!(data?.billing_enabled && data?.payment_methods?.[method]?.available);
+}
 function renderBilling(){
  const data=state.billing;if(!data)return;
- $('billingPlan').textContent=(data.plans?.[data.plan]?.name)||data.plan||'Free';
- $('billingMonthlyCredits').textContent=Number(data.monthly_credits||0).toLocaleString();
- $('billingPurchasedCredits').textContent=Number(data.purchased_credits||0).toLocaleString();
- $('billingTotalCredits').textContent=Number(data.total_credits||0).toLocaleString();
+ $('billingPlan').textContent=data.plan==='free'?'Free':((data.plans?.[data.plan]?.name)||data.plan||'Free');
+ $('billingMonthlyCredits').textContent=data.is_unlimited_admin?'Unlimited':Number(data.monthly_credits||0).toLocaleString();
+ $('billingPurchasedCredits').textContent=data.is_unlimited_admin?'Unlimited':Number(data.purchased_credits||0).toLocaleString();
+ $('billingTotalCredits').textContent=data.is_unlimited_admin?'Unlimited':Number(data.total_credits||0).toLocaleString();
  $('billingPeriod').textContent=data.plan==='free'?(data.period_end?'Free allowance refreshes '+new Date(data.period_end).toLocaleDateString():'Free plan'):(data.period_end?'Paid through '+new Date(data.period_end).toLocaleDateString():'Paid plan period not active');
- $('billingPlanCards').innerHTML=Object.entries(data.plans||{}).filter(([code])=>code!=='free').map(([code,plan])=>'<article class="card"><h3>'+esc(plan.name)+'</h3><div class="metric">KES '+Number(plan.amount_kes).toLocaleString()+'/mo</div><p>'+Number(plan.monthly_credits).toLocaleString()+' monthly credits · '+Number(plan.seats)+' seat(s)</p><button class="primary" data-billing-type="subscription" data-billing-code="'+esc(code)+'" '+(!data.billing_enabled?'disabled':'')+'>Choose '+esc(plan.name)+'</button></article>').join('');
- $('billingCreditCards').innerHTML=Object.entries(data.credit_packs||{}).map(([code,pack])=>'<article class="card"><h3>'+esc(pack.name)+'</h3><div class="metric">KES '+Number(pack.amount_kes).toLocaleString()+'</div><p>'+Number(pack.credits).toLocaleString()+' prepaid credits</p><button data-billing-type="credits" data-billing-code="'+esc(code)+'" '+(!data.billing_enabled?'disabled':'')+'>Buy credits</button></article>').join('');
- $('billingOrders').innerHTML=(data.recent_orders||[]).map(order=>'<div class="item"><div class="itemtop"><strong>'+esc(order.item_type)+' · '+esc(order.item_code)+'</strong><span class="badge '+(order.status==='paid'?'green':'amber')+'">'+esc(order.status)+'</span></div><p>KES '+Number(order.amount_kes).toLocaleString()+' · '+esc(order.created_at)+'</p></div>').join('')||'<div class="empty">No payment orders yet.</div>';
- if($('billingStatus'))$('billingStatus').textContent=data.message;
- const unavailable=!data.billing_enabled;
- document.querySelectorAll('[data-billing-type]').forEach(button=>{button.disabled=unavailable;});
+ const method='mpesa';
+ if($('billingMethod'))$('billingMethod').value='mpesa';
+ const methodAvailable=billingMethodAvailable(method);
+ const price=plan=>{
+  const cents=Number(plan.amount_usd_cents||0);
+  const usd='USD '+(cents/100).toFixed(2);
+  const rate=Number(data.mpesa_quote?.usd_kes_rate);
+  return method==='mpesa'&&Number.isFinite(rate)&&rate>0?usd+' · approx. KES '+Math.round((cents/100)*rate).toLocaleString():usd;
+ };
+ $('billingPlanCards').innerHTML=Object.entries(data.plans||{}).map(([code,plan])=>'<article class="card"><h3>'+esc(plan.name)+'</h3><div class="metric">'+price(plan)+'/30 days</div><p>'+Number(plan.credits||0).toLocaleString()+' included credits</p><button class="primary" data-billing-type="subscription" data-billing-code="'+esc(code)+'" '+(!methodAvailable?'disabled':'')+'>Choose '+esc(plan.name)+'</button></article>').join('');
+ $('billingCreditCards').innerHTML=Object.entries(data.credit_packs||{}).map(([code,pack])=>'<article class="card"><h3>'+esc(pack.name)+'</h3><div class="metric">'+price(pack)+'</div><p>'+Number(pack.credits||0).toLocaleString()+' prepaid credits</p><button data-billing-type="credits" data-billing-code="'+esc(code)+'" '+(!methodAvailable?'disabled':'')+'>Buy credits</button></article>').join('');
+ $('billingOrders').innerHTML=(data.recent_orders||[]).map(order=>{
+  const amount=order.amount_usd_cents!==null&&order.amount_usd_cents!==undefined?'USD '+(Number(order.amount_usd_cents)/100).toFixed(2)+' base · '+esc(order.provider_currency||order.currency||'USD')+' '+esc(order.provider_amount||''):'KES '+Number(order.amount_kes||0).toLocaleString();
+  return '<div class="item"><div class="itemtop"><strong>'+esc(order.item_type)+' · '+esc(order.item_code)+'</strong><span class="badge '+(order.status==='paid'?'green':'amber')+'">'+esc(order.status)+'</span></div><p>'+amount+' · '+esc(order.created_at)+'</p></div>';
+ }).join('')||'<div class="empty">No payment orders yet.</div>';
+ const quote=data.mpesa_quote;
+ const quoteText=quote?'M-Pesa reference rate: 1 USD = '+esc(quote.usd_kes_rate)+' KES (dated '+esc(quote.rate_date)+').':'M-Pesa is unavailable until a current, dated USD/KES rate is configured.';
+ const noteText=quoteText+' M-Pesa is the only payment method enabled for this launch. The final KES amount is confirmed at checkout.';
+ if($('billingPriceNote'))$('billingPriceNote').textContent=noteText;
+ if($('billingStatus'))$('billingStatus').textContent=(data.message||'')+' '+quoteText;
+ document.querySelectorAll('[data-billing-type]').forEach(button=>{button.disabled=!methodAvailable;});
 }
 async function startBillingCheckout(type,code){
- const method=$('billingMethod').value,phone=$('billingPhone').value.trim();
+ const method='mpesa',phone=$('billingPhone').value.trim();
  if(method==='mpesa'&&!phone){note('billingNotice','Enter the M-Pesa phone number, including country code.',true);return;}
  const buttons=[...document.querySelectorAll('[data-billing-type]')];buttons.forEach(button=>button.disabled=true);
  try{
@@ -82,11 +101,56 @@ async function startBillingCheckout(type,code){
 $('billingPlanCards').addEventListener('click',event=>{const button=event.target.closest('[data-billing-type]');if(button)startBillingCheckout(button.dataset.billingType,button.dataset.billingCode);});
 $('billingCreditCards').addEventListener('click',event=>{const button=event.target.closest('[data-billing-type]');if(button)startBillingCheckout(button.dataset.billingType,button.dataset.billingCode);});
 
+
+let creditHistoryOffset=0;
+let creditHistoryHasMore=false;
+function signedCredits(value){
+ const n=Number(value||0);
+ return (n>0?'+':'')+n.toLocaleString();
+}
+function creditHistoryDate(value){
+ const d=new Date(value);
+ return Number.isNaN(d.getTime())?String(value||''):d.toLocaleString();
+}
+async function loadCreditHistory(offset=0,append=false){
+ const box=$('creditHistory');
+ if(!box)return;
+ if(!append)box.innerHTML='<div class="empty">Loading credit history…</div>';
+ $('creditHistoryMore').disabled=true;
+ try{
+  const data=await api('/api/billing/credit-history?limit=20&offset='+offset);
+  $('creditMonthlyUsed').textContent=Number(data.monthly_used_this_period||0).toLocaleString();
+  $('creditPurchasedUsed').textContent=Number(data.purchased_used_this_period||0).toLocaleString();
+  $('creditTotalUsed').textContent=Number(data.total_used_this_period||0).toLocaleString();
+  const rows=(data.items||[]).map(item=>{
+   const delta=Number(item.total_delta||0);
+   const badge=delta<0?'amber':delta>0?'green':'';
+   const sign=delta>0?'+':'';
+   const detail='Monthly '+signedCredits(item.monthly_delta)+' · Purchased '+signedCredits(item.purchased_delta);
+   const reference=item.reference?'<p class="tiny">Reference: '+esc(item.reference)+'</p>':'';
+   return '<div class="item"><div class="itemtop"><strong>'+esc(item.description)+'</strong><span class="badge '+badge+'">'+sign+delta.toLocaleString()+' credits</span></div><p>'+esc(detail)+' · '+esc(creditHistoryDate(item.created_at))+'</p>'+reference+'</div>';
+  }).join('');
+  if(append)box.insertAdjacentHTML('beforeend',rows);
+  else box.innerHTML=rows||'<div class="empty">No credit activity has been recorded yet.</div>';
+  creditHistoryOffset=offset+(data.items||[]).length;
+  creditHistoryHasMore=!!data.has_more;
+  $('creditHistoryMore').classList.toggle('hide',!creditHistoryHasMore);
+  $('creditHistoryMore').disabled=false;
+ }catch(error){
+  if(!append)box.innerHTML='<div class="empty">Credit history could not be loaded.</div>';
+  note('creditHistoryNotice',error.message,true);
+  $('creditHistoryMore').disabled=false;
+ }
+}
+$('creditHistoryMore').addEventListener('click',()=>loadCreditHistory(creditHistoryOffset,true));
+
 async function refreshBillingStatus(){
  try{state.billing=await api('/api/billing/status');renderBilling();note('billingNotice','Billing status refreshed. A checkout redirect alone does not confirm payment.');}
  catch(error){note('billingNotice',error.message,true);}
 }
 $('refreshBillingBtn').addEventListener('click',refreshBillingStatus);
+$('billingMethod').value='mpesa';
+$('billingMethod').addEventListener('change',()=>{ $('billingMethod').value='mpesa';renderBilling(); });
 
 function renderAll(){renderMetrics();renderLeads();renderDrafts();renderFollowups();renderProposals();renderSelects();renderUpdates();renderMyFeedback();renderOnboarding();renderBilling();}
 const regionalPriceDefaults={KE:1,US:2.4,CA:2.1,GB:2.15,AU:2.1,NZ:1.85,DE:2,FR:1.95,IE:2,NL:2,CH:2.5,SG:1.9,AE:1.85,ZA:1.25,NG:0.9,GH:0.85,IN:0.8,PK:0.7,PH:0.85,BR:1.1,MX:1.05,JP:2,KR:1.8};
@@ -267,7 +331,7 @@ function renderLeads(){
  renderSelects();
 }
 function safeLink(raw){try{const u=new URL(raw,location.origin);return ['http:','https:'].includes(u.protocol)?esc(u.href):'#';}catch{return '#';}}
-function renderDrafts(){$('draftList').innerHTML=state.drafts.map(d=>{const gmailAction=d.gmail_draft_id?'<span class="badge green">IN GMAIL DRAFTS</span>':(state.gmail?.connected&&d.to_email?'<button class="primary" data-gmail="'+esc(d.id)+'">Create Gmail draft</button>':'');return '<div class="item"><div class="itemtop"><strong>'+esc(d.subject)+'</strong><span class="badge amber">PENDING APPROVAL</span></div><p>'+esc(d.kind)+' · '+esc(d.to_email||'No recipient')+' · '+esc(d.created_at||'')+'</p><p>'+esc(d.body.slice(0,260))+(d.body.length>260?'…':'')+'</p><div class="itemactions">'+gmailAction+'<button data-copy-draft="'+esc(d.id)+'">Copy email</button><button class="danger" data-delete-draft="'+esc(d.id)+'">Delete</button></div></div>';}).join('')||'<div class="empty">No drafts saved yet.</div>';}
+function renderDrafts(){$('draftList').innerHTML=state.drafts.map(d=>{const gmailAction=d.gmail_draft_id?'<span class="badge green">IN GMAIL DRAFTS</span>':(state.gmail?.connected&&d.to_email?'<button class="primary" data-gmail="'+esc(d.id)+'">Create Gmail draft</button>':'');const reportBadge=d.audit_report_id?'<span class="badge green">AUDIT PDF ATTACHED</span>':'';return '<div class="item"><div class="itemtop"><strong>'+esc(d.subject)+'</strong><span class="badge amber">PENDING APPROVAL</span></div><p>'+esc(d.kind)+' · '+esc(d.to_email||'No recipient')+' · '+esc(d.created_at||'')+'</p>'+(reportBadge?'<p>'+reportBadge+' <span class="tiny">PDF will be attached when you create the Gmail draft.</span></p>':'')+'<p>'+esc(d.body.slice(0,260))+(d.body.length>260?'…':'')+'</p><div class="itemactions">'+gmailAction+'<button data-copy-draft="'+esc(d.id)+'">Copy email</button><button class="danger" data-delete-draft="'+esc(d.id)+'">Delete</button></div></div>';}).join('')||'<div class="empty">No drafts saved yet.</div>';}
 function formatWorkspaceDate(value){if(!value)return 'No due date';try{return new Intl.DateTimeFormat(state.preferences?.language_code||'en',{dateStyle:'medium',timeStyle:'short',timeZone:state.preferences?.timezone||localTimezone()}).format(new Date(value));}catch{return value;}}
 function zonedDateTimeToIso(value,zone){if(!value)return null;const parts=value.split('T');if(parts.length!==2)return null;const [y,m,d]=parts[0].split('-').map(Number),[hh,mm]=parts[1].split(':').map(Number);if(![y,m,d,hh,mm].every(Number.isFinite))return null;const desired=Date.UTC(y,m-1,d,hh,mm);let guess=desired;for(let i=0;i<4;i++){const p=new Intl.DateTimeFormat('en-CA',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date(guess));const v={};p.forEach(x=>{v[x.type]=x.value;});const observed=Date.UTC(Number(v.year),Number(v.month)-1,Number(v.day),Number(v.hour),Number(v.minute));guess+=desired-observed;}return new Date(guess).toISOString();}
 function renderFollowups(){$('followList').innerHTML=state.followups.map(f=>'<div class="item"><div class="itemtop"><strong>'+esc(f.title)+'</strong><span class="badge">'+esc(f.state)+'</span></div><p>'+esc(f.lead_name)+' · '+esc(formatWorkspaceDate(f.due_at))+'</p><p>'+esc(f.notes)+'</p>'+(f.state==='open'?'<div class="itemactions"><button data-follow-done="'+esc(f.id)+'">Mark complete</button></div>':'')+'</div>').join('')||'<div class="empty">No follow-up tasks yet.</div>';const noteEl=$('followTimezoneNote');if(noteEl)noteEl.textContent='Times are interpreted and displayed in '+(state.preferences?.timezone||localTimezone())+'.';}
@@ -316,9 +380,12 @@ $('researchResults').addEventListener('click',async e=>{const b=e.target.closest
 function renderAuditResult(host,data){const findings=(data.findings||[]).map(f=>'<div class="item"><div class="itemtop"><strong>'+esc(f.title)+'</strong><span class="badge '+(f.severity==='high'?'red':f.severity==='medium'?'amber':'')+'">'+esc(f.severity)+'</span></div><p>'+esc(f.description)+'</p><p><b>Fix:</b> '+esc(f.recommendation)+'</p><p class="tiny">'+esc(f.url||'')+(f.evidence?' · '+esc(f.evidence):'')+'</p></div>').join('');host.innerHTML='<div class="item"><div class="itemtop"><strong>Audit summary</strong><span class="badge green">'+esc(data.pages_checked)+' page(s) checked</span></div><div class="metric">Health score '+esc(data.summary?.health_score??'—')+'/100</div><p>'+esc(data.summary?.high||0)+' high · '+esc(data.summary?.medium||0)+' medium · '+esc(data.summary?.low||0)+' low findings</p><p class="tiny">Checked '+esc(data.checked_at||'')+' · '+esc(data.elapsed_ms||0)+' ms · bounded public audit</p></div>'+findings+'<div class="warning">'+esc(data.scope_note||'This is not a penetration test or certification.')+'</div>';}
 
 function renderAdvancedAuditResult(host,data){
- const findings=(data.findings||[]).map(f=>'<div class="item"><div class="itemtop"><strong>'+esc(f.title)+'</strong><span class="badge '+(f.severity==='high'?'red':f.severity==='medium'?'amber':'')+'">'+esc(f.severity)+'</span></div><p>'+esc(f.description)+'</p><p><b>Suggested review:</b> '+esc(f.recommendation)+'</p><p class="tiny">'+esc(f.url||'')+(f.evidence?' · '+esc(f.evidence):'')+'</p></div>').join('');
- const s=data.summary||{};
- host.innerHTML='<div class="item"><div class="itemtop"><strong>Audit summary</strong><span class="badge green">'+esc(data.pages_checked||0)+' page(s) checked</span></div><div class="metric">Health score '+esc(s.health_score??'—')+'/100</div><p>'+esc(s.high||0)+' high · '+esc(s.medium||0)+' medium · '+esc(s.low||0)+' low · '+esc(s.info||0)+' informational</p><p class="tiny">Checked '+esc(data.checked_at||'')+' · '+esc(data.elapsed_ms||0)+' ms</p></div>'+(findings||'<div class="empty">No findings were detected by this bounded check.</div>')+'<div class="warning">'+esc(data.scope_note||'This is not a penetration test or certification.')+'</div>';
+ const s=data.summary||{},labels={detected_defect:'Detected defects',potential_risk:'Potential risks',recommendation:'Recommendations',unverified_observation:'Unverified observations'};
+ const order=['detected_defect','potential_risk','recommendation','unverified_observation'];
+ const groups=order.map(kind=>{const items=(data.findings||[]).filter(f=>f.classification===kind);if(!items.length)return '';const cards=items.map(f=>{const pages=(f.affected_pages||[f.url].filter(Boolean)).map(u=>'<li><a href="'+safeLink(u)+'" target="_blank" rel="noopener noreferrer">'+esc(u)+'</a></li>').join('');const evidence=(f.evidence_by_page||[]).map(e=>'<li>'+esc(e.url||'')+(e.detail?' — '+esc(e.detail):'')+'</li>').join('');return '<div class="item"><div class="itemtop"><strong>'+esc(f.title)+'</strong><span class="badge '+(f.severity==='high'?'red':f.severity==='medium'?'amber':'')+'">'+esc(f.severity||'info')+' · '+esc(f.code||'')+'</span></div><p>'+esc(f.description||'')+'</p><p><b>Recommended action:</b> '+esc(f.recommendation||'Review with the website owner.')+'</p><p class="tiny">'+esc(f.page_count??(f.affected_pages||[]).length)+' affected page(s)</p>'+(pages?'<details><summary>Affected pages</summary><ul>'+pages+'</ul></details>':'')+(evidence?'<details><summary>Evidence per page</summary><ul>'+evidence+'</ul></details>':'')+'</div>';}).join('');return '<h3>'+esc(labels[kind])+' ('+items.length+')</h3>'+cards;}).join('');
+ const recs=(data.recommendations||[]).map(r=>'<div class="item"><div class="itemtop"><strong>'+esc(r.title)+'</strong><span class="badge">'+esc(r.priority||'review')+'</span></div><p>'+esc(r.description||'')+'</p><ul>'+(r.recommended_scope||[]).map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul><p class="tiny">'+esc(r.basis||'Suggested opportunity based on this audit.')+'</p></div>').join('');
+ const canDownload=!!data.report_id;
+ host.innerHTML='<div class="item"><div class="itemtop"><strong>Audit summary</strong><span class="badge green">'+esc(data.pages_checked||0)+' page(s) checked</span></div><div class="metric">Health score '+esc(s.health_score??'—')+'/100</div><p>'+esc(s.detected_defects??0)+' detected defects · '+esc(s.potential_risks??0)+' potential risks · '+esc(s.unverified_observations??0)+' unverified observations</p><p>'+esc(s.high||0)+' high · '+esc(s.medium||0)+' medium · '+esc(s.low||0)+' low · '+esc(s.info||0)+' informational</p><p class="tiny">'+esc(s.unique_findings??s.total??0)+' unique findings · '+esc(s.page_occurrences??0)+' page occurrences. Duplicate issue codes are counted once in the health score.</p><p class="tiny">Checked '+esc(data.checked_at||'')+' · '+esc(data.elapsed_ms||0)+' ms</p>'+(canDownload?'<div class="actions"><button class="primary" data-audit-download="'+esc(data.report_id)+'">Download client PDF</button><button data-attach-audit="'+esc(data.report_id)+'" data-audit-lead="'+esc(data.lead_id||'')+'">Attach PDF to an email draft</button></div>':'<p class="tiny">This result has no saved report identifier, so it cannot be downloaded or attached.</p>')+'</div>'+(groups||'<div class="empty">No findings were detected by this bounded check.</div>')+'<h3>Website improvement opportunities</h3>'+(recs||'<div class="empty">No mapped improvement recommendations were generated.</div>')+'<div class="warning">'+esc(data.score_disclaimer||'The score is a prioritisation indicator, not a security certification.')+' '+esc(data.scope_note||'This is not a penetration test or certification.')+'</div>';
 }
 $('advancedAuditLead').addEventListener('change',()=>{
  const lead=selectedLead($('advancedAuditLead').value);
@@ -335,6 +402,18 @@ $('runAdvancedAudit').addEventListener('click',async()=>{
   if(leadId)await loadAll();
  }catch(e){$('advancedAuditResult').innerHTML='<div class="warning">'+esc(e.message)+'</div>';note('advancedAuditNotice',e.message,true);}
  finally{btn.disabled=false;}
+});
+$('advancedAuditResult').addEventListener('click',async e=>{
+ const download=e.target.closest('[data-audit-download]'),attach=e.target.closest('[data-attach-audit]'),remove=e.target.closest('[data-remove-audit-report]');
+ if(download){const id=download.dataset.auditDownload;download.disabled=true;try{const response=await fetch('/api/audit-reports/'+encodeURIComponent(id)+'/pdf',{credentials:'same-origin',headers:{'Accept':'application/pdf'}});if(!response.ok){const type=response.headers.get('content-type')||'';let message='PDF download failed ('+response.status+').';if(type.includes('application/json')){const body=await response.json();message=body.detail||message;}throw new Error(message);}const blob=await response.blob(),disposition=response.headers.get('content-disposition')||'',match=disposition.match(/filename="?([^";]+)"?/i),filename=match?match[1]:'mcas-website-audit.pdf',url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);note('advancedAuditNotice','Client PDF downloaded. Review it before sharing.');}catch(err){note('advancedAuditNotice',err.message,true);}finally{download.disabled=false;}return;}
+ if(attach){const id=attach.dataset.attachAudit,leadId=attach.dataset.auditLead||null;state.pendingAuditReport={id,leadId};if(leadId){const lead=selectedLead(leadId);if(lead){$('emailLead').value=leadId;if(lead.contact_email)$('emailTo').value=lead.contact_email;}}$('emailReportAttachment').innerHTML='Selected audit report: <b>'+esc(id)+'</b> <button type="button" data-remove-audit-report>Remove</button>. Save the email draft, then create it in Gmail to include the PDF.';$('studio').scrollIntoView({behavior:'smooth',block:'start'});note('emailNotice','Audit PDF selected. Save your email as a pending draft to attach it.');return;}
+ if(remove){state.pendingAuditReport=null;$('emailReportAttachment').textContent='No audit PDF selected.';return;}
+});
+$('emailReportAttachment').addEventListener('click',e=>{
+ const remove=e.target.closest('[data-remove-audit-report]');
+ if(!remove)return;
+ state.pendingAuditReport=null;
+ $('emailReportAttachment').textContent='No audit PDF selected.';
 });
 $('runCompetitorIntel').addEventListener('click',async()=>{
  const btn=$('runCompetitorIntel'),leadId=$('competitorLead').value;
@@ -355,10 +434,10 @@ function emailText(l){const name=l.name,evidence=(l.evidence||'').trim(),checked
 $('genEmail').addEventListener('click',()=>{const l=selectedLead($('emailLead').value);if(!l)return note('emailNotice','Add a prospect first.',true);if(l.do_not_contact)return note('emailNotice','This prospect is marked do-not-contact. Outreach is blocked.',true);$('emailTo').value=l.contact_email||'';$('emailSubject').value='A website idea for '+l.name;$('emailBody').value=emailText(l);note('emailNotice','Draft generated from your recorded evidence. Verify before use.');});
 async function aiDraft(task){const l=selectedLead(task==='reply'?$('replyLead').value:task==='proposal'?$('proposalLead').value:$('emailLead').value);if(!l)return note(task==='reply'?'replyNotice':task==='proposal'?'proposalNotice':'emailNotice','Select a prospect first.',true);if(l.do_not_contact&&task!=='reply')return note(task==='proposal'?'proposalNotice':'emailNotice','Prospect is marked do-not-contact; outreach draft blocked.',true);try{const incoming=task==='reply'?$('incoming').value.trim():'';const service=task==='reply'?$('replyService').value:$('service').value;const d=await api('/api/assistant/draft',{method:'POST',body:JSON.stringify({lead_id:l.id,task,prospect_name:l.name,market:l.market||'',service:service||'website services',evidence:l.evidence||'',incoming})});if(task==='email'){const match=d.draft.match(/^Subject:\s*(.+?)(?:\r?\n){1,2}(?:Body:\s*)?/i);if(match){$('emailSubject').value=match[1].trim();$('emailBody').value=d.draft.slice(match[0].length).trim();}else{$('emailBody').value=d.draft;$('emailSubject').value='A website idea for '+l.name;}note('emailNotice',d.warning);}if(task==='reply'){$('replyBody').value=d.draft;note('replyNotice','AI reply generated. Review and edit it, then choose Save edited reply as new draft. Nothing was saved or sent automatically.');}if(task==='proposal'){$('proposalContent').value=d.draft;note('proposalNotice',d.warning);}}catch(e){note(task==='reply'?'replyNotice':task==='proposal'?'proposalNotice':'emailNotice',e.message,true);}}
 $('aiEmail').addEventListener('click',()=>aiDraft('email'));$('aiProposal').addEventListener('click',()=>aiDraft('proposal'));
-async function saveDraft(kind,subject,body,to,leadId,noteId){try{await api('/api/drafts',{method:'POST',body:JSON.stringify({kind,subject,body,to_email:to||null,lead_id:leadId||null})});await loadAll();note(noteId,'Saved as pending approval. No email was sent.');}catch(e){note(noteId,e.message,true);}}
+async function saveDraft(kind,subject,body,to,leadId,noteId,auditReportId=null){try{await api('/api/drafts',{method:'POST',body:JSON.stringify({kind,subject,body,to_email:to||null,lead_id:leadId||null,audit_report_id:auditReportId||null})});if(auditReportId&&state.pendingAuditReport?.id===auditReportId){state.pendingAuditReport=null;$('emailReportAttachment').textContent='No audit PDF selected.';}await loadAll();note(noteId,auditReportId?'Saved as pending approval with the audit PDF attached. Create a Gmail draft to attach the PDF. No email was sent.':'Saved as pending approval. No email was sent.');}catch(e){note(noteId,e.message,true);}}
 $('copyEmail').addEventListener('click',()=>copyTextToClipboard('Subject: '+$('emailSubject').value+'\n\n'+$('emailBody').value,'emailNotice','Email copied to clipboard.'));
 $('copyReply').addEventListener('click',()=>copyTextToClipboard($('replyBody').value,'replyNotice','Reply copied to clipboard.'));
-$('saveEmail').addEventListener('click',()=>{const id=$('emailLead').value;const l=selectedLead(id);if(l?.do_not_contact)return note('emailNotice','Do-not-contact is active; cannot save an outreach email.',true);if(!$('emailBody').value.trim())return note('emailNotice','Write a message first.',true);saveDraft('Cold email',$('emailSubject').value||'Website enquiry',$('emailBody').value,$('emailTo').value,id,'emailNotice');});
+$('saveEmail').addEventListener('click',()=>{const id=$('emailLead').value;const l=selectedLead(id);if(l?.do_not_contact)return note('emailNotice','Do-not-contact is active; cannot save an outreach email.',true);if(!$('emailBody').value.trim())return note('emailNotice','Write a message first.',true);const report=state.pendingAuditReport;if(report?.leadId&&report.leadId!==id)return note('emailNotice','The selected audit report is linked to a different prospect. Select that prospect or remove the report.',true);saveDraft('Cold email',$('emailSubject').value||'Website enquiry',$('emailBody').value,$('emailTo').value,id,'emailNotice',report?.id||null);});
 $('genReply').addEventListener('click',()=>aiDraft('reply'));
 $('saveReply').addEventListener('click',()=>{if(!$('replyBody').value.trim())return note('replyNotice','Generate a reply first.',true);saveDraft('Client reply','Reply draft',$('replyBody').value,$('replyTo').value,$('replyLead').value,'replyNotice');});
 $('genProposal').addEventListener('click',()=>{const l=selectedLead($('proposalLead').value);if(!l)return note('proposalNotice','Add a prospect first.',true);const title=$('proposalTitle').value||'Website project proposal for '+l.name;$('proposalTitle').value=title;$('proposalContent').value='PROJECT PROPOSAL\n'+title+'\n\nPrepared for: '+l.name+'\nMarket: '+(l.market||'Not specified')+'\n\n1. CURRENT CONTEXT\n'+(l.evidence||'The client requirements and current website condition must be confirmed before scope is finalised.')+'\n\n2. PROPOSED APPROACH\n• Discovery and confirmation of business goals\n• Information architecture and page structure\n• Responsive design and implementation\n• Contact / enquiry flow and essential integrations\n• Quality assurance, handover and launch support\n\n3. DELIVERABLES\nList the agreed pages, features, integrations, content responsibilities and handover items here.\n\n4. TIMELINE\n'+($('proposalTimeline').value||'To be agreed after scope confirmation')+'\n\n5. INVESTMENT\n'+($('proposalBudget').value||'Quotation to be confirmed after scope')+'\n\n6. ASSUMPTIONS AND EXCLUSIONS\nConfirm hosting, domain, third-party subscriptions, copywriting, maintenance and change requests in writing.\n\n7. NEXT STEPS\nApprove the final scope and written quotation before work begins.\n\nPrepared by: '+$('signature').value;note('proposalNotice','Editable proposal structure generated. Confirm scope and pricing before sharing.');});
