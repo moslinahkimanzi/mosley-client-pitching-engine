@@ -1090,7 +1090,7 @@ def complete_admin_mfa_login(payload: MfaCodeIn, request: Request, response: Res
     with db() as c:
         c.execute("BEGIN IMMEDIATE")
         row = c.execute(
-            """SELECT u.id,u.email,u.admin_totp_secret,ch.expires_at,ch.attempts
+            """SELECT u.id,u.email,u.google_subject,u.admin_totp_secret,ch.expires_at,ch.attempts
                FROM mfa_login_challenges ch JOIN users u ON u.id=ch.user_id
                WHERE ch.token_hash=?""",
             (challenge_hash,),
