@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field
 from backend.audit_engine import advanced_site_audit
 from backend.audit_reports import build_audit_pdf, audit_pdf_filename
 from backend.google_auth import verify_google_id_token
+from backend.core.security import is_unlimited_admin, validate_safe_external_url
 from backend.billing import PLANS as LEGACY_PLANS, CREDIT_PACKS as LEGACY_CREDIT_PACKS, credits_for_audit, credits_for_competitors
 from backend.commercial import (
     PLANS as USD_PLANS, CREDIT_PACKS as USD_CREDIT_PACKS,
@@ -308,14 +309,19 @@ def ensure_billing_account(c, user_id: str):
 
 
 def user_has_unlimited_access(c, user_id: str) -> bool:
-    """Unlimited usage is reserved for allowlisted accounts linked to Google."""
+    """Unlimited usage for verified allowlisted admin accounts (Google or email-verified)."""
     row = c.execute(
         "SELECT email, google_subject FROM users WHERE id=?",
         (user_id,),
     ).fetchone()
-    if not row or not row["google_subject"]:
+    if not row:
         return False
-    return user_is_admin(dict(row))
+    row_dict = dict(row)
+    if is_unlimited_admin(row_dict):
+        return True
+    if not row_dict.get("google_subject"):
+        return False
+    return user_is_admin(row_dict)
 
 
 def require_credits(user_id: str, amount: int):
@@ -3607,3 +3613,8 @@ def billing_return(order_id: str = Query(min_length=1,max_length=100), user=Depe
     with db() as c: order = c.execute('SELECT id,status,item_type,item_code,amount_kes,currency FROM billing_orders WHERE id=? AND user_id=?',(order_id,user['id'])).fetchone()
     if not order: raise HTTPException(404,'Payment order not found.')
     return {'order':dict(order),'message':'A checkout redirect is not proof of payment. Wait for verified confirmation or refresh billing status.'}
+
+
+@app.get('/healthz')
+def healthz():
+    return {'status': 'ok', 'service': 'mcas', 'release': '1.0'}
