@@ -145,17 +145,15 @@ class CustomerMfaTests(unittest.TestCase):
                 headers={"X-CSRF-Token": csrf},
             )
             self.assertEqual(started.status_code, 200)
-            invalid = client.post(
-                "/api/customer/mfa/verify", json={"code": "000000"},
-                headers={"X-CSRF-Token": csrf},
-            )
-            self.assertIn(invalid.status_code, {200, 422})
-            if invalid.status_code == 200:
-                self.assertTrue(invalid.json()["enabled"])
-            else:
-                status = client.get("/api/customer/mfa/status")
-                self.assertEqual(status.status_code, 200)
-                self.assertTrue(status.json()["setup_pending"])
+            with patch.object(mcas, "totp_counter_for_code", return_value=None):
+                invalid = client.post(
+                    "/api/customer/mfa/verify", json={"code": "123456"},
+                    headers={"X-CSRF-Token": csrf},
+                )
+            self.assertEqual(invalid.status_code, 422)
+            status = client.get("/api/customer/mfa/status")
+            self.assertEqual(status.status_code, 200)
+            self.assertTrue(status.json()["setup_pending"])
 
     def test_customer_setup_routes_reject_admin_and_unauthenticated_requests(self):
         with TestClient(mcas.app, base_url="https://testserver") as client:
