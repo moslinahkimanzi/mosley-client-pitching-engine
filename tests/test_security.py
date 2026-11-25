@@ -73,7 +73,7 @@ class ApiSecurityTest(unittest.TestCase):
                     "UPDATE users SET google_subject=? WHERE id=?",
                     ("verified-google-subject", user_id),
                 )
-            with patch.dict(os.environ, {"MCAS_ADMIN_EMAILS": email}), patch.object(mcas, "IS_PROD", True):
+            with patch.dict(os.environ, {"MCAS_ADMIN_EMAILS": email}), patch.object(mcas, "IS_PROD", True), patch.object(mcas, "ADMIN_MFA_REQUIRED", False):
                 billing_status = client.get("/api/billing/status")
                 self.assertEqual(billing_status.status_code, 200, billing_status.text)
                 self.assertTrue(billing_status.json()["is_unlimited_admin"])
