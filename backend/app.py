@@ -72,6 +72,20 @@ if IS_PROD:
         Fernet(mfa_key.encode())
     except Exception as exc:
         raise RuntimeError("MCAS_ADMIN_MFA_ENCRYPTION_KEY must be a valid Fernet key.") from exc
+customer_mfa_setting = os.getenv("MCAS_CUSTOMER_MFA_REQUIRED", "true" if IS_PROD else "false").strip().lower()
+if customer_mfa_setting not in {"true", "false"}:
+    raise RuntimeError("MCAS_CUSTOMER_MFA_REQUIRED must be true or false.")
+CUSTOMER_MFA_REQUIRED = customer_mfa_setting == "true"
+if IS_PROD and not CUSTOMER_MFA_REQUIRED:
+    raise RuntimeError("Production requires MCAS_CUSTOMER_MFA_REQUIRED=true.")
+if IS_PROD:
+    customer_mfa_key = os.getenv("MCAS_CUSTOMER_MFA_ENCRYPTION_KEY", "").strip()
+    if Fernet is None or not customer_mfa_key:
+        raise RuntimeError("Production requires MCAS_CUSTOMER_MFA_ENCRYPTION_KEY.")
+    try:
+        Fernet(customer_mfa_key.encode())
+    except Exception as exc:
+        raise RuntimeError("MCAS_CUSTOMER_MFA_ENCRYPTION_KEY must be a valid Fernet key.") from exc
 APP_VERSION = os.getenv("MCAS_VERSION", "1.3.0").strip()
 if not re.fullmatch(r"\d+\.\d+\.\d+", APP_VERSION):
     raise RuntimeError("MCAS_VERSION must use semantic version format, for example 1.1.0.")
@@ -121,27 +135,27 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def mfa_cipher():
+def mfa_cipher(key_name: str = "MCAS_ADMIN_MFA_ENCRYPTION_KEY"):
     if Fernet is None:
-        raise HTTPException(503, "The cryptography package is required for administrator MFA.")
-    key = os.getenv("MCAS_ADMIN_MFA_ENCRYPTION_KEY", "").strip()
+        raise HTTPException(503, "The cryptography package is required for authenticator MFA.")
+    key = os.getenv(key_name, "").strip()
     if not key:
-        raise HTTPException(503, "Administrator MFA encryption is not configured on this server.")
+        raise HTTPException(503, f"{key_name} is not configured on this server.")
     try:
         return Fernet(key.encode())
     except Exception:
-        raise HTTPException(503, "Administrator MFA encryption key is invalid.")
+        raise HTTPException(503, f"{key_name} is invalid.")
 
 
-def encrypt_mfa_secret(secret: str) -> str:
-    return mfa_cipher().encrypt(secret.encode()).decode()
+def encrypt_mfa_secret(secret: str, key_name: str = "MCAS_ADMIN_MFA_ENCRYPTION_KEY") -> str:
+    return mfa_cipher(key_name).encrypt(secret.encode()).decode()
 
 
-def decrypt_mfa_secret(token: str) -> str:
+def decrypt_mfa_secret(token: str, key_name: str = "MCAS_ADMIN_MFA_ENCRYPTION_KEY") -> str:
     try:
-        return mfa_cipher().decrypt(token.encode()).decode()
+        return mfa_cipher(key_name).decrypt(token.encode()).decode()
     except Exception:
-        raise HTTPException(503, "The stored administrator authenticator secret cannot be decrypted.")
+        raise HTTPException(503, "The stored authenticator secret cannot be decrypted.")
 
 
 def generate_totp_secret() -> str:
@@ -213,6 +227,26 @@ def verify_admin_mfa_code(c, user_id: str, secret: str, code: str):
     return used.rowcount == 1
 
 
+def verify_customer_mfa_code(c, user_id: str, secret: str, code: str):
+    """Verify a customer TOTP code or atomically consume one single-use recovery code."""
+    counter = totp_counter_for_code(secret, code)
+    if counter is not None:
+        row = c.execute("SELECT customer_totp_last_counter FROM users WHERE id=?", (user_id,)).fetchone()
+        last = row["customer_totp_last_counter"] if row else None
+        if last is not None and counter <= int(last):
+            return False
+        c.execute("UPDATE users SET customer_totp_last_counter=? WHERE id=?", (counter, user_id))
+        return True
+    if not re.fullmatch(r"[A-Za-z0-9_-]{12,64}", str(code or "")):
+        return False
+    digest = hashlib.sha256(str(code).encode()).hexdigest()
+    used = c.execute(
+        "UPDATE customer_mfa_recovery_codes SET used_at=? WHERE user_id=? AND code_hash=? AND used_at IS NULL",
+        (now(), user_id, digest),
+    )
+    return used.rowcount == 1
+
+
 def require_admin_mfa(user: dict):
     require_configured_admin(user)
     if not ADMIN_MFA_REQUIRED:
@@ -279,6 +313,13 @@ def init_db():
             user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             expires_at INTEGER NOT NULL,
             attempts INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS customer_mfa_recovery_codes(
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            code_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            used_at TEXT,
+            PRIMARY KEY(user_id,code_hash)
         );
         CREATE TABLE IF NOT EXISTS admin_mfa_recovery_codes(
             user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -387,6 +428,12 @@ def init_db():
         add_column(c, "users", "admin_totp_pending_expires", "INTEGER")
         add_column(c, "users", "admin_totp_pending_attempts", "INTEGER NOT NULL DEFAULT 0")
         add_column(c, "users", "admin_totp_last_counter", "INTEGER")
+        add_column(c, "users", "customer_totp_secret", "TEXT")
+        add_column(c, "users", "customer_totp_pending_secret", "TEXT")
+        add_column(c, "users", "customer_totp_pending_expires", "INTEGER")
+        add_column(c, "users", "customer_totp_pending_attempts", "INTEGER NOT NULL DEFAULT 0")
+        add_column(c, "users", "customer_totp_last_counter", "INTEGER")
+        add_column(c, "mfa_login_challenges", "mfa_type", "TEXT NOT NULL DEFAULT 'admin'")
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_subject ON users(google_subject) WHERE google_subject IS NOT NULL")
         add_column(c, "leads", "contact_phone", "TEXT")
         add_column(c, "leads", "source_url", "TEXT")
@@ -607,13 +654,16 @@ def current_user(request: Request):
     if not token:
         raise HTTPException(401, "Sign in required")
     with db() as c:
-        row = c.execute("""SELECT users.id,users.email,users.google_subject FROM sessions
+        row = c.execute("""SELECT users.id,users.email,users.google_subject,users.customer_totp_secret FROM sessions
             JOIN users ON users.id=sessions.user_id
             WHERE token_hash=? AND expires_at>?""",
             (token_hash(token), int(time.time()))).fetchone()
     if not row:
         raise HTTPException(401, "Session expired; sign in again")
-    return dict(row)
+    identity = dict(row)
+    if CUSTOMER_MFA_REQUIRED and not user_is_admin(identity) and not identity.get("customer_totp_secret"):
+        raise HTTPException(403, "Customer MFA setup is required. Sign in again to secure this workspace.")
+    return identity
 
 def user_is_admin(user: dict) -> bool:
     """Only explicitly allowlisted identities with a verified Google link are admins in production."""
