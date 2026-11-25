@@ -665,6 +665,35 @@ def current_user(request: Request):
         raise HTTPException(403, "Customer MFA setup is required. Sign in again to secure this workspace.")
     return identity
 
+def current_identity_for_mfa_setup(request: Request):
+    """Allow Google-verified accounts to reach only MFA setup endpoints before enrollment."""
+    token = request.cookies.get(COOKIE)
+    if not token:
+        raise HTTPException(401, "Sign in required")
+    with db() as c:
+        row = c.execute(
+            """SELECT users.id,users.email,users.google_subject,users.customer_totp_secret
+               FROM sessions JOIN users ON users.id=sessions.user_id
+               WHERE token_hash=? AND expires_at>?""",
+            (token_hash(token), int(time.time())),
+        ).fetchone()
+    if not row:
+        raise HTTPException(401, "Session expired; sign in again")
+    identity = dict(row)
+    if IS_PROD and not identity.get("google_subject"):
+        raise HTTPException(403, "Customer MFA setup requires a verified Google identity.")
+    if user_is_admin(identity):
+        raise HTTPException(403, "Use administrator MFA settings for this account.")
+    return identity
+
+
+def require_configured_customer(user: dict):
+    if IS_PROD and not user.get("google_subject"):
+        raise HTTPException(403, "Customer MFA requires a verified Google identity.")
+    if user_is_admin(user):
+        raise HTTPException(403, "Administrator accounts must use administrator MFA.")
+    return user
+
 def user_is_admin(user: dict) -> bool:
     """Only explicitly allowlisted identities with a verified Google link are admins in production."""
     allowed = {
@@ -723,8 +752,9 @@ async def security_middleware(request: Request, call_next):
     token = request.cookies.get(COOKIE, "")
     if path in {"/api/auth/login", "/api/auth/register", "/api/auth/google"}:
         category, cap = "auth", 8
-    elif path in {"/api/auth/mfa", "/api/admin/mfa/setup", "/api/admin/mfa/verify"}:
-        category, cap = "admin_mfa", 12
+    elif path in {"/api/auth/mfa", "/api/admin/mfa/setup", "/api/admin/mfa/verify",
+                    "/api/customer/mfa/setup", "/api/customer/mfa/verify"}:
+        category, cap = "account_mfa", 12
     elif path == "/api/assistant/draft":
         category, cap = "ai", 6
     elif path == "/api/feedback":
@@ -971,15 +1001,24 @@ def google_authenticate(payload: GoogleSignInIn, response: Response, request: Re
             c.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
             c.execute("DELETE FROM mfa_login_challenges WHERE user_id=?", (uid,))
             admin_identity = {"id": uid, "email": email, "google_subject": subject}
-            mfa_row = c.execute("SELECT admin_totp_secret FROM users WHERE id=?", (uid,)).fetchone()
+            mfa_row = c.execute(
+                "SELECT admin_totp_secret,customer_totp_secret FROM users WHERE id=?",
+                (uid,),
+            ).fetchone()
             is_admin_identity = user_is_admin(admin_identity)
+            mfa_type = None
             if ADMIN_MFA_REQUIRED and is_admin_identity and mfa_row and mfa_row["admin_totp_secret"]:
+                mfa_type = "admin"
+            elif CUSTOMER_MFA_REQUIRED and not is_admin_identity and mfa_row and mfa_row["customer_totp_secret"]:
+                mfa_type = "customer"
+            if mfa_type:
                 challenge = secrets.token_urlsafe(32)
                 c.execute(
-                    "INSERT INTO mfa_login_challenges(token_hash,user_id,expires_at,attempts) VALUES(?,?,?,0)",
-                    (mfa_challenge_hash(challenge), uid, stamp + 300),
+                    """INSERT INTO mfa_login_challenges(token_hash,user_id,expires_at,attempts,mfa_type)
+                       VALUES(?,?,?,0,?)""",
+                    (mfa_challenge_hash(challenge), uid, stamp + 300, mfa_type),
                 )
-                audit(c, uid, "admin.mfa_challenge_issued")
+                audit(c, uid, mfa_type + ".mfa_challenge_issued")
             else:
                 c.execute("INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?,?,?)",
                           (token_hash(session), uid, stamp + SESSION_SECONDS))
@@ -989,12 +1028,17 @@ def google_authenticate(payload: GoogleSignInIn, response: Response, request: Re
     if challenge:
         response.set_cookie("mcas_mfa_challenge", challenge, max_age=300, httponly=True,
                             secure=IS_PROD, samesite="strict", path="/")
-        return {"mfa_required": True, "email": email,
-                "message": "Enter your six-digit authenticator code or a one-time recovery code to finish signing in."}
+        return {"mfa_required": True, "mfa_type": mfa_type, "email": email,
+                "message": "Enter your authenticator code or a one-time recovery code to finish signing in."}
     response.set_cookie(COOKIE, session, max_age=SESSION_SECONDS, httponly=True,
                         secure=IS_PROD, samesite="lax", path="/")
     set_csrf(response)
-    return {"id": uid, "email": email, "is_admin": user_is_admin({"email": email, "google_subject": subject})}
+    customer_setup_required = (
+        CUSTOMER_MFA_REQUIRED and not user_is_admin({"email": email, "google_subject": subject})
+        and not bool(mfa_row and mfa_row["customer_totp_secret"])
+    )
+    return {"id": uid, "email": email, "is_admin": user_is_admin({"email": email, "google_subject": subject}),
+            "customer_mfa_setup_required": customer_setup_required}
 
 @app.get("/api/admin/mfa/status")
 def admin_mfa_status(user=Depends(current_user)):
@@ -1140,7 +1184,8 @@ def complete_admin_mfa_login(payload: MfaCodeIn, request: Request, response: Res
     with db() as c:
         c.execute("BEGIN IMMEDIATE")
         row = c.execute(
-            """SELECT u.id,u.email,u.google_subject,u.admin_totp_secret,ch.expires_at,ch.attempts
+            """SELECT u.id,u.email,u.google_subject,u.admin_totp_secret,
+                      u.customer_totp_secret,ch.expires_at,ch.attempts,ch.mfa_type
                FROM mfa_login_challenges ch JOIN users u ON u.id=ch.user_id
                WHERE ch.token_hash=?""",
             (challenge_hash,),
@@ -1148,13 +1193,27 @@ def complete_admin_mfa_login(payload: MfaCodeIn, request: Request, response: Res
         if not row or int(row["expires_at"]) <= int(time.time()):
             c.execute("DELETE FROM mfa_login_challenges WHERE token_hash=?", (challenge_hash,))
             failure = (401, "The administrator sign-in challenge has expired. Sign in again.")
-        elif not row["admin_totp_secret"] or not user_is_admin(dict(row)):
+        elif row["mfa_type"] == "admin" and (
+            not row["admin_totp_secret"] or not user_is_admin(dict(row))
+        ):
             c.execute("DELETE FROM mfa_login_challenges WHERE token_hash=?", (challenge_hash,))
             failure = (403, "Administrator MFA is not available for this identity.")
+        elif row["mfa_type"] == "customer" and (
+            not CUSTOMER_MFA_REQUIRED or not row["customer_totp_secret"]
+            or user_is_admin(dict(row))
+        ):
+            c.execute("DELETE FROM mfa_login_challenges WHERE token_hash=?", (challenge_hash,))
+            failure = (403, "Customer MFA is not available for this identity.")
         elif int(row["attempts"]) >= 5:
             c.execute("DELETE FROM mfa_login_challenges WHERE token_hash=?", (challenge_hash,))
             failure = (429, "Too many authenticator attempts. Sign in again.")
-        elif not verify_admin_mfa_code(c, row["id"], decrypt_mfa_secret(row["admin_totp_secret"]), payload.code):
+        elif not (
+            verify_admin_mfa_code(c, row["id"], decrypt_mfa_secret(row["admin_totp_secret"]), payload.code)
+            if row["mfa_type"] == "admin"
+            else verify_customer_mfa_code(c, row["id"],
+                decrypt_mfa_secret(row["customer_totp_secret"], "MCAS_CUSTOMER_MFA_ENCRYPTION_KEY"),
+                payload.code)
+        ):
             attempts = int(row["attempts"]) + 1
             if attempts >= 5:
                 c.execute("DELETE FROM mfa_login_challenges WHERE token_hash=?", (challenge_hash,))
@@ -1177,7 +1236,8 @@ def complete_admin_mfa_login(payload: MfaCodeIn, request: Request, response: Res
     response.set_cookie(COOKIE, session, max_age=SESSION_SECONDS, httponly=True,
                         secure=IS_PROD, samesite="lax", path="/")
     set_csrf(response)
-    return {"id": user_id, "email": email, "is_admin": True, "mfa_verified": True}
+    return {"id": user_id, "email": email, "is_admin": row["mfa_type"] == "admin",
+            "mfa_verified": True, "mfa_type": row["mfa_type"]}
 
 
 def validate_email(email: Optional[str]):
