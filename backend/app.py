@@ -896,6 +896,7 @@ def google_authenticate(payload: GoogleSignInIn, response: Response, request: Re
         raise HTTPException(401, str(exc))
     email, subject = identity["email"], identity["sub"]
     session = secrets.token_urlsafe(36)
+    challenge = None
     uid = None
     try:
         with db() as c:
@@ -916,15 +917,217 @@ def google_authenticate(payload: GoogleSignInIn, response: Response, request: Re
                           (uid, email, unusable_password, now(), subject))
                 audit(c, uid, "account.created_google")
             c.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
-            c.execute("INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?,?,?)",
-                      (token_hash(session), uid, stamp + SESSION_SECONDS))
-            audit(c, uid, "account.google_login")
+            c.execute("DELETE FROM mfa_login_challenges WHERE user_id=?", (uid,))
+            admin_identity = {"id": uid, "email": email, "google_subject": subject}
+            mfa_row = c.execute("SELECT admin_totp_secret FROM users WHERE id=?", (uid,)).fetchone()
+            is_admin_identity = user_is_admin(admin_identity)
+            if ADMIN_MFA_REQUIRED and is_admin_identity and mfa_row and mfa_row["admin_totp_secret"]:
+                challenge = secrets.token_urlsafe(32)
+                c.execute(
+                    "INSERT INTO mfa_login_challenges(token_hash,user_id,expires_at,attempts) VALUES(?,?,?,0)",
+                    (mfa_challenge_hash(challenge), uid, stamp + 300),
+                )
+                audit(c, uid, "admin.mfa_challenge_issued")
+            else:
+                c.execute("INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?,?,?)",
+                          (token_hash(session), uid, stamp + SESSION_SECONDS))
+                audit(c, uid, "account.google_login")
     except sqlite3.IntegrityError:
         raise HTTPException(409, "This Google account could not be linked. Contact support.")
+    if challenge:
+        response.set_cookie("mcas_mfa_challenge", challenge, max_age=300, httponly=True,
+                            secure=IS_PROD, samesite="strict", path="/")
+        return {"mfa_required": True, "email": email,
+                "message": "Enter your six-digit authenticator code or a one-time recovery code to finish signing in."}
     response.set_cookie(COOKIE, session, max_age=SESSION_SECONDS, httponly=True,
                         secure=IS_PROD, samesite="lax", path="/")
     set_csrf(response)
     return {"id": uid, "email": email, "is_admin": user_is_admin({"email": email, "google_subject": subject})}
+
+@app.get("/api/admin/mfa/status")
+def admin_mfa_status(user=Depends(current_user)):
+    require_configured_admin(user)
+    with db() as c:
+        row = c.execute(
+            "SELECT admin_totp_secret,admin_totp_pending_secret,admin_totp_pending_expires FROM users WHERE id=?",
+            (user["id"],),
+        ).fetchone()
+        recovery_count = c.execute(
+            "SELECT COUNT(*) FROM admin_mfa_recovery_codes WHERE user_id=? AND used_at IS NULL",
+            (user["id"],),
+        ).fetchone()[0]
+    return {
+        "enabled": bool(row and row["admin_totp_secret"]),
+        "setup_pending": bool(row and row["admin_totp_pending_secret"]
+                              and int(row["admin_totp_pending_expires"] or 0) > int(time.time())),
+        "required": ADMIN_MFA_REQUIRED,
+        "unused_recovery_codes": int(recovery_count),
+        "message": "Use an authenticator app for administrator sign-in. Recovery codes are single-use.",
+    }
+
+
+@app.post("/api/admin/mfa/setup")
+def admin_mfa_setup(payload: AdminMfaSetupIn, user=Depends(current_user)):
+    require_configured_admin(user)
+    bootstrap = os.getenv("MCAS_ADMIN_BOOTSTRAP_TOKEN", "").strip()
+    if len(bootstrap) < 32 or not hmac.compare_digest(bootstrap, payload.bootstrap_token):
+        log_security_event("admin.mfa_setup_denied", Request) if False else None
+        raise HTTPException(403, "The administrator bootstrap token is invalid or not configured.")
+    with db() as c:
+        row = c.execute(
+            "SELECT admin_totp_secret FROM users WHERE id=?",
+            (user["id"],),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Administrator account not found.")
+        if row["admin_totp_secret"]:
+            raise HTTPException(409, "Administrator MFA is already enabled. Use recovery or the authenticator at sign-in.")
+        secret = generate_totp_secret()
+        c.execute(
+            """UPDATE users SET admin_totp_pending_secret=?,admin_totp_pending_expires=?,
+               admin_totp_pending_attempts=0 WHERE id=?""",
+            (encrypt_mfa_secret(secret), int(time.time()) + 600, user["id"]),
+        )
+        c.execute("DELETE FROM admin_mfa_recovery_codes WHERE user_id=?", (user["id"],))
+        audit(c, user["id"], "admin.mfa_setup_started")
+    label = urllib.parse.quote("MCAS:" + user["email"])
+    uri = "otpauth://totp/" + label + "?" + urllib.parse.urlencode({
+        "secret": secret, "issuer": "MCAS", "algorithm": "SHA1", "digits": 6, "period": 30
+    })
+    return {
+        "secret": secret,
+        "otpauth_uri": uri,
+        "expires_in_seconds": 600,
+        "message": "Add this key to your authenticator app. Setup expires in 10 minutes. The secret is displayed only once.",
+    }
+
+
+@app.post("/api/admin/mfa/verify")
+def admin_mfa_verify(payload: MfaCodeIn, response: Response, user=Depends(current_user)):
+    require_configured_admin(user)
+    failure = None
+    recovery_codes = []
+    with db() as c:
+        c.execute("BEGIN IMMEDIATE")
+        row = c.execute(
+            """SELECT admin_totp_pending_secret,admin_totp_pending_expires,
+                      admin_totp_pending_attempts,admin_totp_secret
+               FROM users WHERE id=?""",
+            (user["id"],),
+        ).fetchone()
+        if not row or row["admin_totp_secret"]:
+            failure = (409, "Administrator MFA is already enabled or setup is unavailable.")
+        elif not row["admin_totp_pending_secret"] or int(row["admin_totp_pending_expires"] or 0) <= int(time.time()):
+            failure = (409, "MFA setup has expired. Start setup again.")
+        elif int(row["admin_totp_pending_attempts"] or 0) >= 5:
+            c.execute(
+                """UPDATE users SET admin_totp_pending_secret=NULL,
+                   admin_totp_pending_expires=NULL,admin_totp_pending_attempts=0 WHERE id=?""",
+                (user["id"],),
+            )
+            audit(c, user["id"], "admin.mfa_setup_locked")
+            failure = (429, "Too many incorrect codes. Setup was cancelled; start again.")
+        else:
+            secret = decrypt_mfa_secret(row["admin_totp_pending_secret"])
+            counter = totp_counter_for_code(secret, payload.code)
+            if counter is None:
+                attempts = int(row["admin_totp_pending_attempts"] or 0) + 1
+                c.execute(
+                    "UPDATE users SET admin_totp_pending_attempts=? WHERE id=?",
+                    (attempts, user["id"]),
+                )
+                if attempts >= 5:
+                    c.execute(
+                        """UPDATE users SET admin_totp_pending_secret=NULL,
+                           admin_totp_pending_expires=NULL,admin_totp_pending_attempts=0 WHERE id=?""",
+                        (user["id"],),
+                    )
+                    audit(c, user["id"], "admin.mfa_setup_locked")
+                    failure = (429, "Five incorrect codes were entered. Setup was cancelled.")
+                else:
+                    audit(c, user["id"], "admin.mfa_setup_code_failed", {"attempts": attempts})
+                    failure = (422, "The authenticator code is incorrect. Check your device clock.")
+            else:
+                c.execute(
+                    """UPDATE users SET admin_totp_secret=admin_totp_pending_secret,
+                       admin_totp_pending_secret=NULL,admin_totp_pending_expires=NULL,
+                       admin_totp_pending_attempts=0,admin_totp_last_counter=? WHERE id=?""",
+                    (counter, user["id"]),
+                )
+                c.execute("DELETE FROM admin_mfa_recovery_codes WHERE user_id=?", (user["id"],))
+                for _ in range(10):
+                    code = secrets.token_urlsafe(12)
+                    recovery_codes.append(code)
+                    c.execute(
+                        "INSERT INTO admin_mfa_recovery_codes(user_id,code_hash,created_at) VALUES(?,?,?)",
+                        (user["id"], hashlib.sha256(code.encode()).hexdigest(), now()),
+                    )
+                c.execute("DELETE FROM sessions WHERE user_id=?", (user["id"],))
+                c.execute("DELETE FROM mfa_login_challenges WHERE user_id=?", (user["id"],))
+                audit(c, user["id"], "admin.mfa_enabled", {"recovery_code_count": len(recovery_codes)})
+    if failure:
+        raise HTTPException(failure[0], failure[1])
+    response.delete_cookie(COOKIE, path="/", httponly=True, secure=IS_PROD, samesite="lax")
+    response.delete_cookie(CSRF_COOKIE, path="/", secure=IS_PROD, samesite="strict")
+    return {
+        "enabled": True,
+        "recovery_codes": recovery_codes,
+        "message": "Administrator MFA is enabled. Save these recovery codes somewhere secure; each can be used once. You have been signed out and must sign in again.",
+    }
+
+
+@app.post("/api/auth/mfa")
+def complete_admin_mfa_login(payload: MfaCodeIn, request: Request, response: Response):
+    challenge = request.cookies.get("mcas_mfa_challenge", "")
+    if not challenge:
+        raise HTTPException(401, "The administrator sign-in challenge is missing or expired. Sign in again.")
+    challenge_hash = mfa_challenge_hash(challenge)
+    failure = None
+    session = None
+    user_id = None
+    email = None
+    with db() as c:
+        c.execute("BEGIN IMMEDIATE")
+        row = c.execute(
+            """SELECT u.id,u.email,u.admin_totp_secret,ch.expires_at,ch.attempts
+               FROM mfa_login_challenges ch JOIN users u ON u.id=ch.user_id
+               WHERE ch.token_hash=?""",
+            (challenge_hash,),
+        ).fetchone()
+        if not row or int(row["expires_at"]) <= int(time.time()):
+            c.execute("DELETE FROM mfa_login_challenges WHERE token_hash=?", (challenge_hash,))
+            failure = (401, "The administrator sign-in challenge has expired. Sign in again.")
+        elif not row["admin_totp_secret"] or not user_is_admin(dict(row)):
+            c.execute("DELETE FROM mfa_login_challenges WHERE token_hash=?", (challenge_hash,))
+            failure = (403, "Administrator MFA is not available for this identity.")
+        elif int(row["attempts"]) >= 5:
+            c.execute("DELETE FROM mfa_login_challenges WHERE token_hash=?", (challenge_hash,))
+            failure = (429, "Too many authenticator attempts. Sign in again.")
+        elif not verify_admin_mfa_code(c, row["id"], decrypt_mfa_secret(row["admin_totp_secret"]), payload.code):
+            attempts = int(row["attempts"]) + 1
+            if attempts >= 5:
+                c.execute("DELETE FROM mfa_login_challenges WHERE token_hash=?", (challenge_hash,))
+            else:
+                c.execute("UPDATE mfa_login_challenges SET attempts=? WHERE token_hash=?",
+                          (attempts, challenge_hash))
+            failure = (401, "The authenticator or unused recovery code is incorrect.")
+        else:
+            user_id = row["id"]
+            email = row["email"]
+            c.execute("DELETE FROM mfa_login_challenges WHERE user_id=?", (user_id,))
+            c.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+            session = secrets.token_urlsafe(36)
+            c.execute("INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?,?,?)",
+                      (token_hash(session), user_id, int(time.time()) + SESSION_SECONDS))
+            audit(c, user_id, "account.login_mfa")
+    if failure:
+        raise HTTPException(failure[0], failure[1])
+    response.delete_cookie("mcas_mfa_challenge", path="/", httponly=True, secure=IS_PROD, samesite="strict")
+    response.set_cookie(COOKIE, session, max_age=SESSION_SECONDS, httponly=True,
+                        secure=IS_PROD, samesite="lax", path="/")
+    set_csrf(response)
+    return {"id": user_id, "email": email, "is_admin": True, "mfa_verified": True}
+
 
 def validate_email(email: Optional[str]):
     if email is None or email == "":
