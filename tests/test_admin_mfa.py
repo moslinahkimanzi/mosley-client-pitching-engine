@@ -80,7 +80,7 @@ class AdminMfaTests(unittest.TestCase):
         self.assertIsNone(mcas.totp_counter_for_code(secret, "bad-code", timestamp))
 
     def test_production_admin_tools_and_unlimited_credits_require_enrolled_mfa(self):
-        with TestClient(mcas.app) as client:
+        with TestClient(mcas.app, base_url="https://testserver") as client:
             user_id, _ = self.make_admin(client)
             status = client.get("/api/billing/status")
             self.assertEqual(status.status_code, 200, status.text)
@@ -106,7 +106,7 @@ class AdminMfaTests(unittest.TestCase):
             self.assertIsNotNone(audit_row)
 
     def test_admin_can_enrol_mfa_and_receives_ten_recovery_codes_once(self):
-        with TestClient(mcas.app) as client:
+        with TestClient(mcas.app, base_url="https://testserver") as client:
             user_id, csrf = self.make_admin(client)
             status = client.get("/api/admin/mfa/status")
             self.assertEqual(status.status_code, 200, status.text)
@@ -144,7 +144,7 @@ class AdminMfaTests(unittest.TestCase):
         secret = mcas.generate_totp_secret()
         recovery = "one-time-" + uuid.uuid4().hex[:18]
         encrypted = mcas.encrypt_mfa_secret(secret)
-        with TestClient(mcas.app) as client:
+        with TestClient(mcas.app, base_url="https://testserver") as client:
             user_id, _ = self.make_admin(client, encrypted)
             with mcas.db() as connection:
                 connection.execute(
@@ -179,7 +179,7 @@ class AdminMfaTests(unittest.TestCase):
             self.assertEqual(replayed.status_code, 401)
 
     def test_invalid_bootstrap_token_does_not_start_enrollment(self):
-        with TestClient(mcas.app) as client:
+        with TestClient(mcas.app, base_url="https://testserver") as client:
             self.make_admin(client)
             csrf = client.get("/api/auth/csrf").json()["csrf_token"]
             response = client.post(
