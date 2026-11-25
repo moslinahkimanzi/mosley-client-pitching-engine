@@ -175,6 +175,18 @@ def init_db():
             pricing_multiplier REAL NOT NULL DEFAULT 1.0,
             updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS workspace_service_prices(
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            service_code TEXT NOT NULL,
+            label TEXT NOT NULL,
+            minimum_price INTEGER NOT NULL CHECK(minimum_price > 0),
+            maximum_price INTEGER CHECK(maximum_price IS NULL OR maximum_price >= minimum_price),
+            currency_code TEXT NOT NULL,
+            price_unit TEXT NOT NULL CHECK(price_unit IN ('one_time','monthly')),
+            description TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(user_id,service_code)
+        );
         CREATE TABLE IF NOT EXISTS customer_feedback(
             id TEXT PRIMARY KEY,
             user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -653,6 +665,17 @@ class WorkspacePreferencesIn(BaseModel):
     language_code: Literal["en", "sw", "fr", "es", "de", "pt", "ar"]
     theme: Literal["dark", "light", "system"]
     pricing_multiplier: float = Field(ge=0.5, le=5.0)
+
+class ServicePriceItemIn(BaseModel):
+    service_code: str = Field(min_length=3, max_length=40)
+    minimum_price: int = Field(ge=1, le=1_000_000_000)
+    maximum_price: Optional[int] = Field(default=None, ge=1, le=1_000_000_000)
+    price_unit: Literal["one_time", "monthly"]
+
+
+class ServicePricesIn(BaseModel):
+    items: list[ServicePriceItemIn] = Field(min_length=8, max_length=8)
+
 
 class AIIn(BaseModel):
     lead_id: Optional[str] = None
@@ -2597,6 +2620,85 @@ def update_workspace_preferences(payload: WorkspacePreferencesIn, user=Depends(c
             "theme": payload.theme,
         })
     return workspace_preferences_for(user["id"])
+
+
+SERVICE_PRICE_DEFAULTS = (
+    ("website_audit", "Website audit", 3500, 8000, "one_time",
+     "Bounded technical review, evidence, prioritised findings and recommendations. Not a penetration test or certification."),
+    ("repair_sprint", "Repair sprint", 5000, 20000, "one_time",
+     "A limited, agreed set of fixes to an existing website."),
+    ("landing_page", "Landing page", 15000, 25000, "one_time",
+     "One mobile-first conversion page with a contact or WhatsApp enquiry action."),
+    ("starter_website", "Starter business website", 25000, 45000, "one_time",
+     "Typically 3–5 pages, responsive layout and foundational SEO."),
+    ("professional_website", "Professional website", 50000, 95000, "one_time",
+     "Typically 6–12 pages, custom design, forms and agreed content structure."),
+    ("small_ecommerce", "Small e-commerce", 70000, 150000, "one_time",
+     "Product catalogue, cart, checkout and an agreed payment integration."),
+    ("custom_portal", "Custom portal / workflow", 150000, None, "one_time",
+     "Discovery and a written technical scope are required before quotation."),
+    ("website_care", "Website care", 4000, 12000, "monthly",
+     "Agreed maintenance, update and backup checks with defined support limits."),
+)
+SERVICE_PRICE_CODES = {item[0] for item in SERVICE_PRICE_DEFAULTS}
+
+
+def workspace_service_prices_for(user_id: str) -> dict:
+    stamp = now()
+    with db() as c:
+        prefs = workspace_preferences_for(user_id)
+        for code, label, minimum, maximum, unit, description in SERVICE_PRICE_DEFAULTS:
+            c.execute(
+                """INSERT OR IGNORE INTO workspace_service_prices
+                   (user_id,service_code,label,minimum_price,maximum_price,currency_code,price_unit,description,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                (user_id, code, label, minimum, maximum, "KES", unit, description, stamp),
+            )
+        rows = c.execute(
+            """SELECT service_code,label,minimum_price,maximum_price,currency_code,
+                      price_unit,description,updated_at
+               FROM workspace_service_prices WHERE user_id=? ORDER BY rowid""",
+            (user_id,),
+        ).fetchall()
+    return {"workspace_currency_code": prefs["currency_code"], "items": [dict(row) for row in rows]}
+
+
+@app.get("/api/workspace/service-prices")
+@app.get("/api/services/pricing")
+def get_workspace_service_prices(user=Depends(current_user)):
+    return workspace_service_prices_for(user["id"])
+
+
+@app.put("/api/workspace/service-prices")
+def update_workspace_service_prices(payload: ServicePricesIn, user=Depends(current_user)):
+    codes = [item.service_code for item in payload.items]
+    if len(set(codes)) != len(codes) or set(codes) != SERVICE_PRICE_CODES:
+        raise HTTPException(422, "Submit each supported service exactly once.")
+    for item in payload.items:
+        if item.maximum_price is not None and item.maximum_price < item.minimum_price:
+            raise HTTPException(422, "A maximum price cannot be lower than its minimum price.")
+    currency = workspace_preferences_for(user["id"])["currency_code"]
+    stamp = now()
+    definitions = {row[0]: row for row in SERVICE_PRICE_DEFAULTS}
+    with db() as c:
+        for item in payload.items:
+            default = definitions[item.service_code]
+            c.execute(
+                """INSERT INTO workspace_service_prices
+                   (user_id,service_code,label,minimum_price,maximum_price,currency_code,price_unit,description,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(user_id,service_code) DO UPDATE SET
+                     minimum_price=excluded.minimum_price,
+                     maximum_price=excluded.maximum_price,
+                     currency_code=excluded.currency_code,
+                     updated_at=excluded.updated_at""",
+                (user["id"], item.service_code, default[1], item.minimum_price,
+                 item.maximum_price, currency, item.price_unit, default[5], stamp),
+            )
+        audit(c, user["id"], "workspace.service_prices_updated", {
+            "currency_code": currency, "service_count": len(payload.items),
+        })
+    return workspace_service_prices_for(user["id"])
 
 
 _FX_RATE_CACHE: dict = {"rates": None, "valid_until": 0, "updated_at": None}
