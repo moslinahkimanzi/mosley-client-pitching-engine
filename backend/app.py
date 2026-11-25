@@ -3623,13 +3623,24 @@ def admin_maintenance(user=Depends(current_user)):
         count = int(category_counts.get(category, 0))
         if count:
             recommendations.append({"area": label, "count": count, "action": action})
+    with db() as c:
+        admin_security = c.execute(
+            "SELECT admin_totp_secret FROM users WHERE id=?",
+            (user["id"],),
+        ).fetchone()
+    admin_mfa_enabled = bool(admin_security and admin_security["admin_totp_secret"])
     controls = [
-        {"name": "Automated test workflow", "status": "configured", "detail": "The repository CI workflow runs Python tests, JavaScript syntax checks and dependency auditing. Review the latest run in GitHub Actions before release."},
-        {"name": "CodeQL security analysis", "status": "configured", "detail": "CodeQL is configured for Python and JavaScript with a scheduled weekly analysis. Check the GitHub Security tab for actual findings."},
-        {"name": "Dependabot dependency updates", "status": "configured", "detail": "Weekly dependency update pull requests are configured. Review and test every proposed update before merging."},
-        {"name": "AI feedback improvement analysis", "status": "configured" if os.getenv("AI_API_BASE_URL") and os.getenv("AI_API_KEY") and os.getenv("AI_MODEL") else "not_configured", "detail": "An administrator can analyse only feedback for which the customer explicitly opted in. MCAS saves prioritised proposals and test ideas; it does not generate, merge or deploy code."},
-        {"name": "Customer account MFA", "status": "not_implemented", "detail": "MFA for MCAS customer accounts has not been implemented in this build."},
-        {"name": "Encrypted off-site backups", "status": "external_action", "detail": "Configure backups with the hosting provider and test a restore. This dashboard cannot verify your backup provider."},
+        {"name": "Automated test workflow", "status": "manual", "detail": "GitHub Actions is configured to run the suite. This dashboard does not fetch live results; the exact candidate commit must show all required checks passing."},
+        {"name": "CodeQL security analysis", "status": "configured", "detail": "The repository has a CodeQL workflow. Review actual alerts and the latest completed scan in GitHub Security before launch."},
+        {"name": "Dependabot dependency updates", "status": "configured", "detail": "Dependency update automation is configured. Review, test and merge updates deliberately; do not auto-deploy dependency changes."},
+        {"name": "Google verified customer identity", "status": "configured" if bool(os.getenv("GOOGLE_CLIENT_ID", "").strip()) else "not_configured", "detail": "Production password registration and password login are disabled. Google ID tokens must have a verified email; customers recover account access through Google."},
+        {"name": "Administrator authenticator MFA", "status": "configured" if admin_mfa_enabled else "not_configured", "detail": "Production admin tools and unlimited admin usage require an allowlisted verified Google identity and an enrolled TOTP authenticator. Recovery codes are single-use."},
+        {"name": "Customer MFA", "status": "external_action", "detail": "MCAS uses Google sign-in for customers; customers should enable multi-factor authentication on their Google accounts. MCAS does not currently provide a separate customer TOTP factor."},
+        {"name": "Database scale-out", "status": "not_implemented", "detail": "This backend currently uses SQLite and is designed for one application instance with a persistent disk. Move to managed PostgreSQL and test migrations before multi-instance or high-volume production."},
+        {"name": "Shared production rate limiting", "status": "not_implemented", "detail": "Rate-limit counters currently use the application database. A shared Redis limiter is required before running multiple app instances."},
+        {"name": "Encrypted off-site backups", "status": "external_action", "detail": "Configure encrypted backups with the hosting provider and perform a documented restore test. This dashboard cannot verify your backup provider."},
+        {"name": "Independent security assessment", "status": "external_action", "detail": "No independent penetration test has been performed by MCAS. Commission an external assessment and resolve findings before public commercial launch."},
+        {"name": "Production payment approval and settlement", "status": "external_action", "detail": "Payment billing is disabled by default. Merchant approval, sandbox tests, live credentials, webhook delivery, reconciliation and a real settlement test must be completed externally."},
         {"name": "Production deployment approval", "status": "manual", "detail": "A human administrator must review, test and approve production releases. Automatic self-deployment is disabled."}
     ]
     return {
