@@ -6,12 +6,13 @@ This record separates verified repository controls from tasks that require real 
 
 ## Verified on the release candidate
 
-Candidate branch: `release/mcas-prelaunch-2026-11`\n\nThe candidate has since been extended with customer MFA (version 1.4.0). The CI evidence below refers to the earlier commit and does not validate these later customer MFA changes; a new full CI run is required.
+Candidate branch: `release/mcas-prelaunch-2026-11`  
+Candidate commit: `64d34beade05d5eebf1cc90fd06925fc9eefcd7c`
 
-GitHub Actions run [#900](https://github.com/moslinahkimanzi/mosley-client-pitching-engine/actions/runs/45563715546), commit `8078e79b1bbcefe60aa3931d43431627bf43b868`, completed successfully on 25 November 2026:
+GitHub Actions run [#926](https://github.com/moslinahkimanzi/mosley-client-pitching-engine/actions/runs/45614722158) completed successfully on 25 November 2026:
 
 - Python compilation: passed.
-- Automated Python test suite: 89 tests passed.
+- Automated Python test suite: 94 tests passed, including customer MFA enrollment and sign-in challenge tests.
 - Front-end JavaScript syntax check: passed.
 - `pip-audit -r requirements.txt`: no known vulnerabilities reported for the pinned dependency set at that run.
 - This is a repository CI check. It is not a penetration test, hosted end-to-end test, or production deployment verification.
@@ -23,7 +24,7 @@ GitHub Actions run [#900](https://github.com/moslinahkimanzi/mosley-client-pitch
 | Google customer identity | Implemented. The production login flow verifies Google OIDC signatures, audience, nonce, token times and the `email_verified` claim. Local password registration/login are disabled in production; Google handles account recovery. |
 | Administrator privileges | Implemented. The server matches the signed-in database user against `MCAS_ADMIN_EMAILS`; production also requires a linked verified Google subject. |
 | Administrator MFA | Implemented in code. Production startup requires MFA and a separate Fernet encryption key. TOTP enrollment, challenge sign-in, replay protection, attempt limits and one-time recovery codes are included. The real administrator must still enroll after production configuration. |
-| Customer MFA | Implemented in code. Production startup requires a separate customer MFA encryption key and mandatory TOTP. New customers receive a restricted enrollment session; workspace endpoints reject requests until successful enrollment. Returning customers complete a TOTP/recovery challenge. The real production key configuration and hosted end-to-end verification remain required. |
+| Customer MFA | Implemented in code and covered by automated tests. Production startup requires a separate customer MFA encryption key and mandatory TOTP. New customers receive a restricted enrollment session; workspace endpoints reject requests until successful enrollment. Returning customers complete a TOTP/recovery challenge. Production secrets and hosted end-to-end verification remain required. |
 | Administrator billing exemption | Implemented. Allowlisted administrators do not purchase subscriptions or credit packs. Unlimited usage is activated only after required MFA enrollment and is audit logged. Browser-provided roles are not trusted. |
 | Workspace service prices | Implemented. Eight website-service entries are editable per workspace, persisted by tenant, validated server-side and reflected in Services & Pricing. They are separate from MCAS subscriptions and prepaid credits. |
 | Payment ledger and verification foundation | Implemented in code, but live payment is disabled. Hosted checkout and webhook verification code do not establish merchant approval or settlement readiness. |
