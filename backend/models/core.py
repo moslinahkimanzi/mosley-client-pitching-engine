@@ -243,6 +243,28 @@ class Lead(Base):
     created_at: Mapped[datetime] = _ts()
     updated_at: Mapped[datetime] = _ts(onupdate=True)
 
+    contact_email: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    contact_phone: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    source_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    do_not_contact: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    website_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="not_checked"
+    )
+    website_verified_at: Mapped[Optional[datetime]] = _ts(nullable=True, auto=False)
+    website_audit_json: Mapped[Any] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    business_address: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    business_verification_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="unverified"
+    )
+    business_verification_json: Mapped[Any] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    business_verified_at: Mapped[Optional[datetime]] = _ts(nullable=True, auto=False)
+
     __table_args__ = (Index("idx_leads_user_updated", "user_id", "updated_at"),)
 
 
@@ -257,6 +279,12 @@ class Draft(Base):
     body: Mapped[str] = mapped_column(Text, nullable=False)
     state: Mapped[str] = mapped_column(String(32), nullable=False, server_default="pending_approval")
     created_at: Mapped[datetime] = _ts()
+
+    to_email: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    gmail_draft_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    audit_report_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=True
+    )
 
     __table_args__ = (Index("idx_drafts_user_created", "user_id", "created_at"),)
 
@@ -341,6 +369,9 @@ class CustomerFeedback(Base):
     message: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, server_default="received")
     admin_note: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    ai_analysis_consent: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     created_at: Mapped[datetime] = _ts()
     updated_at: Mapped[datetime] = _ts(onupdate=True)
 
@@ -417,6 +448,12 @@ class BillingOrder(Base):
     currency: Mapped[str] = mapped_column(String(3), nullable=False, server_default="KES")
     status: Mapped[str] = mapped_column(String(32), nullable=False, server_default="pending")
     checkout_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    amount_usd_cents: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    provider_amount: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    provider_currency: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
+    payment_method: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    exchange_rate: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    phone_number: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     provider_transaction_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = _ts()
     updated_at: Mapped[datetime] = _ts(onupdate=True)
