@@ -16,7 +16,9 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
-    command: gunicorn backend.app:app -k uvicorn.workers.UvicornWorker --workers 4 --bind 0.0.0.0:8000 --timeout 60
+    ports:
+      - "8000:8000"
+    command: uvicorn backend.app:app --host 0.0.0.0 --port 8000 --workers 4 --no-server-header
     depends_on:
       - postgres
       - redis
@@ -44,7 +46,7 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
-    command: celery -A backend.workers.celery_app beat --loglevel=info
+    command: celery -A backend.workers.celery_app beat --schedule=/tmp/celerybeat-schedule --loglevel=info
     depends_on:
       - redis
 

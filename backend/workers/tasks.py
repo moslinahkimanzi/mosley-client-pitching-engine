@@ -5,7 +5,7 @@ import json
 from datetime import timedelta
 
 from backend.db.pg import tx, utcnow
-from backend.services.billing_engine import commit_credits, refund_credits
+from backend.services.billing_engine import commit_credits_pg as commit_credits, refund_credits_pg as refund_credits
 from backend.services.evidence_pipeline import collect_deterministic_site_evidence
 from backend.workers.celery_app import celery_app
 
