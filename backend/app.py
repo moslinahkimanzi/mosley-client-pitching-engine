@@ -673,6 +673,8 @@ async def security_middleware(request: Request, call_next):
     token = request.cookies.get(COOKIE, "")
     if path in {"/api/auth/login", "/api/auth/register", "/api/auth/google"}:
         category, cap = "auth", 8
+    elif path in {"/api/auth/mfa", "/api/admin/mfa/setup", "/api/admin/mfa/verify"}:
+        category, cap = "admin_mfa", 12
     elif path == "/api/assistant/draft":
         category, cap = "ai", 6
     elif path == "/api/feedback":
@@ -971,7 +973,6 @@ def admin_mfa_setup(payload: AdminMfaSetupIn, user=Depends(current_user)):
     require_configured_admin(user)
     bootstrap = os.getenv("MCAS_ADMIN_BOOTSTRAP_TOKEN", "").strip()
     if len(bootstrap) < 32 or not hmac.compare_digest(bootstrap, payload.bootstrap_token):
-        log_security_event("admin.mfa_setup_denied", Request) if False else None
         raise HTTPException(403, "The administrator bootstrap token is invalid or not configured.")
     with db() as c:
         row = c.execute(
@@ -1173,11 +1174,27 @@ def login(payload: LoginIn, response: Response, request: Request):
         if not row or not verify_password(payload.password, row["password_hash"]):
             log_security_event("auth.login_failed", request)
             raise HTTPException(401, "Email or password is incorrect")
-        # Rotate active sessions on successful login to reduce stale-session risk.
+        # Rotate active sessions on successful login. Configured administrators must
+        # complete a second factor before a normal authenticated session is issued.
         c.execute("DELETE FROM sessions WHERE user_id=?", (row["id"],))
-        session = secrets.token_urlsafe(36)
-        c.execute("INSERT INTO sessions VALUES(?,?,?)", (token_hash(session), row["id"], int(time.time()) + SESSION_SECONDS))
-        audit(c, row["id"], "account.login")
+        c.execute("DELETE FROM mfa_login_challenges WHERE user_id=?", (row["id"],))
+        if ADMIN_MFA_REQUIRED and is_configured_admin_email(row["email"]) and row["admin_totp_secret"]:
+            challenge = secrets.token_urlsafe(32)
+            c.execute(
+                "INSERT INTO mfa_login_challenges(token_hash,user_id,expires_at,attempts) VALUES(?,?,?,0)",
+                (mfa_challenge_hash(challenge), row["id"], int(time.time()) + 300),
+            )
+            audit(c, row["id"], "admin.mfa_challenge_issued")
+        else:
+            challenge = None
+            session = secrets.token_urlsafe(36)
+            c.execute("INSERT INTO sessions VALUES(?,?,?)", (token_hash(session), row["id"], int(time.time()) + SESSION_SECONDS))
+            audit(c, row["id"], "account.login")
+    if challenge:
+        response.set_cookie("mcas_mfa_challenge", challenge, max_age=300, httponly=True,
+                            secure=IS_PROD, samesite="strict", path="/")
+        return {"mfa_required": True, "email": normalized_email,
+                "message": "Enter your six-digit authenticator code or a one-time recovery code to finish signing in."}
     response.set_cookie(COOKIE, session, max_age=SESSION_SECONDS, httponly=True,
                         secure=IS_PROD, samesite="lax", path="/")
     set_csrf(response)
@@ -1186,11 +1203,15 @@ def login(payload: LoginIn, response: Response, request: Request):
 @app.post("/api/auth/logout")
 def logout(request: Request, response: Response):
     token = request.cookies.get(COOKIE)
-    if token:
-        with db() as c:
+    challenge = request.cookies.get("mcas_mfa_challenge", "")
+    with db() as c:
+        if token:
             c.execute("DELETE FROM sessions WHERE token_hash=?", (token_hash(token),))
+        if challenge:
+            c.execute("DELETE FROM mfa_login_challenges WHERE token_hash=?", (mfa_challenge_hash(challenge),))
     response.delete_cookie(COOKIE, path="/", httponly=True, secure=IS_PROD, samesite="lax")
     response.delete_cookie(CSRF_COOKIE, path="/", secure=IS_PROD, samesite="strict")
+    response.delete_cookie("mcas_mfa_challenge", path="/", httponly=True, secure=IS_PROD, samesite="strict")
     return {"ok": True}
 
 @app.get("/api/auth/me")
