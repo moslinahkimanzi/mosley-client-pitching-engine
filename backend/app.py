@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import struct
 import hashlib
 import hmac
 import http.client
@@ -57,6 +58,20 @@ COOKIE = "mcas_session"
 CSRF_COOKIE = "mcas_csrf"
 SESSION_SECONDS = 60 * 60 * 24 * 14
 IS_PROD = os.getenv("MCAS_ENV", "development").lower() == "production"
+mfa_required_setting = os.getenv("MCAS_ADMIN_MFA_REQUIRED", "true" if IS_PROD else "false").strip().lower()
+if mfa_required_setting not in {"true", "false"}:
+    raise RuntimeError("MCAS_ADMIN_MFA_REQUIRED must be true or false.")
+ADMIN_MFA_REQUIRED = mfa_required_setting == "true"
+if IS_PROD and not ADMIN_MFA_REQUIRED:
+    raise RuntimeError("Production requires MCAS_ADMIN_MFA_REQUIRED=true.")
+if IS_PROD:
+    mfa_key = os.getenv("MCAS_ADMIN_MFA_ENCRYPTION_KEY", "").strip()
+    if Fernet is None or not mfa_key:
+        raise RuntimeError("Production requires a separate MCAS_ADMIN_MFA_ENCRYPTION_KEY.")
+    try:
+        Fernet(mfa_key.encode())
+    except Exception as exc:
+        raise RuntimeError("MCAS_ADMIN_MFA_ENCRYPTION_KEY must be a valid Fernet key.") from exc
 APP_VERSION = os.getenv("MCAS_VERSION", "1.2.0").strip()
 if not re.fullmatch(r"\d+\.\d+\.\d+", APP_VERSION):
     raise RuntimeError("MCAS_VERSION must use semantic version format, for example 1.1.0.")
@@ -104,6 +119,109 @@ def db():
 
 def now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def mfa_cipher():
+    if Fernet is None:
+        raise HTTPException(503, "The cryptography package is required for administrator MFA.")
+    key = os.getenv("MCAS_ADMIN_MFA_ENCRYPTION_KEY", "").strip()
+    if not key:
+        raise HTTPException(503, "Administrator MFA encryption is not configured on this server.")
+    try:
+        return Fernet(key.encode())
+    except Exception:
+        raise HTTPException(503, "Administrator MFA encryption key is invalid.")
+
+
+def encrypt_mfa_secret(secret: str) -> str:
+    return mfa_cipher().encrypt(secret.encode()).decode()
+
+
+def decrypt_mfa_secret(token: str) -> str:
+    try:
+        return mfa_cipher().decrypt(token.encode()).decode()
+    except Exception:
+        raise HTTPException(503, "The stored administrator authenticator secret cannot be decrypted.")
+
+
+def generate_totp_secret() -> str:
+    return base64.b32encode(secrets.token_bytes(20)).decode().rstrip("=")
+
+
+def totp_counter_for_code(secret: str, code: str, timestamp: Optional[float] = None):
+    if not re.fullmatch(r"\\d{6}", str(code or "")):
+        return None
+    moment = time.time() if timestamp is None else timestamp
+    key = base64.b32decode(secret + "=" * ((8 - len(secret) % 8) % 8), casefold=True)
+    current_counter = int(moment // 30)
+    for counter in (current_counter - 1, current_counter, current_counter + 1):
+        digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+        offset = digest[-1] & 0x0F
+        number = (struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF) % 1_000_000
+        expected = f"{number:06d}"
+        if hmac.compare_digest(expected, str(code)):
+            return counter
+    return None
+
+
+def totp_code(secret: str, timestamp: Optional[float] = None) -> str:
+    moment = time.time() if timestamp is None else timestamp
+    key = base64.b32decode(secret + "=" * ((8 - len(secret) % 8) % 8), casefold=True)
+    counter = int(moment // 30)
+    digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    number = (struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF) % 1_000_000
+    return f"{number:06d}"
+
+
+def mfa_challenge_hash(token: str) -> str:
+    return hashlib.sha256(("mcas-admin-mfa:" + token).encode()).hexdigest()
+
+
+def is_configured_admin_email(email: str) -> bool:
+    allowed = {
+        item.strip().lower()
+        for item in os.getenv("MCAS_ADMIN_EMAILS", "").split(",")
+        if item.strip()
+    }
+    return str(email or "").strip().lower() in allowed
+
+
+def require_configured_admin(user: dict):
+    if not user_is_admin(user):
+        raise HTTPException(403, "Administrator access is not enabled for this account.")
+    return user
+
+
+def verify_admin_mfa_code(c, user_id: str, secret: str, code: str):
+    """Verify a TOTP code or atomically consume one single-use recovery code."""
+    counter = totp_counter_for_code(secret, code)
+    if counter is not None:
+        row = c.execute("SELECT admin_totp_last_counter FROM users WHERE id=?", (user_id,)).fetchone()
+        last = row["admin_totp_last_counter"] if row else None
+        if last is not None and counter <= int(last):
+            return False
+        c.execute("UPDATE users SET admin_totp_last_counter=? WHERE id=?", (counter, user_id))
+        return True
+    if not re.fullmatch(r"[A-Za-z0-9_-]{12,64}", str(code or "")):
+        return False
+    digest = hashlib.sha256(str(code).encode()).hexdigest()
+    used = c.execute(
+        "UPDATE admin_mfa_recovery_codes SET used_at=? WHERE user_id=? AND code_hash=? AND used_at IS NULL",
+        (now(), user_id, digest),
+    )
+    return used.rowcount == 1
+
+
+def require_admin_mfa(user: dict):
+    require_configured_admin(user)
+    if not ADMIN_MFA_REQUIRED:
+        return user
+    with db() as c:
+        row = c.execute("SELECT admin_totp_secret FROM users WHERE id=?", (user["id"],)).fetchone()
+    if not row or not row["admin_totp_secret"]:
+        raise HTTPException(403, "Administrator MFA is required. Enrol an authenticator before using administrator tools.")
+    return user
 
 def add_column(con, table, name, definition):
     cols = {r["name"] for r in con.execute("PRAGMA table_info(" + table + ")").fetchall()}
@@ -155,6 +273,19 @@ def init_db():
         );
         CREATE TABLE IF NOT EXISTS google_auth_nonces(
             nonce_hash TEXT PRIMARY KEY, expires_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS mfa_login_challenges(
+            token_hash TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            expires_at INTEGER NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS admin_mfa_recovery_codes(
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            code_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            used_at TEXT,
+            PRIMARY KEY(user_id,code_hash)
         );
         CREATE TABLE IF NOT EXISTS oauth_states(
             state_hash TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -251,6 +382,11 @@ def init_db():
         add_column(c, "billing_orders", "exchange_rate", "TEXT")
         add_column(c, "billing_orders", "phone_number", "TEXT")
         add_column(c, "users", "google_subject", "TEXT")
+        add_column(c, "users", "admin_totp_secret", "TEXT")
+        add_column(c, "users", "admin_totp_pending_secret", "TEXT")
+        add_column(c, "users", "admin_totp_pending_expires", "INTEGER")
+        add_column(c, "users", "admin_totp_pending_attempts", "INTEGER NOT NULL DEFAULT 0")
+        add_column(c, "users", "admin_totp_last_counter", "INTEGER")
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_subject ON users(google_subject) WHERE google_subject IS NOT NULL")
         add_column(c, "leads", "contact_phone", "TEXT")
         add_column(c, "leads", "source_url", "TEXT")
@@ -291,12 +427,14 @@ def ensure_billing_account(c, user_id: str):
 
 
 def user_has_unlimited_access(c, user_id: str) -> bool:
-    """Resolve admin status from the server-side user record, never request data."""
+    """Resolve admin entitlement from the server-side verified identity and MFA state."""
     row = c.execute(
-        "SELECT id,email,google_subject FROM users WHERE id=?",
+        "SELECT id,email,google_subject,admin_totp_secret FROM users WHERE id=?",
         (user_id,),
     ).fetchone()
-    return bool(row and user_is_admin(dict(row)))
+    if not row or not user_is_admin(dict(row)):
+        return False
+    return bool(row["admin_totp_secret"]) if ADMIN_MFA_REQUIRED else True
 
 
 def require_credits(user_id: str, amount: int):
@@ -489,9 +627,7 @@ def user_is_admin(user: dict) -> bool:
     return str(user.get("email", "")).strip().lower() in allowed
 
 def require_admin(user: dict):
-    if not user_is_admin(user):
-        raise HTTPException(403, "Administrator access is not enabled for this account.")
-    return user
+    return require_admin_mfa(user)
 
 def owned_lead(c, lead_id, uid):
     row = c.execute("SELECT * FROM leads WHERE id=? AND user_id=?", (lead_id, uid)).fetchone()
@@ -676,6 +812,14 @@ class ServicePriceItemIn(BaseModel):
 class ServicePricesIn(BaseModel):
     currency_code: str = Field(pattern=r"^[A-Z]{3}$")
     items: list[ServicePriceItemIn] = Field(min_length=8, max_length=8)
+
+
+class MfaCodeIn(BaseModel):
+    code: str = Field(min_length=6, max_length=64, pattern=r"^[A-Za-z0-9_-]{6,64}$")
+
+
+class AdminMfaSetupIn(BaseModel):
+    bootstrap_token: str = Field(min_length=32, max_length=200)
 
 
 class AIIn(BaseModel):
