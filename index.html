@@ -189,6 +189,7 @@ body[data-theme="light"] .status{color:#1b4b80}
             <div class="field"><label for="customerMfaEnrollCode">Six-digit authenticator code</label><input id="customerMfaEnrollCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}"></div>
             <button id="verifyCustomerMfaSetup" class="primary" disabled>Enable customer protection</button>
             <div id="customerMfaRecoveryCodes" class="warning hide" style="margin-top:12px"></div>
+            <button id="continueAfterCustomerMfa" class="primary hide">I saved my recovery codes — continue</button>
             <div id="customerMfaNotice" class="notice" role="status"></div>
           </article>
           <article id="adminMfaChallenge" class="card hide" style="max-width:480px;margin:14px auto;text-align:left">
