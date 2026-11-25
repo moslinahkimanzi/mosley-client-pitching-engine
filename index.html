@@ -238,6 +238,14 @@ body[data-theme="light"] .status{color:#1b4b80}
 <div class="actions"><button id="saveWorkspacePreferences" class="primary" data-i18n="save_preferences">Save workspace preferences</button><button id="detectTimezone" data-i18n="detect_timezone">Detect my time zone</button></div>
 <div id="workspacePreferencesNotice" class="notice" role="status"></div>
 </article>
+<article class="card" style="margin-top:14px">
+<h2>My service price catalogue</h2>
+<p class="muted">Set the actual prices you charge clients. These amounts are stored privately in this workspace and shown in Services & Pricing. They are separate from MCAS subscription plans and prepaid credits.</p>
+<div class="field"><label for="servicePriceCurrency">Catalogue currency</label><select id="servicePriceCurrency"></select><small class="tiny">Changing this currency changes the label for every saved price. Review and update each amount before saving in a different currency; MCAS does not automatically convert your service prices.</small></div>
+<div id="workspaceServicePrices" class="grid"><div class="empty">Loading service prices…</div></div>
+<div class="actions"><button id="saveWorkspaceServicePrices" class="primary">Save service prices</button></div>
+<div id="servicePricesNotice" class="notice" role="status"></div>
+</article>
 <article class="card" style="margin-top:14px"><h2 data-i18n="regional_research_heading">How regional settings affect MCAS</h2>
 <div class="row"><span data-i18n="region_search_label">Prospect discovery</span><span class="badge" data-i18n="region_search_value">Country and language parameters</span></div>
 <div class="row"><span data-i18n="region_pricing_label">Website estimates</span><span class="badge" data-i18n="region_pricing_value">Local multiplier and currency conversion</span></div>
@@ -298,16 +306,7 @@ body[data-theme="light"] .status{color:#1b4b80}
 <section id="services-pricing" class="page">
 <div class="pagehead"><div><h1>Website Services & Pricing</h1><p>Clear starting prices for services delivered to businesses. Every project requires a written scope and final quotation.</p></div></div>
 <div class="warning">Indicative Kenya launch prices in KES. Third-party hosting, domains, paid assets, taxes and payment fees are separate. Final price depends on agreed scope. No guaranteed search rankings, sales or leads.</div>
-<div class="grid">
-<article class="card"><h2>Website audit</h2><div class="metric">KES 3,500–8,000</div><p class="muted">Bounded technical review, evidence, prioritised findings and recommendations. Not a penetration test or certification.</p></article>
-<article class="card"><h2>Repair sprint</h2><div class="metric">KES 5,000–20,000</div><p class="muted">A limited, agreed set of fixes to an existing website.</p></article>
-<article class="card"><h2>Landing page</h2><div class="metric">KES 15,000–25,000</div><p class="muted">One mobile-first conversion page with contact or WhatsApp enquiry action.</p></article>
-<article class="card"><h2>Starter business website</h2><div class="metric">KES 25,000–45,000</div><p class="muted">Typically 3–5 pages, responsive layout and foundational SEO.</p></article>
-<article class="card"><h2>Professional website</h2><div class="metric">KES 50,000–95,000</div><p class="muted">Typically 6–12 pages, custom design, forms and agreed content structure.</p></article>
-<article class="card"><h2>Small e-commerce</h2><div class="metric">KES 70,000–150,000</div><p class="muted">Product catalogue, cart, checkout and agreed payment integration.</p></article>
-<article class="card"><h2>Custom portal / workflow</h2><div class="metric">From KES 150,000</div><p class="muted">Discovery and a written technical scope required before quotation.</p></article>
-<article class="card"><h2>Website care</h2><div class="metric">KES 4,000–12,000 / month</div><p class="muted">Agreed maintenance, update and backup checks with defined support limits.</p></article>
-</div>
+<div id="servicesPricingCards" class="grid"><div class="empty">Loading service catalogue…</div></div>
 <article class="card" style="margin-top:14px"><h2>Recommended project payment milestones</h2><p>Suggested starting terms: 50% to book and start, 30% after staging review, and 20% before production handover. Agree the schedule in writing before work begins. The customer should own their domain and hosting accounts wherever possible.</p></article>
 </section>
 
