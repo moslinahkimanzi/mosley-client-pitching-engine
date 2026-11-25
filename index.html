@@ -180,6 +180,17 @@ body[data-theme="light"] .status{color:#1b4b80}
           <h2>Build a better process for finding and winning the right projects.</h2>
           <p>Sign in with Google to open your MCAS workspace. New users receive a workspace automatically. Access is currently in development/testing and production availability depends on the operator's deployment and Google verification.</p>
           <div id="googleSignInButton" style="display:flex;justify-content:center;min-height:46px;margin:18px auto 8px"></div>
+          <article id="customerMfaEnrollment" class="card hide" style="max-width:560px;margin:14px auto;text-align:left">
+            <h3>Secure your customer workspace</h3>
+            <p class="muted">Before using MCAS, add an authenticator app as a second sign-in factor. This protects your prospects, proposals, reports and billing records even if your Google session is exposed.</p>
+            <div id="customerMfaStatus" class="notice" role="status">Customer MFA setup is required.</div>
+            <button id="beginCustomerMfaSetup" class="primary">Set up authenticator</button>
+            <div id="customerMfaSetupResult" class="item hide" style="margin-top:12px"></div>
+            <div class="field"><label for="customerMfaEnrollCode">Six-digit authenticator code</label><input id="customerMfaEnrollCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}"></div>
+            <button id="verifyCustomerMfaSetup" class="primary" disabled>Enable customer protection</button>
+            <div id="customerMfaRecoveryCodes" class="warning hide" style="margin-top:12px"></div>
+            <div id="customerMfaNotice" class="notice" role="status"></div>
+          </article>
           <article id="adminMfaChallenge" class="card hide" style="max-width:480px;margin:14px auto;text-align:left">
             <h3>Administrator verification</h3>
             <p class="muted">Enter the six-digit code from your authenticator app, or one of your unused recovery codes.</p>
