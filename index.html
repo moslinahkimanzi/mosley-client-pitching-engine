@@ -180,6 +180,13 @@ body[data-theme="light"] .status{color:#1b4b80}
           <h2>Build a better process for finding and winning the right projects.</h2>
           <p>Sign in with Google to open your MCAS workspace. New users receive a workspace automatically. Access is currently in development/testing and production availability depends on the operator's deployment and Google verification.</p>
           <div id="googleSignInButton" style="display:flex;justify-content:center;min-height:46px;margin:18px auto 8px"></div>
+          <article id="adminMfaChallenge" class="card hide" style="max-width:480px;margin:14px auto;text-align:left">
+            <h3>Administrator verification</h3>
+            <p class="muted">Enter the six-digit code from your authenticator app, or one of your unused recovery codes.</p>
+            <div class="field"><label for="adminMfaLoginCode">Authenticator / recovery code</label><input id="adminMfaLoginCode" autocomplete="one-time-code" inputmode="text" maxlength="64" placeholder="Six-digit code or recovery code"></div>
+            <button id="submitAdminMfaLogin" class="primary">Verify and continue</button>
+            <div id="adminMfaLoginNotice" class="notice" role="status"></div>
+          </article>
           <div id="authNotice" class="notice" role="status" aria-live="polite"></div>
           <p class="tiny">Administrator tools are available only to verified Google accounts listed in the server's <code>MCAS_ADMIN_EMAILS</code> setting.</p>
         </div>
@@ -356,6 +363,20 @@ body[data-theme="light"] .status{color:#1b4b80}
 <section id="admin-maintenance" class="page">
 <div class="pagehead"><div><h1>Administrator maintenance</h1><p>Review product feedback, improvement themes and security-maintenance readiness.</p></div><button class="primary" id="refreshMaintenanceBtn">↻ Refresh dashboard</button></div>
 <div class="warning">Administrator-only view. This page reports configuration and feedback; it does not run a penetration test, verify off-site backups, fetch live GitHub workflow results or deploy code.</div>
+<article class="card" id="adminMfaCard" style="margin:14px 0">
+  <h2>Administrator multi-factor authentication</h2>
+  <p class="muted">Production administrator tools and unlimited access require a Google-verified allowlisted identity plus an authenticator app. Recovery codes are one-time use. Store them securely outside MCAS.</p>
+  <div id="adminMfaStatus" class="notice" role="status">Checking administrator MFA…</div>
+  <div id="adminMfaSetupFields">
+    <div class="field"><label for="adminMfaBootstrapToken">One-time administrator bootstrap token from the hosting secret manager</label><input id="adminMfaBootstrapToken" type="password" autocomplete="off" maxlength="200"></div>
+    <button id="beginAdminMfaSetup" class="primary">Start authenticator setup</button>
+    <div id="adminMfaSetupResult" class="item hide" style="margin-top:12px"></div>
+    <div class="field"><label for="adminMfaEnrollCode">Six-digit code from your authenticator app</label><input id="adminMfaEnrollCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}"></div>
+    <button id="verifyAdminMfaSetup" class="primary" disabled>Enable MFA and create recovery codes</button>
+  </div>
+  <div id="adminMfaRecoveryCodes" class="warning hide" style="margin-top:12px"></div>
+  <div id="adminMfaNotice" class="notice" role="status"></div>
+</article>
 <div class="grid">
 <article class="card"><div class="label">ALL FEEDBACK</div><div class="metric" id="adminFeedbackTotal">0</div></article>
 <article class="card"><div class="label">AWAITING REVIEW</div><div class="metric" id="adminFeedbackOpen">0</div></article>
