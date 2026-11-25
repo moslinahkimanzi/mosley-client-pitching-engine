@@ -19,7 +19,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Optional, Literal
@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 
 from backend.audit_engine import advanced_site_audit
 from backend.google_auth import verify_google_id_token
+from backend.billing import PLANS, CREDIT_PACKS, product_for_order, credits_for_audit, credits_for_competitors
 
 try:
     from cryptography.fernet import Fernet, InvalidToken
@@ -190,6 +191,12 @@ def init_db():
             feedback_id TEXT NOT NULL REFERENCES customer_feedback(id) ON DELETE CASCADE,
             PRIMARY KEY(review_id,feedback_id)
         );
+        CREATE TABLE IF NOT EXISTS billing_accounts(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, plan_code TEXT NOT NULL DEFAULT 'free', monthly_credits INTEGER NOT NULL DEFAULT 20, purchased_credits INTEGER NOT NULL DEFAULT 0, period_start TEXT, period_end TEXT, updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS billing_orders(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, tx_ref TEXT NOT NULL UNIQUE, item_type TEXT NOT NULL CHECK(item_type IN ('subscription','credits')), item_code TEXT NOT NULL, amount_kes INTEGER NOT NULL, currency TEXT NOT NULL DEFAULT 'KES', status TEXT NOT NULL DEFAULT 'pending', checkout_url TEXT, provider_transaction_id TEXT UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS billing_webhook_events(event_key TEXT PRIMARY KEY, received_at TEXT NOT NULL, outcome TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS billing_credit_ledger(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, delta_monthly INTEGER NOT NULL DEFAULT 0, delta_purchased INTEGER NOT NULL DEFAULT 0, reason TEXT NOT NULL, reference TEXT, created_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_billing_orders_user_created ON billing_orders(user_id,created_at);
+        CREATE INDEX IF NOT EXISTS idx_billing_ledger_user_created ON billing_credit_ledger(user_id,created_at);
         CREATE INDEX IF NOT EXISTS idx_feedback_user_created ON customer_feedback(user_id,created_at);
         CREATE INDEX IF NOT EXISTS idx_feedback_status_created ON customer_feedback(status,created_at);
         CREATE INDEX IF NOT EXISTS idx_leads_user_updated ON leads(user_id,updated_at);
@@ -215,12 +222,116 @@ def init_db():
         add_column(c, "drafts", "to_email", "TEXT")
         add_column(c, "drafts", "gmail_draft_id", "TEXT")
         add_column(c, "customer_feedback", "ai_analysis_consent", "INTEGER NOT NULL DEFAULT 0")
+        c.execute("INSERT OR IGNORE INTO billing_accounts(user_id,plan_code,monthly_credits,purchased_credits,updated_at) SELECT id,'free',20,0,? FROM users", (now(),))
 
 init_db()
 
 def audit(c, uid, action, metadata=None):
     c.execute("INSERT INTO audit_log(user_id,action,created_at,metadata) VALUES(?,?,?,?)",
               (uid, action, now(), json.dumps(metadata or {})[:4000]))
+
+def ensure_billing_account(c, user_id: str):
+    c.execute("INSERT OR IGNORE INTO billing_accounts(user_id,plan_code,monthly_credits,purchased_credits,updated_at) VALUES(?,'free',20,0,?)", (user_id, now()))
+    account = c.execute("SELECT * FROM billing_accounts WHERE user_id=?", (user_id,)).fetchone()
+    stamp = datetime.now(timezone.utc)
+    if not account["period_end"] and account["plan_code"] == "free":
+        period_end = (stamp + timedelta(days=30)).isoformat()
+        c.execute("UPDATE billing_accounts SET period_start=?,period_end=?,updated_at=? WHERE user_id=?", (stamp.isoformat(), period_end, now(), user_id))
+        c.execute("INSERT INTO billing_credit_ledger(id,user_id,delta_monthly,delta_purchased,reason,reference,created_at) VALUES(?,?,20,0,'free_monthly_allowance',?,?)", (secrets.token_urlsafe(16), user_id, stamp.isoformat(), now()))
+        account = c.execute("SELECT * FROM billing_accounts WHERE user_id=?", (user_id,)).fetchone()
+    elif account["period_end"]:
+        try:
+            expired = datetime.fromisoformat(account["period_end"].replace("Z", "+00:00")) <= stamp
+        except (TypeError, ValueError):
+            expired = True
+        if expired:
+            period_end = (stamp + timedelta(days=30)).isoformat()
+            monthly_delta = 20 - int(account["monthly_credits"])
+            c.execute("UPDATE billing_accounts SET plan_code='free',monthly_credits=20,period_start=?,period_end=?,updated_at=? WHERE user_id=?", (stamp.isoformat(), period_end, now(), user_id))
+            c.execute("INSERT INTO billing_credit_ledger(id,user_id,delta_monthly,delta_purchased,reason,reference,created_at) VALUES(?,?,?,?,?,?,?)", (secrets.token_urlsafe(16), user_id, monthly_delta, 0, "free_monthly_allowance", stamp.isoformat(), now()))
+            account = c.execute("SELECT * FROM billing_accounts WHERE user_id=?", (user_id,)).fetchone()
+    return account
+
+
+def require_credits(user_id: str, amount: int):
+    with db() as c:
+        account = ensure_billing_account(c, user_id)
+        if int(account["monthly_credits"]) + int(account["purchased_credits"]) < amount:
+            raise HTTPException(402, "Not enough MCAS credits. Choose a monthly plan or buy a credit pack.")
+
+
+def debit_credits(user_id: str, amount: int, reason: str, reference: Optional[str] = None):
+    if amount <= 0: return
+    with db() as c:
+        c.execute("BEGIN IMMEDIATE")
+        account = ensure_billing_account(c, user_id)
+        monthly, purchased = int(account['monthly_credits']), int(account['purchased_credits'])
+        if monthly + purchased < amount:
+            raise HTTPException(402, "Not enough MCAS credits. Choose a monthly plan or buy a credit pack.")
+        used_monthly = min(monthly, amount)
+        used_purchased = amount - used_monthly
+        c.execute("UPDATE billing_accounts SET monthly_credits=?,purchased_credits=?,updated_at=? WHERE user_id=?", (monthly-used_monthly, purchased-used_purchased, now(), user_id))
+        c.execute("INSERT INTO billing_credit_ledger(id,user_id,delta_monthly,delta_purchased,reason,reference,created_at) VALUES(?,?,?,?,?,?,?)", (secrets.token_urlsafe(16), user_id, -used_monthly, -used_purchased, reason[:100], reference, now()))
+        audit(c, user_id, "billing.credits_debited", {"amount": amount, "reason": reason[:100]})
+
+def billing_provider_ready() -> bool:
+    enabled = os.getenv("MCAS_BILLING_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+    return bool(enabled and os.getenv("FLW_SECRET_KEY", "").strip()
+                and os.getenv("FLW_SECRET_HASH", "").strip()
+                and os.getenv("MCAS_PUBLIC_URL", "").strip())
+
+
+def flutterwave_request(method: str, path: str, payload: Optional[dict] = None):
+    key = os.getenv("FLW_SECRET_KEY", "").strip()
+    if not key: raise HTTPException(503, "Payment processing is not configured.")
+    body = json.dumps(payload).encode('utf-8') if payload is not None else None
+    req = urllib.request.Request("https://api.flutterwave.com/v3/" + path.lstrip('/'), data=body, headers={"Authorization":"Bearer "+key,"Content-Type":"application/json","Accept":"application/json"}, method=method.upper())
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response: result = json.loads(response.read(1000000))
+    except urllib.error.HTTPError as exc:
+        raise HTTPException(502, "Payment provider rejected the request (HTTP " + str(exc.code) + ").")
+    except Exception:
+        raise HTTPException(502, "Payment provider could not be reached. No payment has been confirmed.")
+    if not isinstance(result, dict): raise HTTPException(502, "Payment provider returned an invalid response.")
+    return result
+
+def verify_flutterwave_transaction(transaction_id: str, expected_ref: str, expected_amount: int):
+    result = flutterwave_request("GET", "transactions/" + urllib.parse.quote(str(transaction_id), safe='') + "/verify")
+    data = result.get('data') if isinstance(result.get('data'), dict) else {}
+    if result.get('status') != 'success' or str(data.get('status','')).lower() != 'successful' or str(data.get('tx_ref','')) != expected_ref or str(data.get('currency','')).upper() != 'KES':
+        raise HTTPException(400, "Payment could not be verified against this MCAS order.")
+    try: amount = float(data.get('amount'))
+    except (TypeError, ValueError): raise HTTPException(400, "Verified payment amount is invalid.")
+    if amount != float(expected_amount): raise HTTPException(400, "Verified payment amount does not match the MCAS order.")
+    return data
+
+def grant_verified_order(order_id: str, transaction_id: str):
+    with db() as c:
+        c.execute("BEGIN IMMEDIATE")
+        order = c.execute("SELECT * FROM billing_orders WHERE id=?", (order_id,)).fetchone()
+        if not order: raise HTTPException(404, "Payment order not found.")
+        if order['status'] == 'paid': return False
+        if order['status'] != 'pending': raise HTTPException(409, "Payment order is not pending.")
+        if c.execute("SELECT 1 FROM billing_orders WHERE provider_transaction_id=?", (str(transaction_id),)).fetchone(): raise HTTPException(409, "Provider transaction was already applied.")
+        account = ensure_billing_account(c, order['user_id'])
+        stamp = now()
+        if order['item_type'] == 'subscription':
+            plan = PLANS.get(order['item_code'])
+            if not plan or plan['amount_kes'] != int(order['amount_kes']): raise HTTPException(409, "Stored subscription order does not match catalogue.")
+            period_end = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+            monthly_delta = int(plan['monthly_credits']) - int(account['monthly_credits'])
+            c.execute("UPDATE billing_accounts SET plan_code=?,monthly_credits=?,period_start=?,period_end=?,updated_at=? WHERE user_id=?", (order['item_code'], plan['monthly_credits'], stamp, period_end, stamp, order['user_id']))
+            purchased_delta = 0
+        elif order['item_type'] == 'credits':
+            pack = CREDIT_PACKS.get(order['item_code'])
+            if not pack or pack['amount_kes'] != int(order['amount_kes']): raise HTTPException(409, "Stored credit order does not match catalogue.")
+            c.execute("UPDATE billing_accounts SET purchased_credits=purchased_credits+?,updated_at=? WHERE user_id=?", (pack['credits'], stamp, order['user_id']))
+            monthly_delta, purchased_delta = 0, int(pack['credits'])
+        else: raise HTTPException(409, "Unsupported billing order type.")
+        c.execute("INSERT INTO billing_credit_ledger(id,user_id,delta_monthly,delta_purchased,reason,reference,created_at) VALUES(?,?,?,?,?,?,?)", (secrets.token_urlsafe(16), order['user_id'], monthly_delta, purchased_delta, order['item_type']+':'+order['item_code'], order['tx_ref'], stamp))
+        c.execute("UPDATE billing_orders SET status='paid',provider_transaction_id=?,updated_at=? WHERE id=? AND status='pending'", (str(transaction_id), stamp, order_id))
+        audit(c, order['user_id'], "billing.order_paid", {"order_id":order_id,"item_type":order['item_type'],"item_code":order['item_code']})
+    return True
 
 def password_hash(password: str) -> str:
     salt = secrets.token_bytes(16)
@@ -368,7 +479,7 @@ async def security_middleware(request: Request, call_next):
         log_security_event("request.origin_missing", request)
         return Response("Origin required", status_code=403, headers={"Cache-Control": "no-store"})
 
-    if unsafe and request.url.path not in {"/api/integrations/gmail/callback", "/api/auth/google"}:
+    if unsafe and request.url.path not in {"/api/integrations/gmail/callback", "/api/auth/google", "/api/billing/flutterwave/webhook"}:
         cookie_token = request.cookies.get(CSRF_COOKIE, "")
         header_token = request.headers.get("x-csrf-token", "")
         if not cookie_token or not header_token or not hmac.compare_digest(cookie_token, header_token) or not valid_csrf(header_token):
@@ -389,6 +500,10 @@ async def security_middleware(request: Request, call_next):
         category, cap = "improvement_analysis", 3
     elif path in {"/api/research/search", "/api/research/run"}:
         category, cap = "search", 5
+    elif path == "/api/billing/flutterwave/webhook":
+        category, cap = "billing_webhook", 60
+    elif path == "/api/billing/checkout":
+        category, cap = "billing", 10
     elif path == "/api/competitor-intelligence":
         category, cap = "competitor", 5
     elif path == "/api/audit-website" or path == "/api/admin/test-lab/audit" or path.endswith("/verify-website"):
@@ -1310,6 +1425,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
     location = payload.location.strip()
     if not location or not re.search(r"[A-Za-z0-9]", location):
         raise HTTPException(422, "Enter a town, city or named administrative area.")
+    require_credits(user["id"], 5)
     preferences = workspace_preferences_for(user["id"])
     country_code = preferences["country_code"].lower()
     language_code = preferences["language_code"]
@@ -1534,6 +1650,7 @@ def run_business_research(payload: ResearchRunIn, user=Depends(current_user)):
             "results": len(discovered), "saved": saved_count,
         })
     discovered.sort(key=lambda item: item.get("opportunity_score", 0), reverse=True)
+    debit_credits(user["id"], 5, "prospect_research")
     state_counts = {}
     for item in discovered:
         state_counts[item["website_state"]] = state_counts.get(item["website_state"], 0) + 1
@@ -1651,6 +1768,7 @@ def verify_lead_business(lead_id: str, user=Depends(current_user)):
         lead = owned_lead(c, lead_id, user["id"])
     if not lead["name"] or not lead["market"]:
         raise HTTPException(422, "The prospect needs a business name and location before it can be rechecked.")
+    require_credits(user["id"], 3)
     preferences = workspace_preferences_for(user["id"])
     query = '"' + lead["name"] + '" ' + lead["market"]
     data = serper_request("places", {
@@ -1751,6 +1869,7 @@ def verify_lead_business(lead_id: str, user=Depends(current_user)):
         audit(c, user["id"], "lead.business_rechecked", {
             "lead_id": lead_id, "status": verification["status"],
         })
+    debit_credits(user["id"], 3, "business_identity_recheck", lead_id)
     return verification
 
 
@@ -1890,6 +2009,7 @@ def verify_lead_website(lead_id: str, user=Depends(current_user)):
 
 @app.post("/api/audit-website")
 def audit_website(payload: WebsiteAuditIn, user=Depends(current_user)):
+    require_credits(user["id"], credits_for_audit(payload.max_pages))
     result = advanced_site_audit(payload.url, safe_site_fetch, payload.max_pages)
     result["checked_at"] = now()
     if payload.lead_id:
@@ -1905,6 +2025,7 @@ def audit_website(payload: WebsiteAuditIn, user=Depends(current_user)):
         with db() as c:
             audit(c, user["id"], "website.advanced_audit", {"url": result.get("url"),
                   "pages_checked": result.get("pages_checked")})
+    debit_credits(user["id"], credits_for_audit(payload.max_pages), "advanced_website_audit", payload.lead_id)
     return result
 
 
@@ -1917,6 +2038,7 @@ def competitor_intelligence(payload: CompetitorIn, user=Depends(current_user)):
     if not market:
         raise HTTPException(422, "The selected prospect needs a market or location before competitor research.")
 
+    require_credits(user["id"], credits_for_competitors(payload.max_results))
     category = payload.industry.replace("_", " ")
     query = category + " businesses in " + market
     data = serper_request("places", {
@@ -2034,6 +2156,7 @@ def competitor_intelligence(payload: CompetitorIn, user=Depends(current_user)):
             "industry": payload.industry,
             "candidate_count": len(competitors),
         })
+    debit_credits(user["id"], credits_for_competitors(payload.max_results), "competitor_intelligence", payload.lead_id)
     return result
 
 
@@ -2159,6 +2282,7 @@ def call_configured_ai(messages: list[dict], temperature: float = 0.2, max_token
 
 @app.post("/api/assistant/draft")
 def ai_assistant(payload: AIIn, request: Request, user=Depends(current_user)):
+    require_credits(user["id"], 1)
     base = os.getenv("AI_API_BASE_URL", "").rstrip("/")
     key = os.getenv("AI_API_KEY", "")
     model = os.getenv("AI_MODEL", "")
@@ -2284,6 +2408,7 @@ def ai_assistant(payload: AIIn, request: Request, user=Depends(current_user)):
             502,
             "The AI provider returned an unexpected or empty response. No draft was saved."
         )
+    debit_credits(user["id"], 1, "ai_generation", payload.task)
     with db() as c:
         audit(c, user["id"], "assistant.generated", {"task": payload.task})
     return {"draft": str(text)[:16000], "provider": "configured AI provider",
@@ -2996,7 +3121,86 @@ def admin_test_lab_plan(payload: AdminTestPlanIn, user=Depends(current_user)):
     return plan
 
 
-@app.get("/api/billing/status")
+class BillingCheckoutIn(BaseModel):
+    item_type: Literal['subscription', 'credits']
+    item_code: str = Field(min_length=2, max_length=30)
+    payment_method: Literal['card', 'mpesa'] = 'mpesa'
+    phone_number: Optional[str] = Field(default=None, min_length=9, max_length=20)
+
+@app.get('/api/billing/status')
 def billing_status(user=Depends(current_user)):
-    return {"plan": "beta", "billing_enabled": False,
-            "message": "Subscription checkout is not enabled in this build. Do not accept customer payments until a payment provider and webhook verification are configured."}
+    with db() as c:
+        account = ensure_billing_account(c, user['id'])
+        orders = c.execute('SELECT id,item_type,item_code,amount_kes,currency,status,created_at FROM billing_orders WHERE user_id=? ORDER BY created_at DESC LIMIT 10', (user['id'],)).fetchall()
+    configured = billing_provider_ready()
+    return {'plan':account['plan_code'],'monthly_credits':int(account['monthly_credits']),'purchased_credits':int(account['purchased_credits']),'total_credits':int(account['monthly_credits'])+int(account['purchased_credits']),'period_start':account['period_start'],'period_end':account['period_end'],'billing_enabled':configured,'provider':'Flutterwave' if configured else None,'payment_methods':['M-Pesa','Card'],'renewal_policy':'Monthly renewal is customer-initiated. Automatic M-Pesa renewal is not enabled.','plans':PLANS,'credit_packs':CREDIT_PACKS,'recent_orders':[dict(row) for row in orders],'message':'Checkout is configured; sandbox verification and merchant approval are still required before live sales.' if configured else 'Payments are disabled until server-side Flutterwave keys, webhook secret hash and public URL are configured.'}
+
+@app.post('/api/billing/checkout')
+def billing_checkout(payload: BillingCheckoutIn, user=Depends(current_user)):
+    product = product_for_order(payload.item_type, payload.item_code)
+    if not product or int(product.get('amount_kes',0)) <= 0: raise HTTPException(422, 'Choose a valid paid subscription or credit pack.')
+    if not billing_provider_ready(): raise HTTPException(503, 'MCAS billing is disabled until the operator enables it after sandbox testing and merchant approval.')
+    public_url = os.getenv('MCAS_PUBLIC_URL','').strip().rstrip('/')
+    if IS_PROD and not public_url.startswith('https://'): raise HTTPException(503, 'Production checkout requires a public HTTPS MCAS_PUBLIC_URL.')
+    if not public_url: raise HTTPException(503, 'MCAS_PUBLIC_URL is not configured. Payments remain disabled.')
+    if payload.payment_method == 'mpesa' and not payload.phone_number: raise HTTPException(422, 'Enter the M-Pesa phone number for the payment request.')
+    if payload.phone_number and not re.fullmatch(r'\\+?\\d{9,15}', payload.phone_number.strip()): raise HTTPException(422, 'Enter a valid international phone number.')
+    tx_ref, order_id, stamp = 'MCAS-'+secrets.token_urlsafe(18), secrets.token_urlsafe(18), now()
+    with db() as c:
+        c.execute("INSERT INTO billing_orders(id,user_id,tx_ref,item_type,item_code,amount_kes,currency,status,created_at,updated_at) VALUES(?,?,?,?,?,?,'KES','pending',?,?)", (order_id,user['id'],tx_ref,payload.item_type,payload.item_code,int(product['amount_kes']),stamp,stamp))
+    request_data = {'tx_ref':tx_ref,'amount':int(product['amount_kes']),'currency':'KES','redirect_url':public_url+'/?payment_return='+urllib.parse.quote(order_id),'payment_options':'card' if payload.payment_method == 'card' else 'mpesa','customer':{'email':user['email'],'phone_number':payload.phone_number or ''},'customizations':{'title':'Mosley Client Acquisition System','description':product['name']},'meta':{'mcas_order_id':order_id,'mcas_item_type':payload.item_type,'mcas_item_code':payload.item_code}}
+    try:
+        result = flutterwave_request('POST','payments',request_data)
+        checkout_url = result.get('data',{}).get('link') if isinstance(result.get('data'),dict) else None
+        if result.get('status') != 'success' or not isinstance(checkout_url,str) or not checkout_url.startswith('https://'): raise HTTPException(502,'Payment provider did not return a valid hosted checkout URL.')
+    except Exception:
+        with db() as c: c.execute("UPDATE billing_orders SET status='failed',updated_at=? WHERE id=? AND status='pending'", (now(),order_id))
+        raise
+    with db() as c:
+        c.execute('UPDATE billing_orders SET checkout_url=?,updated_at=? WHERE id=?',(checkout_url,now(),order_id))
+        audit(c,user['id'],'billing.checkout_created',{'order_id':order_id,'item_type':payload.item_type,'item_code':payload.item_code,'payment_method':payload.payment_method})
+    return {'order_id':order_id,'tx_ref':tx_ref,'checkout_url':checkout_url,'amount_kes':int(product['amount_kes']),'currency':'KES','message':'Checkout created. Paid access and credits are granted only after server-side transaction verification.'}
+
+@app.post('/api/billing/flutterwave/webhook')
+async def flutterwave_webhook(request: Request):
+    secret = os.getenv('FLW_SECRET_HASH','').strip()
+    signature = request.headers.get('verif-hash','').strip()
+    if not secret or not signature or not hmac.compare_digest(signature, secret):
+        raise HTTPException(401,'Invalid payment webhook signature.')
+    try: payload = await request.json()
+    except Exception: raise HTTPException(400,'Invalid webhook payload.')
+    data = payload.get('data') if isinstance(payload,dict) else None
+    if not isinstance(data,dict): return {'status':'ignored'}
+    transaction_id = data.get('id')
+    if not transaction_id: return {'status':'ignored'}
+    event_key = str(payload.get('id') or (str(transaction_id)+':'+str(payload.get('type') or payload.get('event') or 'charge.completed')))
+    with db() as c:
+        if c.execute('SELECT 1 FROM billing_webhook_events WHERE event_key=?',(event_key,)).fetchone(): return {'status':'duplicate'}
+    if str(data.get('status','')).lower() not in {'successful','succeeded'}:
+        with db() as c: c.execute("INSERT OR IGNORE INTO billing_webhook_events(event_key,received_at,outcome) VALUES(?,?,?)",(event_key,now(),'not_successful'))
+        return {'status':'not_successful'}
+    metadata = data.get('meta') if isinstance(data.get('meta'),dict) else {}
+    order_id_hint = str(metadata.get('mcas_order_id') or '')
+    tx_ref_hint = str(data.get('tx_ref') or data.get('reference') or '')
+    with db() as c:
+        order = c.execute('SELECT * FROM billing_orders WHERE id=?',(order_id_hint,)).fetchone() if order_id_hint else None
+        if not order and tx_ref_hint:
+            order = c.execute('SELECT * FROM billing_orders WHERE tx_ref=?',(tx_ref_hint,)).fetchone()
+    if not order: return {'status':'ignored'}
+    verify_path = 'transactions/verify_by_reference?' + urllib.parse.urlencode({'tx_ref':order['tx_ref']})
+    verified = flutterwave_request('GET',verify_path)
+    tx = verified.get('data') if isinstance(verified.get('data'),dict) else {}
+    if verified.get('status') != 'success' or str(tx.get('status','')).lower() != 'successful' or str(tx.get('tx_ref','')) != order['tx_ref'] or str(tx.get('currency','')).upper() != 'KES':
+        raise HTTPException(400,'Payment could not be verified against the MCAS order.')
+    try: paid_amount = float(tx.get('amount'))
+    except (TypeError,ValueError): raise HTTPException(400,'Verified payment amount is invalid.')
+    if paid_amount != float(order['amount_kes']): raise HTTPException(400,'Verified payment amount does not match the MCAS order.')
+    grant_verified_order(order['id'],str(tx.get('id') or transaction_id))
+    with db() as c: c.execute('INSERT OR IGNORE INTO billing_webhook_events(event_key,received_at,outcome) VALUES(?,?,?)',(event_key,now(),'fulfilled'))
+    return {'status':'fulfilled'}
+
+@app.get('/api/billing/return')
+def billing_return(order_id: str = Query(min_length=1,max_length=100), user=Depends(current_user)):
+    with db() as c: order = c.execute('SELECT id,status,item_type,item_code,amount_kes,currency FROM billing_orders WHERE id=? AND user_id=?',(order_id,user['id'])).fetchone()
+    if not order: raise HTTPException(404,'Payment order not found.')
+    return {'order':dict(order),'message':'A checkout redirect is not proof of payment. Wait for verified confirmation or refresh billing status.'}
