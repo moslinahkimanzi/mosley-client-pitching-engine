@@ -62,9 +62,9 @@ function billingMethodAvailable(method){
 function renderBilling(){
  const data=state.billing;if(!data)return;
  $('billingPlan').textContent=data.plan==='free'?'Free':((data.plans?.[data.plan]?.name)||data.plan||'Free');
- $('billingMonthlyCredits').textContent=Number(data.monthly_credits||0).toLocaleString();
- $('billingPurchasedCredits').textContent=Number(data.purchased_credits||0).toLocaleString();
- $('billingTotalCredits').textContent=Number(data.total_credits||0).toLocaleString();
+ $('billingMonthlyCredits').textContent=data.is_unlimited_admin?'Unlimited':Number(data.monthly_credits||0).toLocaleString();
+ $('billingPurchasedCredits').textContent=data.is_unlimited_admin?'Unlimited':Number(data.purchased_credits||0).toLocaleString();
+ $('billingTotalCredits').textContent=data.is_unlimited_admin?'Unlimited':Number(data.total_credits||0).toLocaleString();
  $('billingPeriod').textContent=data.plan==='free'?(data.period_end?'Free allowance refreshes '+new Date(data.period_end).toLocaleDateString():'Free plan'):(data.period_end?'Paid through '+new Date(data.period_end).toLocaleDateString():'Paid plan period not active');
  const method='mpesa';
  if($('billingMethod'))$('billingMethod').value='mpesa';

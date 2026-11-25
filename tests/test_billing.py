@@ -1,4 +1,6 @@
 import os
+import tempfile
+from pathlib import Path
 import unittest
 import json
 import uuid
@@ -17,8 +19,14 @@ import backend.app as mcas
 
 class BillingTest(unittest.TestCase):
     def setUp(self):
-        with mcas.db() as connection:
-            connection.execute('DELETE FROM security_rate_limits')
+        self.original_db_path = mcas.DB_PATH
+        self.test_db_dir = tempfile.TemporaryDirectory(prefix="mcas-billing-test-")
+        mcas.DB_PATH = Path(self.test_db_dir.name) / "mcas-test.db"
+        mcas.init_db()
+
+    def tearDown(self):
+        mcas.DB_PATH = self.original_db_path
+        self.test_db_dir.cleanup()
 
     def _client(self):
         client = TestClient(mcas.app)
