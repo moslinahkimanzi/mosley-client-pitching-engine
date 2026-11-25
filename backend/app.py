@@ -1040,6 +1040,149 @@ def google_authenticate(payload: GoogleSignInIn, response: Response, request: Re
     return {"id": uid, "email": email, "is_admin": user_is_admin({"email": email, "google_subject": subject}),
             "customer_mfa_setup_required": customer_setup_required}
 
+@app.get("/api/customer/mfa/status")
+def customer_mfa_status(user=Depends(current_identity_for_mfa_setup)):
+    require_configured_customer(user)
+    with db() as connection:
+        row = connection.execute(
+            """SELECT customer_totp_secret,customer_totp_pending_secret,
+                      customer_totp_pending_expires FROM users WHERE id=?""",
+            (user["id"],),
+        ).fetchone()
+        recovery_count = connection.execute(
+            "SELECT COUNT(*) FROM customer_mfa_recovery_codes WHERE user_id=? AND used_at IS NULL",
+            (user["id"],),
+        ).fetchone()[0]
+    return {
+        "enabled": bool(row and row["customer_totp_secret"]),
+        "setup_pending": bool(row and row["customer_totp_pending_secret"]
+                              and int(row["customer_totp_pending_expires"] or 0) > int(time.time())),
+        "required": CUSTOMER_MFA_REQUIRED,
+        "unused_recovery_codes": int(recovery_count),
+        "message": "Customer MFA protects your MCAS workspace. Recovery codes are single-use.",
+    }
+
+
+@app.post("/api/customer/mfa/setup")
+def customer_mfa_setup(user=Depends(current_identity_for_mfa_setup)):
+    require_configured_customer(user)
+    with db() as connection:
+        row = connection.execute(
+            "SELECT customer_totp_secret FROM users WHERE id=?",
+            (user["id"],),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Customer account not found.")
+        if row["customer_totp_secret"]:
+            raise HTTPException(409, "Customer MFA is already enabled. Sign in with an authenticator or unused recovery code.")
+        secret = generate_totp_secret()
+        connection.execute(
+            """UPDATE users SET customer_totp_pending_secret=?,customer_totp_pending_expires=?,
+               customer_totp_pending_attempts=0 WHERE id=?""",
+            (encrypt_mfa_secret(secret, "MCAS_CUSTOMER_MFA_ENCRYPTION_KEY"),
+             int(time.time()) + 600, user["id"]),
+        )
+        connection.execute("DELETE FROM customer_mfa_recovery_codes WHERE user_id=?", (user["id"],))
+        audit(connection, user["id"], "customer.mfa_setup_started")
+    label = urllib.parse.quote("MCAS customer:" + user["email"])
+    uri = "otpauth://totp/" + label + "?" + urllib.parse.urlencode({
+        "secret": secret, "issuer": "MCAS", "algorithm": "SHA1", "digits": 6, "period": 30
+    })
+    return {
+        "secret": secret,
+        "otpauth_uri": uri,
+        "expires_in_seconds": 600,
+        "message": "Add this key to your authenticator app. Setup expires in 10 minutes. The secret is displayed once.",
+    }
+
+
+@app.post("/api/customer/mfa/verify")
+def customer_mfa_verify(payload: MfaCodeIn, response: Response,
+                        user=Depends(current_identity_for_mfa_setup)):
+    require_configured_customer(user)
+    failure = None
+    recovery_codes = []
+    session = None
+    with db() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            """SELECT customer_totp_pending_secret,customer_totp_pending_expires,
+                      customer_totp_pending_attempts,customer_totp_secret
+               FROM users WHERE id=?""",
+            (user["id"],),
+        ).fetchone()
+        if not row or row["customer_totp_secret"]:
+            failure = (409, "Customer MFA is already enabled or setup is unavailable.")
+        elif (not row["customer_totp_pending_secret"]
+              or int(row["customer_totp_pending_expires"] or 0) <= int(time.time())):
+            failure = (409, "MFA setup has expired. Start setup again.")
+        elif int(row["customer_totp_pending_attempts"] or 0) >= 5:
+            connection.execute(
+                """UPDATE users SET customer_totp_pending_secret=NULL,
+                   customer_totp_pending_expires=NULL,customer_totp_pending_attempts=0 WHERE id=?""",
+                (user["id"],),
+            )
+            audit(connection, user["id"], "customer.mfa_setup_locked")
+            failure = (429, "Too many incorrect codes. Setup was cancelled; start again.")
+        else:
+            secret = decrypt_mfa_secret(
+                row["customer_totp_pending_secret"], "MCAS_CUSTOMER_MFA_ENCRYPTION_KEY"
+            )
+            counter = totp_counter_for_code(secret, payload.code)
+            if counter is None:
+                attempts = int(row["customer_totp_pending_attempts"] or 0) + 1
+                connection.execute(
+                    "UPDATE users SET customer_totp_pending_attempts=? WHERE id=?",
+                    (attempts, user["id"]),
+                )
+                if attempts >= 5:
+                    connection.execute(
+                        """UPDATE users SET customer_totp_pending_secret=NULL,
+                           customer_totp_pending_expires=NULL,customer_totp_pending_attempts=0 WHERE id=?""",
+                        (user["id"],),
+                    )
+                    audit(connection, user["id"], "customer.mfa_setup_locked")
+                    failure = (429, "Five incorrect codes were entered. Setup was cancelled.")
+                else:
+                    audit(connection, user["id"], "customer.mfa_setup_code_failed", {"attempts": attempts})
+                    failure = (422, "The authenticator code is incorrect. Check your device clock.")
+            else:
+                connection.execute(
+                    """UPDATE users SET customer_totp_secret=customer_totp_pending_secret,
+                       customer_totp_pending_secret=NULL,customer_totp_pending_expires=NULL,
+                       customer_totp_pending_attempts=0,customer_totp_last_counter=? WHERE id=?""",
+                    (counter, user["id"]),
+                )
+                connection.execute("DELETE FROM customer_mfa_recovery_codes WHERE user_id=?", (user["id"],))
+                for _ in range(10):
+                    code = secrets.token_urlsafe(12)
+                    recovery_codes.append(code)
+                    connection.execute(
+                        "INSERT INTO customer_mfa_recovery_codes(user_id,code_hash,created_at) VALUES(?,?,?)",
+                        (user["id"], hashlib.sha256(code.encode()).hexdigest(), now()),
+                    )
+                # Rotate the limited enrollment session into a fresh full session.
+                connection.execute("DELETE FROM sessions WHERE user_id=?", (user["id"],))
+                session = secrets.token_urlsafe(36)
+                connection.execute(
+                    "INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?,?,?)",
+                    (token_hash(session), user["id"], int(time.time()) + SESSION_SECONDS),
+                )
+                audit(connection, user["id"], "customer.mfa_enabled",
+                      {"recovery_code_count": len(recovery_codes)})
+    if failure:
+        raise HTTPException(failure[0], failure[1])
+    response.delete_cookie(COOKIE, path="/", httponly=True, secure=IS_PROD, samesite="lax")
+    response.set_cookie(COOKIE, session, max_age=SESSION_SECONDS, httponly=True,
+                        secure=IS_PROD, samesite="lax", path="/")
+    set_csrf(response)
+    return {
+        "enabled": True,
+        "recovery_codes": recovery_codes,
+        "message": "Customer MFA is enabled. Save these recovery codes securely; each can be used once.",
+    }
+
+
 @app.get("/api/admin/mfa/status")
 def admin_mfa_status(user=Depends(current_user)):
     require_configured_admin(user)
