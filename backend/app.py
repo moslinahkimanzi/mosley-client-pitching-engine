@@ -674,6 +674,7 @@ class ServicePriceItemIn(BaseModel):
 
 
 class ServicePricesIn(BaseModel):
+    currency_code: str = Field(pattern=r"^[A-Z]{3}$")
     items: list[ServicePriceItemIn] = Field(min_length=8, max_length=8)
 
 
@@ -2645,8 +2646,8 @@ SERVICE_PRICE_CODES = {item[0] for item in SERVICE_PRICE_DEFAULTS}
 
 def workspace_service_prices_for(user_id: str) -> dict:
     stamp = now()
+    prefs = workspace_preferences_for(user_id)
     with db() as c:
-        prefs = workspace_preferences_for(user_id)
         for code, label, minimum, maximum, unit, description in SERVICE_PRICE_DEFAULTS:
             c.execute(
                 """INSERT OR IGNORE INTO workspace_service_prices
@@ -2677,7 +2678,10 @@ def update_workspace_service_prices(payload: ServicePricesIn, user=Depends(curre
     for item in payload.items:
         if item.maximum_price is not None and item.maximum_price < item.minimum_price:
             raise HTTPException(422, "A maximum price cannot be lower than its minimum price.")
-    currency = workspace_preferences_for(user["id"])["currency_code"]
+    currency = payload.currency_code.upper()
+    supported_currencies = set(COUNTRY_CURRENCIES.values()) | {"USD", "EUR", "GBP", "KES"}
+    if currency not in supported_currencies:
+        raise HTTPException(422, "Choose a supported ISO currency for the service catalogue.")
     stamp = now()
     definitions = {row[0]: row for row in SERVICE_PRICE_DEFAULTS}
     with db() as c:
@@ -3514,6 +3518,9 @@ def billing_credit_history(
 
 @app.post('/api/billing/checkout')
 def billing_checkout(payload: BillingCheckoutIn, user=Depends(current_user)):
+    with db() as c:
+        if user_has_unlimited_access(c, user["id"]):
+            raise HTTPException(403, "Your verified administrator account has unlimited access. Payment is not required.")
     catalog = USD_PLANS if payload.item_type == 'subscription' else USD_CREDIT_PACKS
     product = catalog.get(payload.item_code)
     if not product:
