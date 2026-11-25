@@ -6,7 +6,7 @@ This record separates verified repository controls from tasks that require real 
 
 ## Verified on the release candidate
 
-Candidate branch: `release/mcas-prelaunch-2026-11`
+Candidate branch: `release/mcas-prelaunch-2026-11`\n\nThe candidate has since been extended with customer MFA (version 1.4.0). The CI evidence below refers to the earlier commit and does not validate these later customer MFA changes; a new full CI run is required.
 
 GitHub Actions run [#900](https://github.com/moslinahkimanzi/mosley-client-pitching-engine/actions/runs/45563715546), commit `8078e79b1bbcefe60aa3931d43431627bf43b868`, completed successfully on 25 November 2026:
 
@@ -23,6 +23,7 @@ GitHub Actions run [#900](https://github.com/moslinahkimanzi/mosley-client-pitch
 | Google customer identity | Implemented. The production login flow verifies Google OIDC signatures, audience, nonce, token times and the `email_verified` claim. Local password registration/login are disabled in production; Google handles account recovery. |
 | Administrator privileges | Implemented. The server matches the signed-in database user against `MCAS_ADMIN_EMAILS`; production also requires a linked verified Google subject. |
 | Administrator MFA | Implemented in code. Production startup requires MFA and a separate Fernet encryption key. TOTP enrollment, challenge sign-in, replay protection, attempt limits and one-time recovery codes are included. The real administrator must still enroll after production configuration. |
+| Customer MFA | Implemented in code. Production startup requires a separate customer MFA encryption key and mandatory TOTP. New customers receive a restricted enrollment session; workspace endpoints reject requests until successful enrollment. Returning customers complete a TOTP/recovery challenge. The real production key configuration and hosted end-to-end verification remain required. |
 | Administrator billing exemption | Implemented. Allowlisted administrators do not purchase subscriptions or credit packs. Unlimited usage is activated only after required MFA enrollment and is audit logged. Browser-provided roles are not trusted. |
 | Workspace service prices | Implemented. Eight website-service entries are editable per workspace, persisted by tenant, validated server-side and reflected in Services & Pricing. They are separate from MCAS subscriptions and prepaid credits. |
 | Payment ledger and verification foundation | Implemented in code, but live payment is disabled. Hosted checkout and webhook verification code do not establish merchant approval or settlement readiness. |
@@ -40,6 +41,7 @@ GitHub Actions run [#900](https://github.com/moslinahkimanzi/mosley-client-pitch
 | Backups and recovery | External action required | Encrypted off-site backups, documented retention, a successful restore drill and named recovery owner. |
 | Monitoring and incident response | Not verified | Error/uptime alerts, security-event retention, escalation contact and incident-response procedure. |
 | Administrator enrollment | Not yet performed | Set the admin email allowlist and required MFA secrets in the host secret manager; enroll the real admin Google account and securely store all recovery codes. |
+| Customer MFA production configuration | Not yet configured | Generate a separate customer Fernet key, set `MCAS_CUSTOMER_MFA_REQUIRED=true`, deploy to staging and verify first-time enrollment and returning-customer challenge flows end to end. |
 | Independent security assessment | Not performed | Independent penetration test, written findings and verified remediation. CI and dependency audits do not replace it. |
 | M-Pesa merchant onboarding | Not verified | Provider/Safaricom merchant KYC and written approval for the selected product and settlement destination. |
 | M-Pesa sandbox and live settlement | Not verified; billing disabled | Successful sandbox test, live webhook validation, reconciliation/refund procedures and a real test settlement to the intended account. Keep `MCAS_BILLING_ENABLED=false` until these pass. |
