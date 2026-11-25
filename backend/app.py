@@ -86,7 +86,7 @@ if IS_PROD:
         Fernet(customer_mfa_key.encode())
     except Exception as exc:
         raise RuntimeError("MCAS_CUSTOMER_MFA_ENCRYPTION_KEY must be a valid Fernet key.") from exc
-APP_VERSION = os.getenv("MCAS_VERSION", "1.3.0").strip()
+APP_VERSION = os.getenv("MCAS_VERSION", "1.4.0").strip()
 if not re.fullmatch(r"\d+\.\d+\.\d+", APP_VERSION):
     raise RuntimeError("MCAS_VERSION must use semantic version format, for example 1.1.0.")
 MAX_BODY_BYTES = 1_000_000
@@ -3658,6 +3658,17 @@ def updates_status(user=Depends(current_user)):
         ),
         "releases": [
             {
+                "version": "1.4.0",
+                "title": "Customer account protection",
+                "summary": "Requires customer authenticator MFA in production with separate encrypted secrets, limited pre-enrollment access and single-use recovery codes.",
+                "changes": [
+                    "Google-verified customer accounts must enrol an authenticator before opening MCAS workspace data.",
+                    "Returning customers complete an authenticator or one-time recovery-code challenge after Google sign-in.",
+                    "Unenrolled customer sessions can access only customer MFA setup endpoints; workspace, prospect, billing and integration routes remain blocked.",
+                    "Customer authenticator secrets use a separate server-side encryption key from administrator MFA."
+                ]
+            },
+            {
                 "version": "1.3.0",
                 "title": "Workspace service pricing and administrator security",
                 "summary": "Adds tenant-owned editable service pricing and production administrator authenticator MFA with one-time recovery codes.",
@@ -3899,7 +3910,7 @@ def admin_maintenance(user=Depends(current_user)):
         {"name": "Dependabot dependency updates", "status": "configured", "detail": "Dependency update automation is configured. Review, test and merge updates deliberately; do not auto-deploy dependency changes."},
         {"name": "Google verified customer identity", "status": "configured" if bool(os.getenv("GOOGLE_CLIENT_ID", "").strip()) else "not_configured", "detail": "Production password registration and password login are disabled. Google ID tokens must have a verified email; customers recover account access through Google."},
         {"name": "Administrator authenticator MFA", "status": "configured" if admin_mfa_enabled else "not_configured", "detail": "Production admin tools and unlimited admin usage require an allowlisted verified Google identity and an enrolled TOTP authenticator. Recovery codes are single-use."},
-        {"name": "Customer MFA", "status": "external_action", "detail": "MCAS uses Google sign-in for customers; customers should enable multi-factor authentication on their Google accounts. MCAS does not currently provide a separate customer TOTP factor."},
+        {"name": "Customer authenticator MFA", "status": "configured" if CUSTOMER_MFA_REQUIRED and os.getenv("MCAS_CUSTOMER_MFA_ENCRYPTION_KEY", "").strip() else "not_configured", "detail": "Production requires a separate MCAS customer TOTP factor after Google-verified sign-in. Unenrolled accounts are limited to MFA setup routes; enabled accounts need TOTP or a single-use recovery code at sign-in."},
         {"name": "Database scale-out", "status": "not_implemented", "detail": "This backend currently uses SQLite and is designed for one application instance with a persistent disk. Move to managed PostgreSQL and test migrations before multi-instance or high-volume production."},
         {"name": "Shared production rate limiting", "status": "not_implemented", "detail": "Rate-limit counters currently use the application database. A shared Redis limiter is required before running multiple app instances."},
         {"name": "Encrypted off-site backups", "status": "external_action", "detail": "Configure encrypted backups with the hosting provider and perform a documented restore test. This dashboard cannot verify your backup provider."},
