@@ -1,7 +1,7 @@
 (()=>{'use strict';
 const $=id=>document.getElementById(id);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state={csrf:'',user:null,leads:[],drafts:[],followups:[],proposals:[],metrics:{},gmail:null,billing:null,config:{search:false,ai:false},updates:null,feedback:[],maintenance:null,improvements:[],onboarding:null,preferences:null,regions:null,authMode:'login',pendingAuditReport:null};
+const state={csrf:'',user:null,leads:[],drafts:[],followups:[],proposals:[],metrics:{},gmail:null,billing:null,config:{search:false,ai:false},updates:null,feedback:[],maintenance:null,improvements:[],onboarding:null,preferences:null,regions:null,servicePrices:null,authMode:'login',pendingAuditReport:null};
 function toast(msg,error=false){$('toast').textContent=msg;$('toast').className='notice'+(error?' error':'');}
 function note(id,msg,error=false){$(id).textContent=msg;$(id).className='notice'+(error?' error':'');}
 async function copyTextToClipboard(value,noticeId,successText){
@@ -54,7 +54,7 @@ async function initGoogleSignIn(){
 }
 $('logoutBtn').addEventListener('click',async()=>{try{await api('/api/auth/logout',{method:'POST'});state.user=null;await refreshCsrf();showAuth();}catch(e){toast(e.message,true);}});
 async function boot(){try{await refreshCsrf();state.user=await api('/api/auth/me');showApp();await loadAll();}catch(e){showAuth();}}
-async function loadAll(){try{const values=await Promise.all([api('/api/leads'),api('/api/drafts'),api('/api/followups'),api('/api/proposals'),api('/api/metrics'),api('/api/integrations/gmail/status'),api('/api/billing/status'),api('/api/integrations/status'),api('/api/auth/me'),api('/api/updates'),api('/api/feedback'),api('/api/onboarding'),api('/api/workspace/preferences'),api('/api/regions')]);[state.leads,state.drafts,state.followups,state.proposals,state.metrics,state.gmail,state.billing,state.config,state.user,state.updates,state.feedback,state.onboarding,state.preferences,state.regions]=values;$('settingsNavGroup').classList.toggle('hide',!state.user.is_admin);if(state.preferences.timezone==='auto'){const detected=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC';state.preferences.timezone=detected;try{state.preferences=await api('/api/workspace/preferences',{method:'PUT',body:JSON.stringify(state.preferences)});}catch{}}applyTheme(state.preferences.theme);applyLanguage(state.preferences.language_code);$('researchRegionalNote').textContent='Searching in '+countryDisplay(state.preferences.country_code)+' ('+state.preferences.country_code+') using '+state.preferences.language_code.toUpperCase()+'. Change this under My workspace.';renderAll();renderUpdates();renderMyFeedback();$('searchBadge').textContent=state.config.web_search_configured?'Connected':'Needs API key';$('searchBadge').className='badge '+(state.config.web_search_configured?'green':'amber');$('aiBadge').textContent=state.config.ai_configured?'Connected':'Optional';$('aiBadge').className='badge '+(state.config.ai_configured?'green':'amber');$('researchConfig').textContent=state.config.web_search_configured?'Configured':'Set SERPER_API_KEY in .env and restart MCAS';$('aiConfig').textContent=state.config.ai_configured?'Configured':'Set AI_API_KEY in .env and restart MCAS';$('gmailBadge').textContent=state.gmail.connected?'Connected':state.gmail.configured?'Ready to connect':'Not configured';$('gmailDetails').textContent=state.gmail.capability||'Gmail drafts only.';$('gmailConnect').disabled=!state.gmail.configured||state.gmail.connected;$('gmailDisconnect').disabled=!state.gmail.connected;$('billingStatus').textContent=state.billing.message;const returnedOrder=new URLSearchParams(location.search).get('payment_return');if(returnedOrder){try{const returned=await api('/api/billing/return?order_id='+encodeURIComponent(returnedOrder));state.billing=await api('/api/billing/status');renderBilling();note('billingNotice',returned.message);history.replaceState({},'',location.pathname);}catch(error){note('billingNotice',error.message,true);}}}catch(e){toast(e.message,true);}}
+async function loadAll(){try{const values=await Promise.all([api('/api/leads'),api('/api/drafts'),api('/api/followups'),api('/api/proposals'),api('/api/metrics'),api('/api/integrations/gmail/status'),api('/api/billing/status'),api('/api/integrations/status'),api('/api/auth/me'),api('/api/updates'),api('/api/feedback'),api('/api/onboarding'),api('/api/workspace/preferences'),api('/api/regions'),api('/api/workspace/service-prices')]);[state.leads,state.drafts,state.followups,state.proposals,state.metrics,state.gmail,state.billing,state.config,state.user,state.updates,state.feedback,state.onboarding,state.preferences,state.regions,state.servicePrices]=values;$('settingsNavGroup').classList.toggle('hide',!state.user.is_admin);if(state.preferences.timezone==='auto'){const detected=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC';state.preferences.timezone=detected;try{state.preferences=await api('/api/workspace/preferences',{method:'PUT',body:JSON.stringify(state.preferences)});}catch{}}applyTheme(state.preferences.theme);applyLanguage(state.preferences.language_code);$('researchRegionalNote').textContent='Searching in '+countryDisplay(state.preferences.country_code)+' ('+state.preferences.country_code+') using '+state.preferences.language_code.toUpperCase()+'. Change this under My workspace.';renderAll();renderUpdates();renderMyFeedback();$('searchBadge').textContent=state.config.web_search_configured?'Connected':'Needs API key';$('searchBadge').className='badge '+(state.config.web_search_configured?'green':'amber');$('aiBadge').textContent=state.config.ai_configured?'Connected':'Optional';$('aiBadge').className='badge '+(state.config.ai_configured?'green':'amber');$('researchConfig').textContent=state.config.web_search_configured?'Configured':'Set SERPER_API_KEY in .env and restart MCAS';$('aiConfig').textContent=state.config.ai_configured?'Configured':'Set AI_API_KEY in .env and restart MCAS';$('gmailBadge').textContent=state.gmail.connected?'Connected':state.gmail.configured?'Ready to connect':'Not configured';$('gmailDetails').textContent=state.gmail.capability||'Gmail drafts only.';$('gmailConnect').disabled=!state.gmail.configured||state.gmail.connected;$('gmailDisconnect').disabled=!state.gmail.connected;$('billingStatus').textContent=state.billing.message;const returnedOrder=new URLSearchParams(location.search).get('payment_return');if(returnedOrder){try{const returned=await api('/api/billing/return?order_id='+encodeURIComponent(returnedOrder));state.billing=await api('/api/billing/status');renderBilling();note('billingNotice',returned.message);history.replaceState({},'',location.pathname);}catch(error){note('billingNotice',error.message,true);}}}catch(e){toast(e.message,true);}}
 function billingMethodAvailable(method){
  const data=state.billing;
  return !!(data?.billing_enabled && data?.payment_methods?.[method]?.available);
@@ -69,14 +69,20 @@ function renderBilling(){
  const method='mpesa';
  if($('billingMethod'))$('billingMethod').value='mpesa';
  const methodAvailable=billingMethodAvailable(method);
+ if(data.is_unlimited_admin){
+  $('billingPlanCards').innerHTML='<article class="card"><h3>Administrator access</h3><div class="metric">Unlimited</div><p class="muted">Your verified administrator account is exempt from subscriptions and prepaid credit purchases. Usage is recorded for audit purposes.</p></article>';
+  $('billingCreditCards').innerHTML='<div class="good">No payment is required for your administrator account.</div>';
+ }
  const price=plan=>{
   const cents=Number(plan.amount_usd_cents||0);
   const usd='USD '+(cents/100).toFixed(2);
   const rate=Number(data.mpesa_quote?.usd_kes_rate);
   return method==='mpesa'&&Number.isFinite(rate)&&rate>0?usd+' · approx. KES '+Math.round((cents/100)*rate).toLocaleString():usd;
  };
- $('billingPlanCards').innerHTML=Object.entries(data.plans||{}).map(([code,plan])=>'<article class="card"><h3>'+esc(plan.name)+'</h3><div class="metric">'+price(plan)+'/30 days</div><p>'+Number(plan.credits||0).toLocaleString()+' included credits</p><button class="primary" data-billing-type="subscription" data-billing-code="'+esc(code)+'" '+(!methodAvailable?'disabled':'')+'>Choose '+esc(plan.name)+'</button></article>').join('');
- $('billingCreditCards').innerHTML=Object.entries(data.credit_packs||{}).map(([code,pack])=>'<article class="card"><h3>'+esc(pack.name)+'</h3><div class="metric">'+price(pack)+'</div><p>'+Number(pack.credits||0).toLocaleString()+' prepaid credits</p><button data-billing-type="credits" data-billing-code="'+esc(code)+'" '+(!methodAvailable?'disabled':'')+'>Buy credits</button></article>').join('');
+ if(!data.is_unlimited_admin){
+  $('billingPlanCards').innerHTML=Object.entries(data.plans||{}).map(([code,plan])=>'<article class="card"><h3>'+esc(plan.name)+'</h3><div class="metric">'+price(plan)+'/30 days</div><p>'+Number(plan.credits||0).toLocaleString()+' included credits</p><button class="primary" data-billing-type="subscription" data-billing-code="'+esc(code)+'" '+(!methodAvailable?'disabled':'')+'>Choose '+esc(plan.name)+'</button></article>').join('');
+  $('billingCreditCards').innerHTML=Object.entries(data.credit_packs||{}).map(([code,pack])=>'<article class="card"><h3>'+esc(pack.name)+'</h3><div class="metric">'+price(pack)+'</div><p>'+Number(pack.credits||0).toLocaleString()+' prepaid credits</p><button data-billing-type="credits" data-billing-code="'+esc(code)+'" '+(!methodAvailable?'disabled':'')+'>Buy credits</button></article>').join('');
+ }
  $('billingOrders').innerHTML=(data.recent_orders||[]).map(order=>{
   const amount=order.amount_usd_cents!==null&&order.amount_usd_cents!==undefined?'USD '+(Number(order.amount_usd_cents)/100).toFixed(2)+' base · '+esc(order.provider_currency||order.currency||'USD')+' '+esc(order.provider_amount||''):'KES '+Number(order.amount_kes||0).toLocaleString();
   return '<div class="item"><div class="itemtop"><strong>'+esc(order.item_type)+' · '+esc(order.item_code)+'</strong><span class="badge '+(order.status==='paid'?'green':'amber')+'">'+esc(order.status)+'</span></div><p>'+amount+' · '+esc(order.created_at)+'</p></div>';
@@ -152,11 +158,50 @@ $('refreshBillingBtn').addEventListener('click',refreshBillingStatus);
 $('billingMethod').value='mpesa';
 $('billingMethod').addEventListener('change',()=>{ $('billingMethod').value='mpesa';renderBilling(); });
 
-function renderAll(){renderMetrics();renderLeads();renderDrafts();renderFollowups();renderProposals();renderSelects();renderUpdates();renderMyFeedback();renderOnboarding();renderBilling();}
+function renderAll(){renderMetrics();renderLeads();renderDrafts();renderFollowups();renderProposals();renderSelects();renderUpdates();renderMyFeedback();renderOnboarding();renderBilling();renderPublicServicePrices();}
 const regionalPriceDefaults={KE:1,US:2.4,CA:2.1,GB:2.15,AU:2.1,NZ:1.85,DE:2,FR:1.95,IE:2,NL:2,CH:2.5,SG:1.9,AE:1.85,ZA:1.25,NG:0.9,GH:0.85,IN:0.8,PK:0.7,PH:0.85,BR:1.1,MX:1.05,JP:2,KR:1.8};
 function countryDisplay(code){try{return new Intl.DisplayNames([state.preferences?.language_code||'en'],{type:'region'}).of(code)||code;}catch{return code;}}
 function localTimezone(){return Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC';}
-function renderWorkspaceSettings(){if(!state.regions||!state.preferences)return;const p=state.preferences;const country=$('prefCountry'),currency=$('prefCurrency'),timezone=$('prefTimezone'),language=$('prefLanguage');country.innerHTML=state.regions.countries.map(x=>'<option value=\"'+x.code+'\">'+esc(countryDisplay(x.code))+' ('+x.code+')</option>').join('');country.value=p.country_code;currency.innerHTML=state.regions.currencies.map(x=>'<option value=\"'+x+'\">'+x+'</option>').join('');currency.value=p.currency_code;timezone.innerHTML='<option value=\"auto\">Automatic (browser)</option>'+state.regions.timezones.map(x=>'<option value=\"'+esc(x)+'\">'+esc(x.replaceAll('_',' '))+'</option>').join('');timezone.value=p.timezone||'auto';language.innerHTML=state.regions.languages.map(x=>'<option value=\"'+x.code+'\">'+esc(x.name)+'</option>').join('');language.value=p.language_code;$('prefTheme').value=p.theme;$('prefMultiplier').value=Number(p.pricing_multiplier||1).toFixed(2);applyLanguage(p.language_code);}
+function renderWorkspaceSettings(){if(!state.regions||!state.preferences)return;const p=state.preferences;const country=$('prefCountry'),currency=$('prefCurrency'),timezone=$('prefTimezone'),language=$('prefLanguage');country.innerHTML=state.regions.countries.map(x=>'<option value=\"'+x.code+'\">'+esc(countryDisplay(x.code))+' ('+x.code+')</option>').join('');country.value=p.country_code;currency.innerHTML=state.regions.currencies.map(x=>'<option value=\"'+x+'\">'+x+'</option>').join('');currency.value=p.currency_code;timezone.innerHTML='<option value=\"auto\">Automatic (browser)</option>'+state.regions.timezones.map(x=>'<option value=\"'+esc(x)+'\">'+esc(x.replaceAll('_',' '))+'</option>').join('');timezone.value=p.timezone||'auto';language.innerHTML=state.regions.languages.map(x=>'<option value=\"'+x.code+'\">'+esc(x.name)+'</option>').join('');language.value=p.language_code;$('prefTheme').value=p.theme;$('prefMultiplier').value=Number(p.pricing_multiplier||1).toFixed(2);applyLanguage(p.language_code);renderServicePrices();}
+function formatServicePrice(value,currency){
+ try{return new Intl.NumberFormat(undefined,{style:'currency',currency,maximumFractionDigits:0}).format(Number(value));}
+ catch{return currency+' '+Number(value).toLocaleString();}
+}
+function renderServicePrices(){
+ const data=state.servicePrices;if(!data||!state.regions)return;
+ const currencySelect=$('servicePriceCurrency');if(!currencySelect)return;
+ currencySelect.innerHTML=state.regions.currencies.map(code=>'<option value="'+esc(code)+'">'+esc(code)+'</option>').join('');
+ currencySelect.value=data.items?.[0]?.currency_code||state.preferences?.currency_code||'KES';
+ $('workspaceServicePrices').innerHTML=(data.items||[]).map(item=>'<article class="card" data-service-code="'+esc(item.service_code)+'"><h3>'+esc(item.label)+'</h3><p class="tiny">'+esc(item.description)+'</p><div class="field"><label>Minimum price</label><input type="number" min="1" step="1" id="serviceMin-'+esc(item.service_code)+'" value="'+Number(item.minimum_price)+'"></div><div class="field"><label>Maximum price (leave blank for “from” pricing)</label><input type="number" min="1" step="1" id="serviceMax-'+esc(item.service_code)+'" value="'+(item.maximum_price===null?'':Number(item.maximum_price))+'"></div><div class="field"><label>Billing unit</label><select id="serviceUnit-'+esc(item.service_code)+'"><option value="one_time" '+(item.price_unit==='one_time'?'selected':'')+'>One-time project</option><option value="monthly" '+(item.price_unit==='monthly'?'selected':'')+'>Per month</option></select></div><p class="tiny">Current: '+esc(formatServicePrice(item.minimum_price,item.currency_code))+(item.maximum_price===null?' and above':' – '+esc(formatServicePrice(item.maximum_price,item.currency_code)))+(item.price_unit==='monthly'?' / month':'')+'</p></article>').join('');
+ renderPublicServicePrices();
+}
+function renderPublicServicePrices(){
+ const box=$('servicesPricingCards');if(!box)return;
+ const items=state.servicePrices?.items||[];
+ if(!items.length){box.innerHTML='<div class="empty">The service catalogue is not available yet.</div>';return;}
+ box.innerHTML=items.map(item=>{
+  const range=item.maximum_price===null?'From '+formatServicePrice(item.minimum_price,item.currency_code):formatServicePrice(item.minimum_price,item.currency_code)+' – '+formatServicePrice(item.maximum_price,item.currency_code);
+  const unit=item.price_unit==='monthly'?' / month':'';
+  return '<article class="card"><h2>'+esc(item.label)+'</h2><div class="metric">'+esc(range)+esc(unit)+'</div><p class="muted">'+esc(item.description)+'</p><p class="tiny">Indicative workspace price. Confirm scope and final written quotation with the customer.</p></article>';
+ }).join('');
+}
+async function saveWorkspaceServicePrices(){
+ try{
+  const cards=[...document.querySelectorAll('#workspaceServicePrices [data-service-code]')];
+  const items=cards.map(card=>{
+   const code=card.dataset.serviceCode;
+   const minimum=Number($('serviceMin-'+code).value);
+   const maximumText=$('serviceMax-'+code).value.trim();
+   const maximum=maximumText===''?null:Number(maximumText);
+   if(!Number.isSafeInteger(minimum)||minimum<1||(maximum!==null&&(!Number.isSafeInteger(maximum)||maximum<minimum)))throw new Error('Enter valid whole-number prices. Maximum must be blank or at least the minimum.');
+   return {service_code:code,minimum_price:minimum,maximum_price:maximum,price_unit:$('serviceUnit-'+code).value};
+  });
+  state.servicePrices=await api('/api/workspace/service-prices',{method:'PUT',body:JSON.stringify({currency_code:$('servicePriceCurrency').value,items})});
+  renderServicePrices();note('servicePricesNotice','Your workspace service prices have been saved and the Services & Pricing page is updated.');
+ }catch(error){note('servicePricesNotice',error.message,true);}
+}
+$('saveWorkspaceServicePrices').addEventListener('click',saveWorkspaceServicePrices);
+
 function currentPreferenceForm(){return {country_code:$('prefCountry').value,currency_code:$('prefCurrency').value,timezone:$('prefTimezone').value,language_code:$('prefLanguage').value,theme:$('prefTheme').value,pricing_multiplier:Number($('prefMultiplier').value)};}
 async function saveWorkspacePreferences(){try{const prefs=currentPreferenceForm();if(!Number.isFinite(prefs.pricing_multiplier)||prefs.pricing_multiplier<0.5||prefs.pricing_multiplier>5)throw new Error('Pricing adjustment must be between 0.5 and 5.0.');if(prefs.timezone==='auto')prefs.timezone=localTimezone();state.preferences=await api('/api/workspace/preferences',{method:'PUT',body:JSON.stringify(prefs)});applyTheme(state.preferences.theme);applyLanguage(state.preferences.language_code);$('researchRegionalNote').textContent='Searching in '+countryDisplay(state.preferences.country_code)+' ('+state.preferences.country_code+') using '+state.preferences.language_code.toUpperCase()+'. Change this under My workspace.';note('workspacePreferencesNotice','Workspace preferences saved.');}catch(e){note('workspacePreferencesNotice',e.message,true);}}
 $('prefCountry').addEventListener('change',()=>{const selected=state.regions.countries.find(x=>x.code===$('prefCountry').value);if(selected)$('prefCurrency').value=selected.currency;$('prefMultiplier').value=(regionalPriceDefaults[$('prefCountry').value]||1).toFixed(2);});
