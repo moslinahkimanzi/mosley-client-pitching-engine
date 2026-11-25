@@ -9,7 +9,7 @@ Use Python 3.12 or later and Node.js 22 for the full test suite.
 ```bash
 git clone https://github.com/moslinahkimanzi/mosley-client-pitching-engine.git
 cd mosley-client-pitching-engine
-git checkout feature/mcas-research-completion
+git checkout release/mcas-prelaunch-2026-11
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -121,16 +121,16 @@ Follow the step-by-step manual checklist in [TESTING.md](TESTING.md). GitHub Act
 
 ## Production limitations — do not skip this section
 
-This branch is a testable release candidate, **not a security-certified commercial SaaS**.
+This branch is a pre-launch release candidate, **not a security-certified commercial SaaS**. The repository branch is not a production deployment.
 
 Before accepting public users or customer data:
-1. Move from SQLite to managed PostgreSQL and test database migrations/backups. SQLite is intended for one instance and a persistent disk.
-2. Replace the in-process rate limiter with a shared service such as Redis; add account/device-aware throttling and abuse monitoring.
-3. Add email verification, password reset, MFA, session/device management and account deletion.
-4. Add a production secret manager, HTTPS-only deployment, exact `MCAS_ALLOWED_HOSTS` and `MCAS_ALLOWED_ORIGINS`, persistent encrypted backups, monitoring and alerting.
-5. Complete an independent security review / penetration test and resolve all findings.
-6. Add real payment-provider checkout, signed webhook verification, subscription lifecycle handling and tax/receipt requirements before enabling paid plans. Billing is intentionally disabled.
-7. Add provider-specific live integration tests with credentials in a non-production staging environment.
+1. **Database:** the current backend is SQLite-only and supports a single app instance on a persistent disk. Migrate to managed PostgreSQL, create tested migrations, verify tenant isolation and complete backup/restore drills before scaling or using multiple app instances.
+2. **Shared abuse controls:** the current rate limiter uses the application database. Add a shared Redis-backed limiter, proxy-aware client IP handling, monitoring and alerting before multi-instance deployment.
+3. **Identity and recovery:** production disables MCAS password registration/login and uses Google OpenID Connect. The backend verifies the Google token signature, audience, nonce, expiry and `email_verified` claim; password recovery is therefore handled by Google. Administrator tools require TOTP MFA and single-use recovery codes. Customers should secure their Google accounts with MFA; MCAS does not yet provide a separate customer TOTP factor, device management or account deletion.
+4. **Secrets and edge security:** use a production secret manager, HTTPS-only deployment, exact `MCAS_ALLOWED_HOSTS` and `MCAS_ALLOWED_ORIGINS`, a trusted proxy configuration, security monitoring and tested encrypted off-site backups.
+5. **Independent assurance:** complete an independent security review / penetration test and resolve all findings. A dependency audit and automated tests do not replace this.
+6. **Payments:** complete provider sandbox tests, merchant KYC/approval, live credentials, HTTPS webhook delivery, settlement reconciliation, refunds/reversals and tax/receipt requirements before enabling paid plans. Keep `MCAS_BILLING_ENABLED=false`; the payment path is not live.
+7. **Staging:** deploy to a separate non-production environment and run provider-specific integration tests with test credentials before any production release.
 
 Other boundaries: MCAS is not a whole-internet crawler. Serper results can be incomplete, stale or unavailable. Missing website URLs do not prove a business has no website. It does not harvest private contacts. It never sends outreach or follow-ups. It does not read incoming Gmail messages; customer replies must be supplied manually. Automated proposals and emails are rules-based templates unless you explicitly use the separately configured AI assistant, which may incur provider charges. Website checks are lightweight technical observations, not full SEO, accessibility or security audits.
 
@@ -144,3 +144,37 @@ The Research Command Centre sends the entered location, business category and op
 Each research result includes an explainable opportunity-priority score (0–100) and the signals that contributed to it. The score ranks research work; it does not represent buying intent, prove a business lacks a website, or replace human verification. The score is stored in the prospect CRM score field.
 
 For business websites returned by Serper Places, the result displays limited HTTP/title/mobile viewport/meta description/H1/form observations available to MCAS. This is not a full performance, SEO, accessibility, security, or conversion audit. Search coverage depends on Serper results and the configured account quota. MCAS does not claim to crawl the entire internet.
+
+## Production customer protection
+
+Production requires `MCAS_CUSTOMER_MFA_REQUIRED=true` and a separate stable Fernet key in `MCAS_CUSTOMER_MFA_ENCRYPTION_KEY`. Generate the key with:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Store it only in the production secret manager and keep a protected recovery copy. It must be independent from the administrator MFA encryption key. Production startup fails if the customer MFA requirement or encryption key is missing.
+
+Customers sign in with Google OpenID Connect. MCAS verifies the signed ID token, nonce, audience, validity period and Google's `email_verified` claim. On the first sign-in, a customer receives a limited session that can call only the customer MFA setup/status/verification endpoints. Prospect, report, proposal, billing, integration and other workspace routes remain blocked until TOTP enrollment succeeds. Setup issues ten single-use recovery codes; the session is rotated when enrollment completes. On later sign-ins, customers must enter a current authenticator code or an unused recovery code.
+
+Customers should also enable Google's own account MFA and keep their Google recovery options current. Google remains the account identity and account-recovery provider; MCAS does not store customer Google passwords or implement password-reset emails. If customers lose both their authenticator and every recovery code, an operator-assisted identity re-verification and recovery process is required. Do not edit MFA database columns manually.
+
+## Production administrator setup
+
+1. Configure `MCAS_ADMIN_EMAILS` with the exact Google account email that will administer MCAS. Do not use a shared mailbox.
+2. Set `MCAS_ADMIN_MFA_REQUIRED=true` in production. Production startup rejects a false value.
+3. Generate a separate stable MFA encryption key with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` and save it as `MCAS_ADMIN_MFA_ENCRYPTION_KEY` in the hosting secret manager. Keep it backed up securely; changing or losing it makes existing authenticator secrets undecryptable.
+4. Generate a high-entropy bootstrap value with `python -c "import secrets; print(secrets.token_urlsafe(48))"` and set it as `MCAS_ADMIN_BOOTSTRAP_TOKEN` in the same secret manager. Never put either value in Git, chat or a browser field outside the authenticated enrollment screen.
+5. Sign in with the allowlisted Google account, open **Administrator maintenance**, enter the bootstrap value, start setup, add the displayed secret to an authenticator app and verify its current six-digit code.
+6. Save all ten recovery codes in a password manager or another secure offline location. They are displayed only once and each can be used one time. Enrollment revokes the current session. Sign in again; the next admin login requires TOTP or an unused recovery code.
+7. Once enrollment is confirmed, remove the bootstrap token from the hosting secret manager. Store an offline emergency copy of the encryption key in a separate protected location.
+
+An allowlisted administrator receives unlimited MCAS credits and no subscription/credit-pack charges only after verified Google sign-in and successful MFA enrollment when MFA is required. The server resolves this status from the database user record; it never trusts client-supplied roles or email claims. Admin usage is audit logged. If the administrator loses both their authenticator and all recovery codes, an operator-assisted recovery procedure is required; do not edit the user row casually.
+
+## Release candidate safety notes
+
+- Use `release/mcas-prelaunch-2026-11` as the candidate branch for review; do not deploy it directly to production until the full CI pipeline and the production checklist above pass.
+- Billing tests use disposable temporary databases. Do not point automated tests at a production database.
+- An administrator receives unlimited usage only when the signed-in server-side user record matches `MCAS_ADMIN_EMAILS`; production additionally requires a linked verified Google identity. Admin usage is written to the audit log. Never trust a role, email or admin flag supplied by the browser.
+- Gmail is restricted in application behavior to creating drafts. The Google `gmail.compose` OAuth scope is broader than draft-only at provider permission level, so review that scope warning during Google OAuth verification. MCAS does not request inbox-reading scopes and does not implement a send operation.
+- Feedback-driven product improvement is a human-reviewed proposal workflow. It never edits, merges or deploys application code autonomously.

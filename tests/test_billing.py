@@ -5,6 +5,8 @@ import uuid
 import base64
 import hashlib
 import hmac
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -17,8 +19,18 @@ import backend.app as mcas
 
 class BillingTest(unittest.TestCase):
     def setUp(self):
+        # Every billing test uses a disposable database. Never mutate a developer
+        # workstation database or depend on records left by an earlier run.
+        self.original_db_path = mcas.DB_PATH
+        self.test_db_dir = tempfile.TemporaryDirectory(prefix="mcas-billing-test-")
+        mcas.DB_PATH = Path(self.test_db_dir.name) / "mcas-test.db"
+        mcas.init_db()
         with mcas.db() as connection:
             connection.execute('DELETE FROM security_rate_limits')
+
+    def tearDown(self):
+        mcas.DB_PATH = self.original_db_path
+        self.test_db_dir.cleanup()
 
     def _client(self):
         client = TestClient(mcas.app)

@@ -1,8 +1,11 @@
 import unittest
 import uuid
+import os
+from unittest.mock import patch
 from fastapi.testclient import TestClient
 from fastapi import HTTPException
 from backend.app import app, password_hash, verify_password, csrf_signature, valid_csrf, resolve_public, consume_rate_limits, assistant_system_prompt
+import backend.app as mcas
 
 class SecurityHelpersTest(unittest.TestCase):
     def test_password_hash_is_salted_and_verifies(self):
@@ -55,6 +58,49 @@ class ApiSecurityTest(unittest.TestCase):
             headers={"X-CSRF-Token": token})
         self.assertEqual(response.status_code, 201, response.text)
         return email
+
+    def test_customer_cannot_access_admin_review_routes(self):
+        with TestClient(app) as client:
+            self.register(client)
+            self.assertEqual(client.get("/api/admin/improvements").status_code, 403)
+
+    def test_only_allowlisted_verified_google_admin_gets_unlimited_credits(self):
+        with TestClient(app) as client:
+            email = self.register(client)
+            user_id = client.get("/api/auth/me").json()["id"]
+            with mcas.db() as connection:
+                connection.execute(
+                    "UPDATE users SET google_subject=? WHERE id=?",
+                    ("verified-google-subject", user_id),
+                )
+            with patch.dict(os.environ, {"MCAS_ADMIN_EMAILS": email}), patch.object(mcas, "IS_PROD", True), patch.object(mcas, "ADMIN_MFA_REQUIRED", False):
+                billing_status = client.get("/api/billing/status")
+                self.assertEqual(billing_status.status_code, 200, billing_status.text)
+                self.assertTrue(billing_status.json()["is_unlimited_admin"])
+                with mcas.db() as connection:
+                    self.assertTrue(mcas.user_has_unlimited_access(connection, user_id))
+                mcas.require_credits(user_id, 1000000)
+                mcas.debit_credits(user_id, 1000000, "security_test")
+                with mcas.db() as connection:
+                    account = connection.execute(
+                        "SELECT monthly_credits,purchased_credits FROM billing_accounts WHERE user_id=?",
+                        (user_id,),
+                    ).fetchone()
+                    audit_row = connection.execute(
+                        "SELECT action FROM audit_log WHERE user_id=? AND action='billing.admin_unlimited_usage'",
+                        (user_id,),
+                    ).fetchone()
+                self.assertEqual((account["monthly_credits"], account["purchased_credits"]), (20, 0))
+                self.assertIsNotNone(audit_row)
+
+    def test_unverified_allowlisted_identity_does_not_bypass_credits_in_production(self):
+        with TestClient(app) as client:
+            email = self.register(client)
+            user_id = client.get("/api/auth/me").json()["id"]
+            with patch.dict(os.environ, {"MCAS_ADMIN_EMAILS": email}), patch.object(mcas, "IS_PROD", True):
+                with self.assertRaises(HTTPException) as caught:
+                    mcas.require_credits(user_id, 1000000)
+                self.assertEqual(caught.exception.status_code, 402)
 
     def test_authentication_required_for_private_leads(self):
         with TestClient(app) as client:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import struct
 import hashlib
 import hmac
 import http.client
@@ -57,7 +58,35 @@ COOKIE = "mcas_session"
 CSRF_COOKIE = "mcas_csrf"
 SESSION_SECONDS = 60 * 60 * 24 * 14
 IS_PROD = os.getenv("MCAS_ENV", "development").lower() == "production"
-APP_VERSION = os.getenv("MCAS_VERSION", "1.2.0").strip()
+mfa_required_setting = os.getenv("MCAS_ADMIN_MFA_REQUIRED", "true" if IS_PROD else "false").strip().lower()
+if mfa_required_setting not in {"true", "false"}:
+    raise RuntimeError("MCAS_ADMIN_MFA_REQUIRED must be true or false.")
+ADMIN_MFA_REQUIRED = mfa_required_setting == "true"
+if IS_PROD and not ADMIN_MFA_REQUIRED:
+    raise RuntimeError("Production requires MCAS_ADMIN_MFA_REQUIRED=true.")
+if IS_PROD:
+    mfa_key = os.getenv("MCAS_ADMIN_MFA_ENCRYPTION_KEY", "").strip()
+    if Fernet is None or not mfa_key:
+        raise RuntimeError("Production requires a separate MCAS_ADMIN_MFA_ENCRYPTION_KEY.")
+    try:
+        Fernet(mfa_key.encode())
+    except Exception as exc:
+        raise RuntimeError("MCAS_ADMIN_MFA_ENCRYPTION_KEY must be a valid Fernet key.") from exc
+customer_mfa_setting = os.getenv("MCAS_CUSTOMER_MFA_REQUIRED", "true" if IS_PROD else "false").strip().lower()
+if customer_mfa_setting not in {"true", "false"}:
+    raise RuntimeError("MCAS_CUSTOMER_MFA_REQUIRED must be true or false.")
+CUSTOMER_MFA_REQUIRED = customer_mfa_setting == "true"
+if IS_PROD and not CUSTOMER_MFA_REQUIRED:
+    raise RuntimeError("Production requires MCAS_CUSTOMER_MFA_REQUIRED=true.")
+if IS_PROD:
+    customer_mfa_key = os.getenv("MCAS_CUSTOMER_MFA_ENCRYPTION_KEY", "").strip()
+    if Fernet is None or not customer_mfa_key:
+        raise RuntimeError("Production requires MCAS_CUSTOMER_MFA_ENCRYPTION_KEY.")
+    try:
+        Fernet(customer_mfa_key.encode())
+    except Exception as exc:
+        raise RuntimeError("MCAS_CUSTOMER_MFA_ENCRYPTION_KEY must be a valid Fernet key.") from exc
+APP_VERSION = os.getenv("MCAS_VERSION", "1.4.0").strip()
 if not re.fullmatch(r"\d+\.\d+\.\d+", APP_VERSION):
     raise RuntimeError("MCAS_VERSION must use semantic version format, for example 1.1.0.")
 MAX_BODY_BYTES = 1_000_000
@@ -104,6 +133,129 @@ def db():
 
 def now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def mfa_cipher(key_name: str = "MCAS_ADMIN_MFA_ENCRYPTION_KEY"):
+    if Fernet is None:
+        raise HTTPException(503, "The cryptography package is required for authenticator MFA.")
+    key = os.getenv(key_name, "").strip()
+    if not key:
+        raise HTTPException(503, f"{key_name} is not configured on this server.")
+    try:
+        return Fernet(key.encode())
+    except Exception:
+        raise HTTPException(503, f"{key_name} is invalid.")
+
+
+def encrypt_mfa_secret(secret: str, key_name: str = "MCAS_ADMIN_MFA_ENCRYPTION_KEY") -> str:
+    return mfa_cipher(key_name).encrypt(secret.encode()).decode()
+
+
+def decrypt_mfa_secret(token: str, key_name: str = "MCAS_ADMIN_MFA_ENCRYPTION_KEY") -> str:
+    try:
+        return mfa_cipher(key_name).decrypt(token.encode()).decode()
+    except Exception:
+        raise HTTPException(503, "The stored authenticator secret cannot be decrypted.")
+
+
+def generate_totp_secret() -> str:
+    return base64.b32encode(secrets.token_bytes(20)).decode().rstrip("=")
+
+
+def totp_counter_for_code(secret: str, code: str, timestamp: Optional[float] = None):
+    if not re.fullmatch(r"\d{6}", str(code or "")):
+        return None
+    moment = time.time() if timestamp is None else timestamp
+    key = base64.b32decode(secret + "=" * ((8 - len(secret) % 8) % 8), casefold=True)
+    current_counter = int(moment // 30)
+    for counter in (current_counter - 1, current_counter, current_counter + 1):
+        digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+        offset = digest[-1] & 0x0F
+        number = (struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF) % 1_000_000
+        expected = f"{number:06d}"
+        if hmac.compare_digest(expected, str(code)):
+            return counter
+    return None
+
+
+def totp_code(secret: str, timestamp: Optional[float] = None) -> str:
+    moment = time.time() if timestamp is None else timestamp
+    key = base64.b32decode(secret + "=" * ((8 - len(secret) % 8) % 8), casefold=True)
+    counter = int(moment // 30)
+    digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    number = (struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF) % 1_000_000
+    return f"{number:06d}"
+
+
+def mfa_challenge_hash(token: str) -> str:
+    return hashlib.sha256(("mcas-admin-mfa:" + token).encode()).hexdigest()
+
+
+def is_configured_admin_email(email: str) -> bool:
+    allowed = {
+        item.strip().lower()
+        for item in os.getenv("MCAS_ADMIN_EMAILS", "").split(",")
+        if item.strip()
+    }
+    return str(email or "").strip().lower() in allowed
+
+
+def require_configured_admin(user: dict):
+    if not user_is_admin(user):
+        raise HTTPException(403, "Administrator access is not enabled for this account.")
+    return user
+
+
+def verify_admin_mfa_code(c, user_id: str, secret: str, code: str):
+    """Verify a TOTP code or atomically consume one single-use recovery code."""
+    counter = totp_counter_for_code(secret, code)
+    if counter is not None:
+        row = c.execute("SELECT admin_totp_last_counter FROM users WHERE id=?", (user_id,)).fetchone()
+        last = row["admin_totp_last_counter"] if row else None
+        if last is not None and counter <= int(last):
+            return False
+        c.execute("UPDATE users SET admin_totp_last_counter=? WHERE id=?", (counter, user_id))
+        return True
+    if not re.fullmatch(r"[A-Za-z0-9_-]{12,64}", str(code or "")):
+        return False
+    digest = hashlib.sha256(str(code).encode()).hexdigest()
+    used = c.execute(
+        "UPDATE admin_mfa_recovery_codes SET used_at=? WHERE user_id=? AND code_hash=? AND used_at IS NULL",
+        (now(), user_id, digest),
+    )
+    return used.rowcount == 1
+
+
+def verify_customer_mfa_code(c, user_id: str, secret: str, code: str):
+    """Verify a customer TOTP code or atomically consume one single-use recovery code."""
+    counter = totp_counter_for_code(secret, code)
+    if counter is not None:
+        row = c.execute("SELECT customer_totp_last_counter FROM users WHERE id=?", (user_id,)).fetchone()
+        last = row["customer_totp_last_counter"] if row else None
+        if last is not None and counter <= int(last):
+            return False
+        c.execute("UPDATE users SET customer_totp_last_counter=? WHERE id=?", (counter, user_id))
+        return True
+    if not re.fullmatch(r"[A-Za-z0-9_-]{12,64}", str(code or "")):
+        return False
+    digest = hashlib.sha256(str(code).encode()).hexdigest()
+    used = c.execute(
+        "UPDATE customer_mfa_recovery_codes SET used_at=? WHERE user_id=? AND code_hash=? AND used_at IS NULL",
+        (now(), user_id, digest),
+    )
+    return used.rowcount == 1
+
+
+def require_admin_mfa(user: dict):
+    require_configured_admin(user)
+    if not ADMIN_MFA_REQUIRED:
+        return user
+    with db() as c:
+        row = c.execute("SELECT admin_totp_secret FROM users WHERE id=?", (user["id"],)).fetchone()
+    if not row or not row["admin_totp_secret"]:
+        raise HTTPException(403, "Administrator MFA is required. Enrol an authenticator before using administrator tools.")
+    return user
 
 def add_column(con, table, name, definition):
     cols = {r["name"] for r in con.execute("PRAGMA table_info(" + table + ")").fetchall()}
@@ -156,6 +308,26 @@ def init_db():
         CREATE TABLE IF NOT EXISTS google_auth_nonces(
             nonce_hash TEXT PRIMARY KEY, expires_at INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS mfa_login_challenges(
+            token_hash TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            expires_at INTEGER NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS customer_mfa_recovery_codes(
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            code_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            used_at TEXT,
+            PRIMARY KEY(user_id,code_hash)
+        );
+        CREATE TABLE IF NOT EXISTS admin_mfa_recovery_codes(
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            code_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            used_at TEXT,
+            PRIMARY KEY(user_id,code_hash)
+        );
         CREATE TABLE IF NOT EXISTS oauth_states(
             state_hash TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             expires_at INTEGER NOT NULL
@@ -174,6 +346,18 @@ def init_db():
             theme TEXT NOT NULL DEFAULT 'dark',
             pricing_multiplier REAL NOT NULL DEFAULT 1.0,
             updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS workspace_service_prices(
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            service_code TEXT NOT NULL,
+            label TEXT NOT NULL,
+            minimum_price INTEGER NOT NULL CHECK(minimum_price > 0),
+            maximum_price INTEGER CHECK(maximum_price IS NULL OR maximum_price >= minimum_price),
+            currency_code TEXT NOT NULL,
+            price_unit TEXT NOT NULL CHECK(price_unit IN ('one_time','monthly')),
+            description TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(user_id,service_code)
         );
         CREATE TABLE IF NOT EXISTS customer_feedback(
             id TEXT PRIMARY KEY,
@@ -239,6 +423,17 @@ def init_db():
         add_column(c, "billing_orders", "exchange_rate", "TEXT")
         add_column(c, "billing_orders", "phone_number", "TEXT")
         add_column(c, "users", "google_subject", "TEXT")
+        add_column(c, "users", "admin_totp_secret", "TEXT")
+        add_column(c, "users", "admin_totp_pending_secret", "TEXT")
+        add_column(c, "users", "admin_totp_pending_expires", "INTEGER")
+        add_column(c, "users", "admin_totp_pending_attempts", "INTEGER NOT NULL DEFAULT 0")
+        add_column(c, "users", "admin_totp_last_counter", "INTEGER")
+        add_column(c, "users", "customer_totp_secret", "TEXT")
+        add_column(c, "users", "customer_totp_pending_secret", "TEXT")
+        add_column(c, "users", "customer_totp_pending_expires", "INTEGER")
+        add_column(c, "users", "customer_totp_pending_attempts", "INTEGER NOT NULL DEFAULT 0")
+        add_column(c, "users", "customer_totp_last_counter", "INTEGER")
+        add_column(c, "mfa_login_challenges", "mfa_type", "TEXT NOT NULL DEFAULT 'admin'")
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_subject ON users(google_subject) WHERE google_subject IS NOT NULL")
         add_column(c, "leads", "contact_phone", "TEXT")
         add_column(c, "leads", "source_url", "TEXT")
@@ -278,8 +473,21 @@ def ensure_billing_account(c, user_id: str):
     return account
 
 
+def user_has_unlimited_access(c, user_id: str) -> bool:
+    """Resolve admin entitlement from the server-side verified identity and MFA state."""
+    row = c.execute(
+        "SELECT id,email,google_subject,admin_totp_secret FROM users WHERE id=?",
+        (user_id,),
+    ).fetchone()
+    if not row or not user_is_admin(dict(row)):
+        return False
+    return bool(row["admin_totp_secret"]) if ADMIN_MFA_REQUIRED else True
+
+
 def require_credits(user_id: str, amount: int):
     with db() as c:
+        if user_has_unlimited_access(c, user_id):
+            return
         account = ensure_billing_account(c, user_id)
         if int(account["monthly_credits"]) + int(account["purchased_credits"]) < amount:
             raise HTTPException(402, "Not enough MCAS credits. Choose a monthly plan or buy a credit pack.")
@@ -289,6 +497,11 @@ def debit_credits(user_id: str, amount: int, reason: str, reference: Optional[st
     if amount <= 0: return
     with db() as c:
         c.execute("BEGIN IMMEDIATE")
+        if user_has_unlimited_access(c, user_id):
+            audit(c, user_id, "billing.admin_unlimited_usage", {
+                "amount": amount, "reason": reason[:100], "reference": reference,
+            })
+            return
         account = ensure_billing_account(c, user_id)
         monthly, purchased = int(account['monthly_credits']), int(account['purchased_credits'])
         if monthly + purchased < amount:
@@ -441,13 +654,45 @@ def current_user(request: Request):
     if not token:
         raise HTTPException(401, "Sign in required")
     with db() as c:
-        row = c.execute("""SELECT users.id,users.email,users.google_subject FROM sessions
+        row = c.execute("""SELECT users.id,users.email,users.google_subject,users.customer_totp_secret FROM sessions
             JOIN users ON users.id=sessions.user_id
             WHERE token_hash=? AND expires_at>?""",
             (token_hash(token), int(time.time()))).fetchone()
     if not row:
         raise HTTPException(401, "Session expired; sign in again")
-    return dict(row)
+    identity = dict(row)
+    if CUSTOMER_MFA_REQUIRED and not user_is_admin(identity) and not identity.get("customer_totp_secret"):
+        raise HTTPException(403, "Customer MFA setup is required. Sign in again to secure this workspace.")
+    return identity
+
+def current_identity_for_mfa_setup(request: Request):
+    """Allow Google-verified accounts to reach only MFA setup endpoints before enrollment."""
+    token = request.cookies.get(COOKIE)
+    if not token:
+        raise HTTPException(401, "Sign in required")
+    with db() as c:
+        row = c.execute(
+            """SELECT users.id,users.email,users.google_subject,users.customer_totp_secret
+               FROM sessions JOIN users ON users.id=sessions.user_id
+               WHERE token_hash=? AND expires_at>?""",
+            (token_hash(token), int(time.time())),
+        ).fetchone()
+    if not row:
+        raise HTTPException(401, "Session expired; sign in again")
+    identity = dict(row)
+    if IS_PROD and not identity.get("google_subject"):
+        raise HTTPException(403, "Customer MFA setup requires a verified Google identity.")
+    if user_is_admin(identity):
+        raise HTTPException(403, "Use administrator MFA settings for this account.")
+    return identity
+
+
+def require_configured_customer(user: dict):
+    if IS_PROD and not user.get("google_subject"):
+        raise HTTPException(403, "Customer MFA requires a verified Google identity.")
+    if user_is_admin(user):
+        raise HTTPException(403, "Administrator accounts must use administrator MFA.")
+    return user
 
 def user_is_admin(user: dict) -> bool:
     """Only explicitly allowlisted identities with a verified Google link are admins in production."""
@@ -461,9 +706,7 @@ def user_is_admin(user: dict) -> bool:
     return str(user.get("email", "")).strip().lower() in allowed
 
 def require_admin(user: dict):
-    if not user_is_admin(user):
-        raise HTTPException(403, "Administrator access is not enabled for this account.")
-    return user
+    return require_admin_mfa(user)
 
 def owned_lead(c, lead_id, uid):
     row = c.execute("SELECT * FROM leads WHERE id=? AND user_id=?", (lead_id, uid)).fetchone()
@@ -509,6 +752,9 @@ async def security_middleware(request: Request, call_next):
     token = request.cookies.get(COOKIE, "")
     if path in {"/api/auth/login", "/api/auth/register", "/api/auth/google"}:
         category, cap = "auth", 8
+    elif path in {"/api/auth/mfa", "/api/admin/mfa/setup", "/api/admin/mfa/verify",
+                    "/api/customer/mfa/setup", "/api/customer/mfa/verify"}:
+        category, cap = "account_mfa", 12
     elif path == "/api/assistant/draft":
         category, cap = "ai", 6
     elif path == "/api/feedback":
@@ -638,6 +884,26 @@ class WorkspacePreferencesIn(BaseModel):
     theme: Literal["dark", "light", "system"]
     pricing_multiplier: float = Field(ge=0.5, le=5.0)
 
+class ServicePriceItemIn(BaseModel):
+    service_code: str = Field(min_length=3, max_length=40)
+    minimum_price: int = Field(ge=1, le=1_000_000_000)
+    maximum_price: Optional[int] = Field(default=None, ge=1, le=1_000_000_000)
+    price_unit: Literal["one_time", "monthly"]
+
+
+class ServicePricesIn(BaseModel):
+    currency_code: str = Field(pattern=r"^[A-Z]{3}$")
+    items: list[ServicePriceItemIn] = Field(min_length=8, max_length=8)
+
+
+class MfaCodeIn(BaseModel):
+    code: str = Field(min_length=6, max_length=64, pattern=r"^[A-Za-z0-9_-]{6,64}$")
+
+
+class AdminMfaSetupIn(BaseModel):
+    bootstrap_token: str = Field(min_length=32, max_length=200)
+
+
 class AIIn(BaseModel):
     lead_id: Optional[str] = None
     task: str = Field(default="email", max_length=30)
@@ -712,6 +978,7 @@ def google_authenticate(payload: GoogleSignInIn, response: Response, request: Re
         raise HTTPException(401, str(exc))
     email, subject = identity["email"], identity["sub"]
     session = secrets.token_urlsafe(36)
+    challenge = None
     uid = None
     try:
         with db() as c:
@@ -732,15 +999,389 @@ def google_authenticate(payload: GoogleSignInIn, response: Response, request: Re
                           (uid, email, unusable_password, now(), subject))
                 audit(c, uid, "account.created_google")
             c.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
-            c.execute("INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?,?,?)",
-                      (token_hash(session), uid, stamp + SESSION_SECONDS))
-            audit(c, uid, "account.google_login")
+            c.execute("DELETE FROM mfa_login_challenges WHERE user_id=?", (uid,))
+            admin_identity = {"id": uid, "email": email, "google_subject": subject}
+            mfa_row = c.execute(
+                "SELECT admin_totp_secret,customer_totp_secret FROM users WHERE id=?",
+                (uid,),
+            ).fetchone()
+            is_admin_identity = user_is_admin(admin_identity)
+            mfa_type = None
+            if ADMIN_MFA_REQUIRED and is_admin_identity and mfa_row and mfa_row["admin_totp_secret"]:
+                mfa_type = "admin"
+            elif CUSTOMER_MFA_REQUIRED and not is_admin_identity and mfa_row and mfa_row["customer_totp_secret"]:
+                mfa_type = "customer"
+            if mfa_type:
+                challenge = secrets.token_urlsafe(32)
+                c.execute(
+                    """INSERT INTO mfa_login_challenges(token_hash,user_id,expires_at,attempts,mfa_type)
+                       VALUES(?,?,?,0,?)""",
+                    (mfa_challenge_hash(challenge), uid, stamp + 300, mfa_type),
+                )
+                audit(c, uid, mfa_type + ".mfa_challenge_issued")
+            else:
+                c.execute("INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?,?,?)",
+                          (token_hash(session), uid, stamp + SESSION_SECONDS))
+                audit(c, uid, "account.google_login")
     except sqlite3.IntegrityError:
         raise HTTPException(409, "This Google account could not be linked. Contact support.")
+    if challenge:
+        response.set_cookie("mcas_mfa_challenge", challenge, max_age=300, httponly=True,
+                            secure=IS_PROD, samesite="strict", path="/")
+        return {"mfa_required": True, "mfa_type": mfa_type, "email": email,
+                "message": "Enter your authenticator code or a one-time recovery code to finish signing in."}
     response.set_cookie(COOKIE, session, max_age=SESSION_SECONDS, httponly=True,
                         secure=IS_PROD, samesite="lax", path="/")
     set_csrf(response)
-    return {"id": uid, "email": email, "is_admin": user_is_admin({"email": email, "google_subject": subject})}
+    customer_setup_required = (
+        CUSTOMER_MFA_REQUIRED and not user_is_admin({"email": email, "google_subject": subject})
+        and not bool(mfa_row and mfa_row["customer_totp_secret"])
+    )
+    return {"id": uid, "email": email, "is_admin": user_is_admin({"email": email, "google_subject": subject}),
+            "customer_mfa_setup_required": customer_setup_required}
+
+@app.get("/api/customer/mfa/status")
+def customer_mfa_status(user=Depends(current_identity_for_mfa_setup)):
+    require_configured_customer(user)
+    with db() as connection:
+        row = connection.execute(
+            """SELECT customer_totp_secret,customer_totp_pending_secret,
+                      customer_totp_pending_expires FROM users WHERE id=?""",
+            (user["id"],),
+        ).fetchone()
+        recovery_count = connection.execute(
+            "SELECT COUNT(*) FROM customer_mfa_recovery_codes WHERE user_id=? AND used_at IS NULL",
+            (user["id"],),
+        ).fetchone()[0]
+    return {
+        "enabled": bool(row and row["customer_totp_secret"]),
+        "setup_pending": bool(row and row["customer_totp_pending_secret"]
+                              and int(row["customer_totp_pending_expires"] or 0) > int(time.time())),
+        "required": CUSTOMER_MFA_REQUIRED,
+        "unused_recovery_codes": int(recovery_count),
+        "message": "Customer MFA protects your MCAS workspace. Recovery codes are single-use.",
+    }
+
+
+@app.post("/api/customer/mfa/setup")
+def customer_mfa_setup(user=Depends(current_identity_for_mfa_setup)):
+    require_configured_customer(user)
+    with db() as connection:
+        row = connection.execute(
+            "SELECT customer_totp_secret FROM users WHERE id=?",
+            (user["id"],),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Customer account not found.")
+        if row["customer_totp_secret"]:
+            raise HTTPException(409, "Customer MFA is already enabled. Sign in with an authenticator or unused recovery code.")
+        secret = generate_totp_secret()
+        connection.execute(
+            """UPDATE users SET customer_totp_pending_secret=?,customer_totp_pending_expires=?,
+               customer_totp_pending_attempts=0 WHERE id=?""",
+            (encrypt_mfa_secret(secret, "MCAS_CUSTOMER_MFA_ENCRYPTION_KEY"),
+             int(time.time()) + 600, user["id"]),
+        )
+        connection.execute("DELETE FROM customer_mfa_recovery_codes WHERE user_id=?", (user["id"],))
+        audit(connection, user["id"], "customer.mfa_setup_started")
+    label = urllib.parse.quote("MCAS customer:" + user["email"])
+    uri = "otpauth://totp/" + label + "?" + urllib.parse.urlencode({
+        "secret": secret, "issuer": "MCAS", "algorithm": "SHA1", "digits": 6, "period": 30
+    })
+    return {
+        "secret": secret,
+        "otpauth_uri": uri,
+        "expires_in_seconds": 600,
+        "message": "Add this key to your authenticator app. Setup expires in 10 minutes. The secret is displayed once.",
+    }
+
+
+@app.post("/api/customer/mfa/verify")
+def customer_mfa_verify(payload: MfaCodeIn, response: Response,
+                        user=Depends(current_identity_for_mfa_setup)):
+    require_configured_customer(user)
+    failure = None
+    recovery_codes = []
+    session = None
+    with db() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            """SELECT customer_totp_pending_secret,customer_totp_pending_expires,
+                      customer_totp_pending_attempts,customer_totp_secret
+               FROM users WHERE id=?""",
+            (user["id"],),
+        ).fetchone()
+        if not row or row["customer_totp_secret"]:
+            failure = (409, "Customer MFA is already enabled or setup is unavailable.")
+        elif (not row["customer_totp_pending_secret"]
+              or int(row["customer_totp_pending_expires"] or 0) <= int(time.time())):
+            failure = (409, "MFA setup has expired. Start setup again.")
+        elif int(row["customer_totp_pending_attempts"] or 0) >= 5:
+            connection.execute(
+                """UPDATE users SET customer_totp_pending_secret=NULL,
+                   customer_totp_pending_expires=NULL,customer_totp_pending_attempts=0 WHERE id=?""",
+                (user["id"],),
+            )
+            audit(connection, user["id"], "customer.mfa_setup_locked")
+            failure = (429, "Too many incorrect codes. Setup was cancelled; start again.")
+        else:
+            secret = decrypt_mfa_secret(
+                row["customer_totp_pending_secret"], "MCAS_CUSTOMER_MFA_ENCRYPTION_KEY"
+            )
+            counter = totp_counter_for_code(secret, payload.code)
+            if counter is None:
+                attempts = int(row["customer_totp_pending_attempts"] or 0) + 1
+                connection.execute(
+                    "UPDATE users SET customer_totp_pending_attempts=? WHERE id=?",
+                    (attempts, user["id"]),
+                )
+                if attempts >= 5:
+                    connection.execute(
+                        """UPDATE users SET customer_totp_pending_secret=NULL,
+                           customer_totp_pending_expires=NULL,customer_totp_pending_attempts=0 WHERE id=?""",
+                        (user["id"],),
+                    )
+                    audit(connection, user["id"], "customer.mfa_setup_locked")
+                    failure = (429, "Five incorrect codes were entered. Setup was cancelled.")
+                else:
+                    audit(connection, user["id"], "customer.mfa_setup_code_failed", {"attempts": attempts})
+                    failure = (422, "The authenticator code is incorrect. Check your device clock.")
+            else:
+                connection.execute(
+                    """UPDATE users SET customer_totp_secret=customer_totp_pending_secret,
+                       customer_totp_pending_secret=NULL,customer_totp_pending_expires=NULL,
+                       customer_totp_pending_attempts=0,customer_totp_last_counter=? WHERE id=?""",
+                    (counter, user["id"]),
+                )
+                connection.execute("DELETE FROM customer_mfa_recovery_codes WHERE user_id=?", (user["id"],))
+                for _ in range(10):
+                    code = secrets.token_urlsafe(12)
+                    recovery_codes.append(code)
+                    connection.execute(
+                        "INSERT INTO customer_mfa_recovery_codes(user_id,code_hash,created_at) VALUES(?,?,?)",
+                        (user["id"], hashlib.sha256(code.encode()).hexdigest(), now()),
+                    )
+                # Rotate the limited enrollment session into a fresh full session.
+                connection.execute("DELETE FROM sessions WHERE user_id=?", (user["id"],))
+                session = secrets.token_urlsafe(36)
+                connection.execute(
+                    "INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?,?,?)",
+                    (token_hash(session), user["id"], int(time.time()) + SESSION_SECONDS),
+                )
+                audit(connection, user["id"], "customer.mfa_enabled",
+                      {"recovery_code_count": len(recovery_codes)})
+    if failure:
+        raise HTTPException(failure[0], failure[1])
+    response.delete_cookie(COOKIE, path="/", httponly=True, secure=IS_PROD, samesite="lax")
+    response.set_cookie(COOKIE, session, max_age=SESSION_SECONDS, httponly=True,
+                        secure=IS_PROD, samesite="lax", path="/")
+    set_csrf(response)
+    return {
+        "enabled": True,
+        "recovery_codes": recovery_codes,
+        "message": "Customer MFA is enabled. Save these recovery codes securely; each can be used once.",
+    }
+
+
+@app.get("/api/admin/mfa/status")
+def admin_mfa_status(user=Depends(current_user)):
+    require_configured_admin(user)
+    with db() as c:
+        row = c.execute(
+            "SELECT admin_totp_secret,admin_totp_pending_secret,admin_totp_pending_expires FROM users WHERE id=?",
+            (user["id"],),
+        ).fetchone()
+        recovery_count = c.execute(
+            "SELECT COUNT(*) FROM admin_mfa_recovery_codes WHERE user_id=? AND used_at IS NULL",
+            (user["id"],),
+        ).fetchone()[0]
+    return {
+        "enabled": bool(row and row["admin_totp_secret"]),
+        "setup_pending": bool(row and row["admin_totp_pending_secret"]
+                              and int(row["admin_totp_pending_expires"] or 0) > int(time.time())),
+        "required": ADMIN_MFA_REQUIRED,
+        "unused_recovery_codes": int(recovery_count),
+        "message": "Use an authenticator app for administrator sign-in. Recovery codes are single-use.",
+    }
+
+
+@app.post("/api/admin/mfa/setup")
+def admin_mfa_setup(payload: AdminMfaSetupIn, user=Depends(current_user)):
+    require_configured_admin(user)
+    bootstrap = os.getenv("MCAS_ADMIN_BOOTSTRAP_TOKEN", "").strip()
+    if len(bootstrap) < 32 or not hmac.compare_digest(bootstrap, payload.bootstrap_token):
+        raise HTTPException(403, "The administrator bootstrap token is invalid or not configured.")
+    with db() as c:
+        row = c.execute(
+            "SELECT admin_totp_secret FROM users WHERE id=?",
+            (user["id"],),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Administrator account not found.")
+        if row["admin_totp_secret"]:
+            raise HTTPException(409, "Administrator MFA is already enabled. Use recovery or the authenticator at sign-in.")
+        secret = generate_totp_secret()
+        c.execute(
+            """UPDATE users SET admin_totp_pending_secret=?,admin_totp_pending_expires=?,
+               admin_totp_pending_attempts=0 WHERE id=?""",
+            (encrypt_mfa_secret(secret), int(time.time()) + 600, user["id"]),
+        )
+        c.execute("DELETE FROM admin_mfa_recovery_codes WHERE user_id=?", (user["id"],))
+        audit(c, user["id"], "admin.mfa_setup_started")
+    label = urllib.parse.quote("MCAS:" + user["email"])
+    uri = "otpauth://totp/" + label + "?" + urllib.parse.urlencode({
+        "secret": secret, "issuer": "MCAS", "algorithm": "SHA1", "digits": 6, "period": 30
+    })
+    return {
+        "secret": secret,
+        "otpauth_uri": uri,
+        "expires_in_seconds": 600,
+        "message": "Add this key to your authenticator app. Setup expires in 10 minutes. The secret is displayed only once.",
+    }
+
+
+@app.post("/api/admin/mfa/verify")
+def admin_mfa_verify(payload: MfaCodeIn, response: Response, user=Depends(current_user)):
+    require_configured_admin(user)
+    failure = None
+    recovery_codes = []
+    with db() as c:
+        c.execute("BEGIN IMMEDIATE")
+        row = c.execute(
+            """SELECT admin_totp_pending_secret,admin_totp_pending_expires,
+                      admin_totp_pending_attempts,admin_totp_secret
+               FROM users WHERE id=?""",
+            (user["id"],),
+        ).fetchone()
+        if not row or row["admin_totp_secret"]:
+            failure = (409, "Administrator MFA is already enabled or setup is unavailable.")
+        elif not row["admin_totp_pending_secret"] or int(row["admin_totp_pending_expires"] or 0) <= int(time.time()):
+            failure = (409, "MFA setup has expired. Start setup again.")
+        elif int(row["admin_totp_pending_attempts"] or 0) >= 5:
+            c.execute(
+                """UPDATE users SET admin_totp_pending_secret=NULL,
+                   admin_totp_pending_expires=NULL,admin_totp_pending_attempts=0 WHERE id=?""",
+                (user["id"],),
+            )
+            audit(c, user["id"], "admin.mfa_setup_locked")
+            failure = (429, "Too many incorrect codes. Setup was cancelled; start again.")
+        else:
+            secret = decrypt_mfa_secret(row["admin_totp_pending_secret"])
+            counter = totp_counter_for_code(secret, payload.code)
+            if counter is None:
+                attempts = int(row["admin_totp_pending_attempts"] or 0) + 1
+                c.execute(
+                    "UPDATE users SET admin_totp_pending_attempts=? WHERE id=?",
+                    (attempts, user["id"]),
+                )
+                if attempts >= 5:
+                    c.execute(
+                        """UPDATE users SET admin_totp_pending_secret=NULL,
+                           admin_totp_pending_expires=NULL,admin_totp_pending_attempts=0 WHERE id=?""",
+                        (user["id"],),
+                    )
+                    audit(c, user["id"], "admin.mfa_setup_locked")
+                    failure = (429, "Five incorrect codes were entered. Setup was cancelled.")
+                else:
+                    audit(c, user["id"], "admin.mfa_setup_code_failed", {"attempts": attempts})
+                    failure = (422, "The authenticator code is incorrect. Check your device clock.")
+            else:
+                c.execute(
+                    """UPDATE users SET admin_totp_secret=admin_totp_pending_secret,
+                       admin_totp_pending_secret=NULL,admin_totp_pending_expires=NULL,
+                       admin_totp_pending_attempts=0,admin_totp_last_counter=? WHERE id=?""",
+                    (counter, user["id"]),
+                )
+                c.execute("DELETE FROM admin_mfa_recovery_codes WHERE user_id=?", (user["id"],))
+                for _ in range(10):
+                    code = secrets.token_urlsafe(12)
+                    recovery_codes.append(code)
+                    c.execute(
+                        "INSERT INTO admin_mfa_recovery_codes(user_id,code_hash,created_at) VALUES(?,?,?)",
+                        (user["id"], hashlib.sha256(code.encode()).hexdigest(), now()),
+                    )
+                c.execute("DELETE FROM sessions WHERE user_id=?", (user["id"],))
+                c.execute("DELETE FROM mfa_login_challenges WHERE user_id=?", (user["id"],))
+                audit(c, user["id"], "admin.mfa_enabled", {"recovery_code_count": len(recovery_codes)})
+    if failure:
+        raise HTTPException(failure[0], failure[1])
+    response.delete_cookie(COOKIE, path="/", httponly=True, secure=IS_PROD, samesite="lax")
+    response.delete_cookie(CSRF_COOKIE, path="/", secure=IS_PROD, samesite="strict")
+    return {
+        "enabled": True,
+        "recovery_codes": recovery_codes,
+        "message": "Administrator MFA is enabled. Save these recovery codes somewhere secure; each can be used once. You have been signed out and must sign in again.",
+    }
+
+
+@app.post("/api/auth/mfa")
+def complete_admin_mfa_login(payload: MfaCodeIn, request: Request, response: Response):
+    challenge = request.cookies.get("mcas_mfa_challenge", "")
+    if not challenge:
+        raise HTTPException(401, "The administrator sign-in challenge is missing or expired. Sign in again.")
+    challenge_hash = mfa_challenge_hash(challenge)
+    failure = None
+    session = None
+    user_id = None
+    email = None
+    with db() as c:
+        c.execute("BEGIN IMMEDIATE")
+        row = c.execute(
+            """SELECT u.id,u.email,u.google_subject,u.admin_totp_secret,
+                      u.customer_totp_secret,ch.expires_at,ch.attempts,ch.mfa_type
+               FROM mfa_login_challenges ch JOIN users u ON u.id=ch.user_id
+               WHERE ch.token_hash=?""",
+            (challenge_hash,),
+        ).fetchone()
+        if not row or int(row["expires_at"]) <= int(time.time()):
+            c.execute("DELETE FROM mfa_login_challenges WHERE token_hash=?", (challenge_hash,))
+            failure = (401, "The administrator sign-in challenge has expired. Sign in again.")
+        elif row["mfa_type"] == "admin" and (
+            not row["admin_totp_secret"] or not user_is_admin(dict(row))
+        ):
+            c.execute("DELETE FROM mfa_login_challenges WHERE token_hash=?", (challenge_hash,))
+            failure = (403, "Administrator MFA is not available for this identity.")
+        elif row["mfa_type"] == "customer" and (
+            not CUSTOMER_MFA_REQUIRED or not row["customer_totp_secret"]
+            or user_is_admin(dict(row))
+        ):
+            c.execute("DELETE FROM mfa_login_challenges WHERE token_hash=?", (challenge_hash,))
+            failure = (403, "Customer MFA is not available for this identity.")
+        elif int(row["attempts"]) >= 5:
+            c.execute("DELETE FROM mfa_login_challenges WHERE token_hash=?", (challenge_hash,))
+            failure = (429, "Too many authenticator attempts. Sign in again.")
+        elif not (
+            verify_admin_mfa_code(c, row["id"], decrypt_mfa_secret(row["admin_totp_secret"]), payload.code)
+            if row["mfa_type"] == "admin"
+            else verify_customer_mfa_code(c, row["id"],
+                decrypt_mfa_secret(row["customer_totp_secret"], "MCAS_CUSTOMER_MFA_ENCRYPTION_KEY"),
+                payload.code)
+        ):
+            attempts = int(row["attempts"]) + 1
+            if attempts >= 5:
+                c.execute("DELETE FROM mfa_login_challenges WHERE token_hash=?", (challenge_hash,))
+            else:
+                c.execute("UPDATE mfa_login_challenges SET attempts=? WHERE token_hash=?",
+                          (attempts, challenge_hash))
+            failure = (401, "The authenticator or unused recovery code is incorrect.")
+        else:
+            user_id = row["id"]
+            email = row["email"]
+            c.execute("DELETE FROM mfa_login_challenges WHERE user_id=?", (user_id,))
+            c.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+            session = secrets.token_urlsafe(36)
+            c.execute("INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?,?,?)",
+                      (token_hash(session), user_id, int(time.time()) + SESSION_SECONDS))
+            audit(c, user_id, "account.login_mfa")
+    if failure:
+        raise HTTPException(failure[0], failure[1])
+    response.delete_cookie("mcas_mfa_challenge", path="/", httponly=True, secure=IS_PROD, samesite="strict")
+    response.set_cookie(COOKIE, session, max_age=SESSION_SECONDS, httponly=True,
+                        secure=IS_PROD, samesite="lax", path="/")
+    set_csrf(response)
+    return {"id": user_id, "email": email, "is_admin": row["mfa_type"] == "admin",
+            "mfa_verified": True, "mfa_type": row["mfa_type"]}
+
 
 def validate_email(email: Optional[str]):
     if email is None or email == "":
@@ -786,11 +1427,27 @@ def login(payload: LoginIn, response: Response, request: Request):
         if not row or not verify_password(payload.password, row["password_hash"]):
             log_security_event("auth.login_failed", request)
             raise HTTPException(401, "Email or password is incorrect")
-        # Rotate active sessions on successful login to reduce stale-session risk.
+        # Rotate active sessions on successful login. Configured administrators must
+        # complete a second factor before a normal authenticated session is issued.
         c.execute("DELETE FROM sessions WHERE user_id=?", (row["id"],))
-        session = secrets.token_urlsafe(36)
-        c.execute("INSERT INTO sessions VALUES(?,?,?)", (token_hash(session), row["id"], int(time.time()) + SESSION_SECONDS))
-        audit(c, row["id"], "account.login")
+        c.execute("DELETE FROM mfa_login_challenges WHERE user_id=?", (row["id"],))
+        if ADMIN_MFA_REQUIRED and is_configured_admin_email(row["email"]) and row["admin_totp_secret"]:
+            challenge = secrets.token_urlsafe(32)
+            c.execute(
+                "INSERT INTO mfa_login_challenges(token_hash,user_id,expires_at,attempts) VALUES(?,?,?,0)",
+                (mfa_challenge_hash(challenge), row["id"], int(time.time()) + 300),
+            )
+            audit(c, row["id"], "admin.mfa_challenge_issued")
+        else:
+            challenge = None
+            session = secrets.token_urlsafe(36)
+            c.execute("INSERT INTO sessions VALUES(?,?,?)", (token_hash(session), row["id"], int(time.time()) + SESSION_SECONDS))
+            audit(c, row["id"], "account.login")
+    if challenge:
+        response.set_cookie("mcas_mfa_challenge", challenge, max_age=300, httponly=True,
+                            secure=IS_PROD, samesite="strict", path="/")
+        return {"mfa_required": True, "email": normalized_email,
+                "message": "Enter your six-digit authenticator code or a one-time recovery code to finish signing in."}
     response.set_cookie(COOKIE, session, max_age=SESSION_SECONDS, httponly=True,
                         secure=IS_PROD, samesite="lax", path="/")
     set_csrf(response)
@@ -799,11 +1456,15 @@ def login(payload: LoginIn, response: Response, request: Request):
 @app.post("/api/auth/logout")
 def logout(request: Request, response: Response):
     token = request.cookies.get(COOKIE)
-    if token:
-        with db() as c:
+    challenge = request.cookies.get("mcas_mfa_challenge", "")
+    with db() as c:
+        if token:
             c.execute("DELETE FROM sessions WHERE token_hash=?", (token_hash(token),))
+        if challenge:
+            c.execute("DELETE FROM mfa_login_challenges WHERE token_hash=?", (mfa_challenge_hash(challenge),))
     response.delete_cookie(COOKIE, path="/", httponly=True, secure=IS_PROD, samesite="lax")
     response.delete_cookie(CSRF_COOKIE, path="/", secure=IS_PROD, samesite="strict")
+    response.delete_cookie("mcas_mfa_challenge", path="/", httponly=True, secure=IS_PROD, samesite="strict")
     return {"ok": True}
 
 @app.get("/api/auth/me")
@@ -2583,6 +3244,88 @@ def update_workspace_preferences(payload: WorkspacePreferencesIn, user=Depends(c
     return workspace_preferences_for(user["id"])
 
 
+SERVICE_PRICE_DEFAULTS = (
+    ("website_audit", "Website audit", 3500, 8000, "one_time",
+     "Bounded technical review, evidence, prioritised findings and recommendations. Not a penetration test or certification."),
+    ("repair_sprint", "Repair sprint", 5000, 20000, "one_time",
+     "A limited, agreed set of fixes to an existing website."),
+    ("landing_page", "Landing page", 15000, 25000, "one_time",
+     "One mobile-first conversion page with a contact or WhatsApp enquiry action."),
+    ("starter_website", "Starter business website", 25000, 45000, "one_time",
+     "Typically 3–5 pages, responsive layout and foundational SEO."),
+    ("professional_website", "Professional website", 50000, 95000, "one_time",
+     "Typically 6–12 pages, custom design, forms and agreed content structure."),
+    ("small_ecommerce", "Small e-commerce", 70000, 150000, "one_time",
+     "Product catalogue, cart, checkout and an agreed payment integration."),
+    ("custom_portal", "Custom portal / workflow", 150000, None, "one_time",
+     "Discovery and a written technical scope are required before quotation."),
+    ("website_care", "Website care", 4000, 12000, "monthly",
+     "Agreed maintenance, update and backup checks with defined support limits."),
+)
+SERVICE_PRICE_CODES = {item[0] for item in SERVICE_PRICE_DEFAULTS}
+
+
+def workspace_service_prices_for(user_id: str) -> dict:
+    stamp = now()
+    prefs = workspace_preferences_for(user_id)
+    with db() as c:
+        for code, label, minimum, maximum, unit, description in SERVICE_PRICE_DEFAULTS:
+            c.execute(
+                """INSERT OR IGNORE INTO workspace_service_prices
+                   (user_id,service_code,label,minimum_price,maximum_price,currency_code,price_unit,description,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                (user_id, code, label, minimum, maximum, "KES", unit, description, stamp),
+            )
+        rows = c.execute(
+            """SELECT service_code,label,minimum_price,maximum_price,currency_code,
+                      price_unit,description,updated_at
+               FROM workspace_service_prices WHERE user_id=? ORDER BY rowid""",
+            (user_id,),
+        ).fetchall()
+    return {"workspace_currency_code": prefs["currency_code"], "items": [dict(row) for row in rows]}
+
+
+@app.get("/api/workspace/service-prices")
+@app.get("/api/services/pricing")
+def get_workspace_service_prices(user=Depends(current_user)):
+    return workspace_service_prices_for(user["id"])
+
+
+@app.put("/api/workspace/service-prices")
+def update_workspace_service_prices(payload: ServicePricesIn, user=Depends(current_user)):
+    codes = [item.service_code for item in payload.items]
+    if len(set(codes)) != len(codes) or set(codes) != SERVICE_PRICE_CODES:
+        raise HTTPException(422, "Submit each supported service exactly once.")
+    for item in payload.items:
+        if item.maximum_price is not None and item.maximum_price < item.minimum_price:
+            raise HTTPException(422, "A maximum price cannot be lower than its minimum price.")
+    currency = payload.currency_code.upper()
+    supported_currencies = set(COUNTRY_CURRENCIES.values()) | {"USD", "EUR", "GBP", "KES"}
+    if currency not in supported_currencies:
+        raise HTTPException(422, "Choose a supported ISO currency for the service catalogue.")
+    stamp = now()
+    definitions = {row[0]: row for row in SERVICE_PRICE_DEFAULTS}
+    with db() as c:
+        for item in payload.items:
+            default = definitions[item.service_code]
+            c.execute(
+                """INSERT INTO workspace_service_prices
+                   (user_id,service_code,label,minimum_price,maximum_price,currency_code,price_unit,description,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(user_id,service_code) DO UPDATE SET
+                     minimum_price=excluded.minimum_price,
+                     maximum_price=excluded.maximum_price,
+                     currency_code=excluded.currency_code,
+                     updated_at=excluded.updated_at""",
+                (user["id"], item.service_code, default[1], item.minimum_price,
+                 item.maximum_price, currency, item.price_unit, default[5], stamp),
+            )
+        audit(c, user["id"], "workspace.service_prices_updated", {
+            "currency_code": currency, "service_count": len(payload.items),
+        })
+    return workspace_service_prices_for(user["id"])
+
+
 _FX_RATE_CACHE: dict = {"rates": None, "valid_until": 0, "updated_at": None}
 
 
@@ -2915,6 +3658,28 @@ def updates_status(user=Depends(current_user)):
         ),
         "releases": [
             {
+                "version": "1.4.0",
+                "title": "Customer account protection",
+                "summary": "Requires customer authenticator MFA in production with separate encrypted secrets, limited pre-enrollment access and single-use recovery codes.",
+                "changes": [
+                    "Google-verified customer accounts must enrol an authenticator before opening MCAS workspace data.",
+                    "Returning customers complete an authenticator or one-time recovery-code challenge after Google sign-in.",
+                    "Unenrolled customer sessions can access only customer MFA setup endpoints; workspace, prospect, billing and integration routes remain blocked.",
+                    "Customer authenticator secrets use a separate server-side encryption key from administrator MFA."
+                ]
+            },
+            {
+                "version": "1.3.0",
+                "title": "Workspace service pricing and administrator security",
+                "summary": "Adds tenant-owned editable service pricing and production administrator authenticator MFA with one-time recovery codes.",
+                "changes": [
+                    "Administrators can edit their workspace website-service price catalogue; the Services & Pricing view reflects the saved values.",
+                    "Production administrator access requires an allowlisted Google-verified identity and authenticator MFA.",
+                    "Administrator usage is unlimited without subscriptions or credit purchases after MFA enrollment, with usage audit events.",
+                    "Production readiness controls distinguish implemented controls from infrastructure and provider actions that still require external verification."
+                ]
+            },
+            {
                 "version": "1.2.0",
                 "title": "AI-assisted Product Improvement",
                 "summary": "Adds consent-based AI analysis of customer feedback and saved, prioritised improvement proposals.",
@@ -3133,13 +3898,24 @@ def admin_maintenance(user=Depends(current_user)):
         count = int(category_counts.get(category, 0))
         if count:
             recommendations.append({"area": label, "count": count, "action": action})
+    with db() as c:
+        admin_security = c.execute(
+            "SELECT admin_totp_secret FROM users WHERE id=?",
+            (user["id"],),
+        ).fetchone()
+    admin_mfa_enabled = bool(admin_security and admin_security["admin_totp_secret"])
     controls = [
-        {"name": "Automated test workflow", "status": "configured", "detail": "The repository CI workflow runs Python tests, JavaScript syntax checks and dependency auditing. Review the latest run in GitHub Actions before release."},
-        {"name": "CodeQL security analysis", "status": "configured", "detail": "CodeQL is configured for Python and JavaScript with a scheduled weekly analysis. Check the GitHub Security tab for actual findings."},
-        {"name": "Dependabot dependency updates", "status": "configured", "detail": "Weekly dependency update pull requests are configured. Review and test every proposed update before merging."},
-        {"name": "AI feedback improvement analysis", "status": "configured" if os.getenv("AI_API_BASE_URL") and os.getenv("AI_API_KEY") and os.getenv("AI_MODEL") else "not_configured", "detail": "An administrator can analyse only feedback for which the customer explicitly opted in. MCAS saves prioritised proposals and test ideas; it does not generate, merge or deploy code."},
-        {"name": "Customer account MFA", "status": "not_implemented", "detail": "MFA for MCAS customer accounts has not been implemented in this build."},
-        {"name": "Encrypted off-site backups", "status": "external_action", "detail": "Configure backups with the hosting provider and test a restore. This dashboard cannot verify your backup provider."},
+        {"name": "Automated test workflow", "status": "manual", "detail": "GitHub Actions is configured to run the suite. This dashboard does not fetch live results; the exact candidate commit must show all required checks passing."},
+        {"name": "CodeQL security analysis", "status": "configured", "detail": "The repository has a CodeQL workflow. Review actual alerts and the latest completed scan in GitHub Security before launch."},
+        {"name": "Dependabot dependency updates", "status": "configured", "detail": "Dependency update automation is configured. Review, test and merge updates deliberately; do not auto-deploy dependency changes."},
+        {"name": "Google verified customer identity", "status": "configured" if bool(os.getenv("GOOGLE_CLIENT_ID", "").strip()) else "not_configured", "detail": "Production password registration and password login are disabled. Google ID tokens must have a verified email; customers recover account access through Google."},
+        {"name": "Administrator authenticator MFA", "status": "configured" if admin_mfa_enabled else "not_configured", "detail": "Production admin tools and unlimited admin usage require an allowlisted verified Google identity and an enrolled TOTP authenticator. Recovery codes are single-use."},
+        {"name": "Customer authenticator MFA", "status": "configured" if CUSTOMER_MFA_REQUIRED and os.getenv("MCAS_CUSTOMER_MFA_ENCRYPTION_KEY", "").strip() else "not_configured", "detail": "Production requires a separate MCAS customer TOTP factor after Google-verified sign-in. Unenrolled accounts are limited to MFA setup routes; enabled accounts need TOTP or a single-use recovery code at sign-in."},
+        {"name": "Database scale-out", "status": "not_implemented", "detail": "This backend currently uses SQLite and is designed for one application instance with a persistent disk. Move to managed PostgreSQL and test migrations before multi-instance or high-volume production."},
+        {"name": "Shared production rate limiting", "status": "not_implemented", "detail": "Rate-limit counters currently use the application database. A shared Redis limiter is required before running multiple app instances."},
+        {"name": "Encrypted off-site backups", "status": "external_action", "detail": "Configure encrypted backups with the hosting provider and perform a documented restore test. This dashboard cannot verify your backup provider."},
+        {"name": "Independent security assessment", "status": "external_action", "detail": "No independent penetration test has been performed by MCAS. Commission an external assessment and resolve findings before public commercial launch."},
+        {"name": "Production payment approval and settlement", "status": "external_action", "detail": "Payment billing is disabled by default. Merchant approval, sandbox tests, live credentials, webhook delivery, reconciliation and a real settlement test must be completed externally."},
         {"name": "Production deployment approval", "status": "manual", "detail": "A human administrator must review, test and approve production releases. Automatic self-deployment is disabled."}
     ]
     return {
@@ -3272,6 +4048,12 @@ def billing_provider_ready() -> bool:
 @app.get('/api/billing/status')
 def billing_status(user=Depends(current_user)):
     with db() as c:
+        is_admin_account = user_is_admin(user)
+        is_unlimited_admin = user_has_unlimited_access(c, user['id'])
+        admin_mfa_enrolled = bool(c.execute(
+            "SELECT admin_totp_secret FROM users WHERE id=?",
+            (user["id"],),
+        ).fetchone()["admin_totp_secret"])
         account = ensure_billing_account(c, user['id'])
         orders = c.execute(
             'SELECT id,item_type,item_code,amount_kes,currency,status,created_at,amount_usd_cents,provider_amount,provider_currency,payment_method,exchange_rate FROM billing_orders WHERE user_id=? ORDER BY created_at DESC LIMIT 10',
@@ -3290,6 +4072,10 @@ def billing_status(user=Depends(current_user)):
         'monthly_credits': int(account['monthly_credits']),
         'purchased_credits': int(account['purchased_credits']),
         'total_credits': int(account['monthly_credits']) + int(account['purchased_credits']),
+        'is_admin_account': is_admin_account,
+        'is_unlimited_admin': is_unlimited_admin,
+        'admin_mfa_required': ADMIN_MFA_REQUIRED if is_admin_account else False,
+        'admin_mfa_enrolled': admin_mfa_enrolled if is_admin_account else False,
         'period_start': account['period_start'],
         'period_end': account['period_end'],
         'billing_enabled': configured,
@@ -3394,6 +4180,8 @@ def billing_credit_history(
 
 @app.post('/api/billing/checkout')
 def billing_checkout(payload: BillingCheckoutIn, user=Depends(current_user)):
+    if user_is_admin(user):
+        raise HTTPException(403, "Administrator accounts do not purchase MCAS plans or credit packs. Complete authenticator enrollment to unlock administrator tools.")
     catalog = USD_PLANS if payload.item_type == 'subscription' else USD_CREDIT_PACKS
     product = catalog.get(payload.item_code)
     if not product:

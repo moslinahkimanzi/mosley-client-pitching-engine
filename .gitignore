@@ -5,3 +5,9 @@ __pycache__/
 *.db
 .pytest_cache/
 .DS_Store
+
+# Local databases, backups and sensitive environment copies
+/data/
+/backups/
+.env.backup*
+*.before-*
