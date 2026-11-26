@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo, available_timezones
 from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from backend.routers.legal import router as legal_router
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
@@ -3699,3 +3700,5 @@ def billing_return(order_id: str = Query(min_length=1,max_length=100), user=Depe
 @app.get('/healthz')
 def healthz():
     return {'status': 'ok', 'service': 'mcas', 'release': '1.0'}
+
+app.include_router(legal_router)
