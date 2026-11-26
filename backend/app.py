@@ -1254,7 +1254,34 @@ def safe_site_fetch(initial_url):
             except HTTPException:
                 raise
             except Exception as fallback_exc:
-                raise HTTPException(502, f"Website could not be checked safely ({type(fallback_exc).__name__})")
+                err_name = type(fallback_exc).__name__
+                return {
+                    "url": url,
+                    "http_status": 0,
+                    "content_type": "unavailable",
+                    "response_time_ms": round((time.perf_counter() - started) * 1000),
+                    "security_headers": {},
+                    "title": None,
+                    "has_viewport_meta": None,
+                    "has_meta_description": None,
+                    "has_h1": None,
+                    "has_form": None,
+                    "has_lang": None,
+                    "images_total": 0,
+                    "images_missing_alt": 0,
+                    "forms_total": 0,
+                    "form_controls_total": 0,
+                    "form_controls_without_label": 0,
+                    "mixed_content_references": 0,
+                    "canonical_url": None,
+                    "links": [],
+                    "public_emails": [],
+                    "public_phones": [],
+                    "note": (
+                        f"Target server or WAF/bot-protection blocked automated inspection ({err_name}). "
+                        "Domain resolved to a verified public IP, so the site is not confirmed offline—manual browser verification recommended."
+                    ),
+                }
     raise HTTPException(502, "Too many redirects")
 
 
