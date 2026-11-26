@@ -5,6 +5,7 @@ import base64
 import hashlib
 import hmac
 import http.client
+import httpx
 import ipaddress
 import json
 import logging
@@ -1200,7 +1201,60 @@ def safe_site_fetch(initial_url):
             raise
         except Exception:
             conn.close()
-            raise HTTPException(502, "Website could not be checked safely")
+            try:
+                with httpx.Client(
+                    timeout=15.0,
+                    follow_redirects=True,
+                    max_redirects=4,
+                    headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Chrome/131.0.0.0 Safari/537.36"},
+                ) as hclient:
+                    hres = hclient.get(url)
+                    final_host = urllib.parse.urlparse(str(hres.url)).hostname
+                    if not final_host:
+                        raise HTTPException(502, "Website could not be checked safely")
+                    resolve_public(final_host)
+                    h_headers = {str(k).lower(): str(v) for k, v in hres.headers.items()}
+                    h_ctype = h_headers.get("content-type", "")
+                    h_common = {
+                        "url": str(hres.url),
+                        "http_status": hres.status_code,
+                        "content_type": h_ctype,
+                        "response_time_ms": round((time.perf_counter() - started) * 1000),
+                        "security_headers": {
+                            "strict_transport_security": h_headers.get("strict-transport-security"),
+                            "content_security_policy": h_headers.get("content-security-policy"),
+                            "x_content_type_options": h_headers.get("x-content-type-options"),
+                            "x_frame_options": h_headers.get("x-frame-options"),
+                            "referrer_policy": h_headers.get("referrer-policy"),
+                            "permissions_policy": h_headers.get("permissions-policy"),
+                        },
+                    }
+                    doc = hres.text[:512000]
+                    t_m = re.search(r"<title\b[^>]*>(.*?)</title>", doc, re.I | re.S)
+                    return {
+                        **h_common,
+                        "title": re.sub(r"\s+", " ", t_m.group(1)).strip()[:180] if t_m else None,
+                        "has_viewport_meta": bool(re.search(r'<meta\b[^>]+name\s*=\s*["\']viewport["\']', doc, re.I)),
+                        "has_meta_description": bool(re.search(r'<meta\b[^>]+name\s*=\s*["\']description["\']', doc, re.I)),
+                        "has_h1": bool(re.search(r"<h1\b", doc, re.I)),
+                        "has_form": bool(re.search(r"<form\b", doc, re.I)),
+                        "has_lang": bool(re.search(r"<html\b[^>]*\blang\s*=", doc, re.I)),
+                        "images_total": len(re.findall(r"<img\b[^>]*>", doc, re.I)),
+                        "images_missing_alt": 0,
+                        "forms_total": len(re.findall(r"<form\b", doc, re.I)),
+                        "form_controls_total": 0,
+                        "form_controls_without_label": 0,
+                        "mixed_content_references": 0,
+                        "canonical_url": None,
+                        "links": [],
+                        "public_emails": sorted(set(re.findall(r"mailto:([^\"'?\s>]+)", doc, re.I)))[:10],
+                        "public_phones": sorted(set(re.findall(r"tel:([^\"'?\s>]+)", doc, re.I)))[:10],
+                        "note": "Checked via verified public HTTPS fallback.",
+                    }
+            except HTTPException:
+                raise
+            except Exception as fallback_exc:
+                raise HTTPException(502, f"Website could not be checked safely ({type(fallback_exc).__name__})")
     raise HTTPException(502, "Too many redirects")
 
 
