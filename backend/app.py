@@ -3423,8 +3423,8 @@ def billing_status(user=Depends(current_user)):
     payment_methods = dict(catalog.get('payment_methods') or {})
     payment_methods['card'] = {
         'currency': 'USD',
-        'available': False,
-        'label': 'Card payments are not enabled in this launch.',
+        'available': bool(configured),
+        'label': 'International USD card checkout via Flutterwave.' if configured else 'Card checkout enables once Flutterwave live keys and MCAS_BILLING_ENABLED=true are set.',
     }
     return {
         'plan': account['plan_code'],
