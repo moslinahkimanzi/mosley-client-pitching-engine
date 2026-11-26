@@ -3412,6 +3412,8 @@ def billing_provider_ready() -> bool:
 
 @app.get('/api/billing/status')
 def billing_status(user=Depends(current_user)):
+    prefs = workspace_preferences_for(user['id'])
+    ws_currency = str(prefs.get('currency_code') or 'KES').upper()
     with db() as c:
         is_unlimited_admin = user_has_unlimited_access(c, user['id'])
         account = ensure_billing_account(c, user['id'])
@@ -3439,7 +3441,7 @@ def billing_status(user=Depends(current_user)):
         'provider': 'Flutterwave' if configured else None,
         'payment_methods': payment_methods,
         'mpesa_quote': catalog['mpesa_quote'],
-        'currency': 'USD',
+        'currency': ws_currency,
         'renewal_policy': 'Subscriptions last 30 days and renew only after a new customer-initiated, verified payment. Automatic recurring charges are not enabled.',
         'plans': catalog['plans'],
         'credit_packs': catalog['credit_packs'],

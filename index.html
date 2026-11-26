@@ -435,4 +435,76 @@ body[data-theme="light"] .status{color:#1b4b80}
 <div id="toast" class="notice" role="status" aria-live="polite"></div>
 </main></div></div>
 <script src="https://accounts.google.com/gsi/client" async defer></script><script src="/assets/app.js?v=usd-mpesa-billing-v5-20261124" defer></script><div id="mcas-legal-footer" style="text-align:center;padding:18px;font-size:13px;color:#9fb0cc;"><a href="/privacy" style="color:#38bdf8;margin:0 10px;">Privacy Policy</a> &bull; <a href="/terms" style="color:#38bdf8;margin:0 10px;">Terms of Service</a> &bull; <a href="/data-processing" style="color:#38bdf8;margin:0 10px;">Data Processing (DPA)</a></div>
+
+<script id="mcas-workspace-currency-sync">
+(function() {
+  // Base KES exchange multipliers (1 KES -> target currency)
+  const KES_TO = {
+    KES: 1,
+    USD: 1 / 129.0,
+    EUR: 1 / 139.0,
+    GBP: 1 / 163.0,
+    AED: 3.6725 / 129.0,
+    UGX: 3700.0 / 129.0,
+    TZS: 2650.0 / 129.0,
+    NGN: 1550.0 / 129.0,
+    ZAR: 18.2 / 129.0,
+    CAD: 1.39 / 129.0,
+    AUD: 1.53 / 129.0,
+    INR: 84.5 / 129.0
+  };
+
+  function fmt(kesAmount, cur) {
+    const rate = KES_TO[cur] || (1 / 129.0);
+    const val = kesAmount * rate;
+    const digits = (cur === 'KES' || cur === 'UGX' || cur === 'TZS' || cur === 'NGN') ? 0 : 2;
+    return cur + ' ' + val.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  }
+
+  async function syncWorkspaceCurrency() {
+    try {
+      const res = await fetch('/api/workspace/preferences', { credentials: 'same-origin' });
+      if (!res.ok) return;
+      const prefs = await res.json();
+      const cur = String(prefs.currency_code || 'KES').toUpperCase();
+      window.MCAS_WORKSPACE_CURRENCY = cur;
+
+      // 1. Update Proposal budget placeholder
+      const propBudget = document.getElementById('proposalBudget');
+      if (propBudget) propBudget.placeholder = 'e.g. ' + fmt(45000, cur);
+
+      // 2. Update Advisor pricing heading
+      document.querySelectorAll('h2').forEach(h => {
+        if (h.textContent.includes('Estimated website project value')) {
+          h.textContent = 'Estimated website project value (' + cur + ')';
+        }
+      });
+
+      // 3. Convert every KES metric/band element across service cards, billing, and advisor outputs
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+      let node;
+      while ((node = walker.nextNode())) {
+        const orig = node._mcasOrigText || node.nodeValue;
+        if (!/\bKES\s?[0-9]/.test(orig)) continue;
+        node._mcasOrigText = orig;
+        node.nodeValue = orig.replace(/KES\s?([0-9][0-9,]*(?:\.[0-9]+)?)/g, (_, numStr) => {
+          const kesVal = parseFloat(numStr.replace(/,/g, ''));
+          return isNaN(kesVal) ? _ : fmt(kesVal, cur);
+        });
+      }
+    } catch (e) {}
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    syncWorkspaceCurrency();
+    setTimeout(syncWorkspaceCurrency, 1200);
+    document.addEventListener('click', (e) => {
+      if (e.target && (e.target.id === 'saveWorkspacePreferences' || e.target.closest('button'))) {
+        setTimeout(syncWorkspaceCurrency, 600);
+      }
+    });
+  });
+})();
+</script>
+
 </body></html>
