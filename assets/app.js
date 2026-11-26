@@ -69,11 +69,19 @@ function renderBilling(){
  const method='mpesa';
  if($('billingMethod'))$('billingMethod').value='mpesa';
  const methodAvailable=billingMethodAvailable(method);
+ const wsCur=String(state.preferences?.currency_code||data.currency||'USD').toUpperCase();
+ const wsFxRate=Number(window.MCAS_FX_RATES?.[wsCur]||0);
  const price=plan=>{
   const cents=Number(plan.amount_usd_cents||0);
-  const usd='USD '+(cents/100).toFixed(2);
-  const rate=Number(data.mpesa_quote?.usd_kes_rate);
-  return method==='mpesa'&&Number.isFinite(rate)&&rate>0?usd+' · approx. KES '+Math.round((cents/100)*rate).toLocaleString():usd;
+  const usdVal=cents/100;
+  const usd='USD '+usdVal.toFixed(2);
+  const rate=Number(data.mpesa_quote?.usd_kes_rate||129);
+  if(wsCur==='KES'&&rate>0) return 'KES '+Math.round(usdVal*rate).toLocaleString()+' ('+usd+')';
+  if(wsCur!=='USD'&&wsFxRate>0){
+   const localVal=(usdVal*wsFxRate).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+   return wsCur+' '+localVal+' ('+usd+')';
+  }
+  return method==='mpesa'&&rate>0?usd+' · KES '+Math.round(usdVal*rate).toLocaleString():usd;
  };
  $('billingPlanCards').innerHTML=Object.entries(data.plans||{}).map(([code,plan])=>'<article class="card"><h3>'+esc(plan.name)+'</h3><div class="metric">'+price(plan)+'/30 days</div><p>'+Number(plan.credits||0).toLocaleString()+' included credits</p><button class="primary" data-billing-type="subscription" data-billing-code="'+esc(code)+'" '+(!methodAvailable?'disabled':'')+'>Choose '+esc(plan.name)+'</button></article>').join('');
  $('billingCreditCards').innerHTML=Object.entries(data.credit_packs||{}).map(([code,pack])=>'<article class="card"><h3>'+esc(pack.name)+'</h3><div class="metric">'+price(pack)+'</div><p>'+Number(pack.credits||0).toLocaleString()+' prepaid credits</p><button data-billing-type="credits" data-billing-code="'+esc(code)+'" '+(!methodAvailable?'disabled':'')+'>Buy credits</button></article>').join('');
@@ -158,7 +166,7 @@ function countryDisplay(code){try{return new Intl.DisplayNames([state.preference
 function localTimezone(){return Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC';}
 function renderWorkspaceSettings(){if(!state.regions||!state.preferences)return;const p=state.preferences;const country=$('prefCountry'),currency=$('prefCurrency'),timezone=$('prefTimezone'),language=$('prefLanguage');country.innerHTML=state.regions.countries.map(x=>'<option value=\"'+x.code+'\">'+esc(countryDisplay(x.code))+' ('+x.code+')</option>').join('');country.value=p.country_code;currency.innerHTML=state.regions.currencies.map(x=>'<option value=\"'+x+'\">'+x+'</option>').join('');currency.value=p.currency_code;timezone.innerHTML='<option value=\"auto\">Automatic (browser)</option>'+state.regions.timezones.map(x=>'<option value=\"'+esc(x)+'\">'+esc(x.replaceAll('_',' '))+'</option>').join('');timezone.value=p.timezone||'auto';language.innerHTML=state.regions.languages.map(x=>'<option value=\"'+x.code+'\">'+esc(x.name)+'</option>').join('');language.value=p.language_code;$('prefTheme').value=p.theme;$('prefMultiplier').value=Number(p.pricing_multiplier||1).toFixed(2);applyLanguage(p.language_code);}
 function currentPreferenceForm(){return {country_code:$('prefCountry').value,currency_code:$('prefCurrency').value,timezone:$('prefTimezone').value,language_code:$('prefLanguage').value,theme:$('prefTheme').value,pricing_multiplier:Number($('prefMultiplier').value)};}
-async function saveWorkspacePreferences(){try{const prefs=currentPreferenceForm();if(!Number.isFinite(prefs.pricing_multiplier)||prefs.pricing_multiplier<0.5||prefs.pricing_multiplier>5)throw new Error('Pricing adjustment must be between 0.5 and 5.0.');if(prefs.timezone==='auto')prefs.timezone=localTimezone();state.preferences=await api('/api/workspace/preferences',{method:'PUT',body:JSON.stringify(prefs)});applyTheme(state.preferences.theme);applyLanguage(state.preferences.language_code);$('researchRegionalNote').textContent='Searching in '+countryDisplay(state.preferences.country_code)+' ('+state.preferences.country_code+') using '+state.preferences.language_code.toUpperCase()+'. Change this under My workspace.';note('workspacePreferencesNotice','Workspace preferences saved.');}catch(e){note('workspacePreferencesNotice',e.message,true);}}
+async function saveWorkspacePreferences(){try{const prefs=currentPreferenceForm();if(!Number.isFinite(prefs.pricing_multiplier)||prefs.pricing_multiplier<0.5||prefs.pricing_multiplier>5)throw new Error('Pricing adjustment must be between 0.5 and 5.0.');if(prefs.timezone==='auto')prefs.timezone=localTimezone();state.preferences=await api('/api/workspace/preferences',{method:'PUT',body:JSON.stringify(prefs)});applyTheme(state.preferences.theme);applyLanguage(state.preferences.language_code);$('researchRegionalNote').textContent='Searching in '+countryDisplay(state.preferences.country_code)+' ('+state.preferences.country_code+') using '+state.preferences.language_code.toUpperCase()+'. Change this under My workspace.';if(typeof window.refreshMcasCurrencyUI==='function')await window.refreshMcasCurrencyUI();if(typeof loadBilling==='function')await loadBilling();note('workspacePreferencesNotice','Workspace preferences saved and applied across all pricing views.');}catch(e){note('workspacePreferencesNotice',e.message,true);}}
 $('prefCountry').addEventListener('change',()=>{const selected=state.regions.countries.find(x=>x.code===$('prefCountry').value);if(selected)$('prefCurrency').value=selected.currency;$('prefMultiplier').value=(regionalPriceDefaults[$('prefCountry').value]||1).toFixed(2);});
 $('prefTheme').addEventListener('change',()=>applyTheme($('prefTheme').value));$('prefLanguage').addEventListener('change',()=>applyLanguage($('prefLanguage').value));$('saveWorkspacePreferences').addEventListener('click',saveWorkspacePreferences);$('detectTimezone').addEventListener('click',()=>{$('prefTimezone').value=localTimezone();note('workspacePreferencesNotice','Detected time zone: '+localTimezone()+'. Save to apply it.');});
 
